@@ -665,6 +665,258 @@ async fn piper_extract_downloaded_archive(
     Ok(())
 }
 
+/// -----------------------------------------------------------------------
+/// Local LLM (llama.cpp) — powers the "smart dictionary" and future
+/// text-understanding features (summaries, explain-this-passage, etc.)
+///
+/// Layout mirrors the piper install so the setup story is identical:
+///   <APPDATA>/com.read.app/llm/
+///     llama-cli.exe        (or `llama-cli` on unix)
+///     models/
+///       qwen2.5-1.5b-instruct-q4_k_m.gguf
+///
+/// The user downloads a llama.cpp release binary from
+///   https://github.com/ggml-org/llama.cpp/releases
+/// and a small instruct GGUF (Qwen2.5-1.5B-Instruct is a good default) from
+/// Hugging Face, then drops both into this folder. Same reasoning as piper for
+/// not bundling: the binary + a usable model is 1-2 GB, and the size/quality
+/// tradeoff is a choice we don't want to make on the user's behalf.
+/// -----------------------------------------------------------------------
+
+fn llm_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    Ok(base.join("llm"))
+}
+
+fn llm_binary(root: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    let name = "llama-cli.exe";
+    #[cfg(not(target_os = "windows"))]
+    let name = "llama-cli";
+    root.join(name)
+}
+
+/// Metadata surfaced to the UI for a single installed GGUF model.
+#[derive(Serialize)]
+pub struct LlmModel {
+    /// Absolute path to the .gguf — passed back verbatim to `llm_explain`.
+    path: String,
+    /// User-facing label (the file stem).
+    name: String,
+    /// On-disk size, so the UI can show "1.1 GB" next to the model name.
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+pub struct LlmStatus {
+    binary_exists: bool,
+    binary_path: String,
+    models_dir: String,
+    models: Vec<LlmModel>,
+}
+
+#[tauri::command]
+fn llm_status(app: tauri::AppHandle) -> Result<LlmStatus, String> {
+    let root = llm_root(&app)?;
+    let models_dir = root.join("models");
+    // Create the folders on first look so "Open models folder" from the UI
+    // has somewhere to open on a fresh install — same as piper_status.
+    if !root.exists() {
+        fs::create_dir_all(&root).map_err(|e| format!("mkdir llm root: {e}"))?;
+    }
+    if !models_dir.exists() {
+        fs::create_dir_all(&models_dir).map_err(|e| format!("mkdir models: {e}"))?;
+    }
+
+    let binary_path = llm_binary(&root);
+    let binary_exists = binary_path.exists();
+
+    let mut models: Vec<LlmModel> = Vec::new();
+    if let Ok(read) = fs::read_dir(&models_dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("gguf") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let size_bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            models.push(LlmModel {
+                path: path.to_string_lossy().into_owned(),
+                name,
+                size_bytes,
+            });
+        }
+    }
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(LlmStatus {
+        binary_exists,
+        binary_path: binary_path.to_string_lossy().into_owned(),
+        models_dir: models_dir.to_string_lossy().into_owned(),
+        models,
+    })
+}
+
+/// Extract just the model's answer from llama-cli's stdout.
+///
+/// In single-turn conversation mode the CLI prints a startup banner, echoes
+/// the user turn (prefixed with `> `), then the generated reply, then a stats
+/// footer (`[ Prompt: … ]`) and `Exiting…`. Since we know the exact `prompt`
+/// we sent, the reply is reliably the text *after* the last echo of that
+/// prompt and *before* the footer — that boundary survives banner changes
+/// across llama.cpp builds far better than trying to blocklist banner lines.
+fn clean_llm_output(raw: &str, prompt: &str) -> String {
+    // 1. Drop everything up to and including the echoed prompt, if present.
+    //    Fall back to the last interactive `> ` marker, then to the raw text.
+    let after_prompt = raw
+        .rfind(prompt)
+        .map(|i| &raw[i + prompt.len()..])
+        .or_else(|| {
+            // Fallback: no verbatim prompt match. The interactive echo is a
+            // single line beginning with "\n> "; the reply starts on the next
+            // line, so skip past the newline that ends the echoed prompt line.
+            raw.rfind("\n> ").map(|i| {
+                let rest = &raw[i + 3..];
+                rest.find('\n').map_or(rest, |nl| &rest[nl + 1..])
+            })
+        })
+        .unwrap_or(raw);
+
+    // 2. Cut the trailing interactive chrome and any stray template tokens.
+    let mut out = after_prompt.to_string();
+    for marker in [
+        "[ Prompt:", "\nExiting", "Exiting...", "[end of text]",
+        "<|im_end|>", "<|eot_id|>", "</s>", "<end_of_turn>",
+    ] {
+        if let Some(idx) = out.find(marker) {
+            out.truncate(idx);
+        }
+    }
+
+    // 3. Strip a leading prompt glyph / whitespace the CLI may leave behind.
+    out.trim().trim_start_matches('>').trim().to_string()
+}
+
+/// Ask the local model to explain `word` *as it is used in* `sentence`.
+///
+/// This is the backing command for the smart dictionary: unlike the Free
+/// Dictionary API, it disambiguates the sense in context and can handle
+/// idioms, phrases, and technical terms the dictionary can't.
+///
+/// Async + spawn_blocking for the same reason as piper: a 1-2B model on CPU
+/// takes a few seconds to answer, and we can't block the UI thread that long.
+///
+/// We drive `llama-cli` in single-turn mode with `--jinja` so the model's own
+/// chat template (baked into the GGUF) is applied — that keeps instruct models
+/// behaving correctly without us hardcoding a per-model prompt format. stdin is
+/// wired to /dev/null so a build that doesn't understand `-st` gets EOF and
+/// exits rather than hanging forever waiting for interactive input.
+#[tauri::command]
+async fn llm_explain(
+    app: tauri::AppHandle,
+    word: String,
+    sentence: String,
+    model_path: String,
+    max_tokens: Option<u32>,
+) -> Result<String, String> {
+    let root = llm_root(&app)?;
+    let binary = llm_binary(&root);
+    if !binary.exists() {
+        return Err(format!(
+            "llama-cli not found at {}",
+            binary.to_string_lossy()
+        ));
+    }
+    let model = PathBuf::from(&model_path);
+    if !model.exists() {
+        return Err(format!("model not found at {model_path}"));
+    }
+
+    let word = word.trim().to_string();
+    if word.is_empty() {
+        return Err("no word/phrase to explain".into());
+    }
+    let n_predict = max_tokens.unwrap_or(200).clamp(32, 512);
+
+    // Fold instruction + context into one user turn; `--jinja` wraps it in the
+    // model's chat template.
+    // Kept to a single line (no embedded newlines): the CLI echoes the prompt
+    // verbatim and clean_llm_output slices on that echo, which is most reliable
+    // when the prompt is one line. We collapse any newlines in the sentence too.
+    let sentence_flat = sentence.trim().split_whitespace().collect::<Vec<_>>().join(" ");
+    let prompt = if sentence_flat.is_empty() {
+        format!(
+            "Explain the word or phrase '{word}' concisely for a reader. Give its meaning in \
+1-2 plain sentences, then one short example of use. Do not repeat this instruction."
+        )
+    } else {
+        format!(
+            "In the sentence below, explain what '{word}' means as it is used here. Give the \
+specific sense in 1-2 plain sentences. If it is an idiom, figure of speech, or technical term, \
+say so and give the plain meaning. Be concise and do not repeat the sentence back. \
+Sentence: {sentence_flat}"
+        )
+    };
+
+    let binary_for_task = binary.clone();
+    let model_for_task = model.clone();
+    let root_for_task = root.clone();
+    let prompt_for_task = prompt.clone(); // keep `prompt` for clean_llm_output below
+
+    let raw = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let mut cmd = Command::new(&binary_for_task);
+        cmd.arg("-m").arg(&model_for_task)
+            .arg("-st") // single user turn, then exit (no interactive loop)
+            .arg("--jinja") // apply the model's embedded chat template
+            .arg("--simple-io") // plain IO for subprocesses: no ANSI/cursor codes
+            .arg("--no-display-prompt")
+            .arg("-p").arg(&prompt_for_task)
+            .arg("-n").arg(n_predict.to_string())
+            .arg("-c").arg("4096")
+            .arg("--temp").arg("0.2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Keep model resolution of any sidecar files relative to the install
+        // root, mirroring how we run piper.
+        cmd.current_dir(&root_for_task);
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+
+        let output = cmd.output().map_err(|e| format!("spawn llama-cli: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
+            return Err(format!(
+                "llama-cli exit {}: {}",
+                output.status.code().unwrap_or(-1),
+                if tail.trim().is_empty() { "no output" } else { tail.trim() }
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+    .await
+    .map_err(|e| format!("task join: {e}"))??;
+
+    let cleaned = clean_llm_output(&raw, &prompt);
+    if cleaned.is_empty() {
+        return Err("model returned an empty answer".into());
+    }
+    Ok(cleaned)
+}
+
 /// Build a minimal PCM/WAV header around raw 16-bit mono samples.
 fn wrap_wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     let data_len = pcm.len() as u32;
@@ -709,8 +961,47 @@ pub fn run() {
             piper_file_size,
             piper_batch_synthesize,
             piper_cache_lookup,
-            piper_cache_delete_book
+            piper_cache_delete_book,
+            llm_status,
+            llm_explain
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_llm_output;
+
+    // Captured verbatim from `llama-cli b10091 -st --jinja --simple-io
+    // --no-display-prompt` — banner, echoed prompt, reply, stats footer.
+    const RAW: &str = "\n\nLoading model... \n\n\u{2584}\u{2584}\nbuild      : b10091\n\
+available commands:\n  /exit or Ctrl+C     stop or exit\n\n\n\
+> In the sentence below, explain what 'wound' means as it is used here. Sentence: The nurse wound the bandage around his arm.\n\
+The nurse wrapped the bandage around his arm.\n\n\
+[ Prompt: 156.0 t/s | Generation: 33.7 t/s ]\n\n\nExiting...\n";
+    const PROMPT: &str =
+        "In the sentence below, explain what 'wound' means as it is used here. \
+Sentence: The nurse wound the bandage around his arm.";
+
+    #[test]
+    fn extracts_reply_between_prompt_echo_and_footer() {
+        assert_eq!(
+            clean_llm_output(RAW, PROMPT),
+            "The nurse wrapped the bandage around his arm."
+        );
+    }
+
+    #[test]
+    fn strips_template_tokens_when_prompt_absent() {
+        // Fallback path: no prompt echo, just a reply with an EOG token.
+        let raw = "Hello there.<|im_end|>\n";
+        assert_eq!(clean_llm_output(raw, "unmatched-prompt"), "Hello there.");
+    }
+
+    #[test]
+    fn falls_back_to_interactive_marker() {
+        let raw = "banner junk\n> some prompt\nThe answer.\n[ Prompt: 1 t/s ]\n";
+        assert_eq!(clean_llm_output(raw, "no-match"), "The answer.");
+    }
 }

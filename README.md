@@ -20,6 +20,7 @@
 
 ### 🧠 Vocabulary Journal & Spaced Repetition (SRS)
 - **Instant Dictionary Lookup**: Select any word to instantly view definitions, phonetics, and usage (via Free Dictionary API).
+- **AI "Explain in Context"**: An optional local LLM (bundled `llama.cpp` + a small GGUF model) explains what a word means *as used in the sentence* — disambiguating senses, idioms, and technical terms, fully offline. See [AI Smart Dictionary Architecture](docs/ai-smart-dictionary-architecture.md).
 - **Contextual Flashcards**: Automatically saves the surrounding sentence context when adding words to your vocabulary list.
 - **SM-2 Flashcard Review System**: Built-in spaced repetition algorithm to review saved words with "Again", "Good", and "Easy" ratings.
 - **Daily Card Capping**: Intelligent daily limit (10 new cards/day) to prevent review pile overwhelm.
@@ -79,7 +80,7 @@ Read uses a decoupled architecture separating the lightweight native OS shell (R
 
 1. **Backend Shell (Rust / Tauri v2)**:
    - Location: [`src-tauri/`](file:///d:/One%20Drive/OneDrive%20-%20D%20F%20N%20TECHNOLOGY%20%28PVT%29%20LTD/Documents/personal/epub-reader/src-tauri/)
-   - **`lib.rs`**: Core Tauri commands for Piper TTS engine control (`piper_synthesize`, `piper_batch_synthesize`), model download manager (`piper_download_file`), voice catalogue indexing, and file unarchiving via system `curl` / `tar`.
+   - **`lib.rs`**: Core Tauri commands for Piper TTS engine control (`piper_synthesize`, `piper_batch_synthesize`), model download manager (`piper_download_file`), voice catalogue indexing, and file unarchiving via system `curl` / `tar`. Also hosts the local LLM smart-dictionary commands (`llm_status`, `llm_explain`) that drive a bundled `llama-cli` subprocess — see the [AI Smart Dictionary Architecture](docs/ai-smart-dictionary-architecture.md) doc for diagrams and the output-parsing pipeline.
    - **Tauri Plugins**: Uses `tauri-plugin-fs` for persistent app storage, `tauri-plugin-dialog` for native open dialogs, and `tauri-plugin-opener` for native folder navigation.
 
 2. **Frontend Layer (TypeScript / Vite)**:

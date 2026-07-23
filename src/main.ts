@@ -290,6 +290,8 @@ const el = {
   dictWord: $<HTMLHeadingElement>('dict-word'),
   dictPhonetic: $<HTMLSpanElement>('dict-phonetic'),
   dictMeanings: $<HTMLDivElement>('dict-meanings'),
+  dictAiBtn: $<HTMLButtonElement>('dict-ai-btn'),
+  dictAiOutput: $<HTMLDivElement>('dict-ai-output'),
 
   footnotePopover: $<HTMLDivElement>('footnote-popover'),
   footnoteContent: $<HTMLDivElement>('footnote-content'),
@@ -1779,6 +1781,7 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
       const wikiHtml = `<div>${escapeHtml(wikiData.extract)}</div>`;
       el.dictMeanings.innerHTML = wikiHtml;
       showDictPopover(x, y);
+      prepareAiExplain(wikiData.title);
       saveVocabEntry({ display: wikiData.title, definitionHtml: wikiHtml, phonetic: 'Wikipedia' });
       return;
     }
@@ -1802,6 +1805,7 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
     }
 
     showDictPopover(x, y);
+    prepareAiExplain(entry.word);
     saveVocabEntry({ display: entry.word, definitionHtml: el.dictMeanings.innerHTML, phonetic });
   } catch (err) {
     if ((err as any)?.name === 'AbortError') return;
@@ -1816,6 +1820,9 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
         : 'No definition found in either dictionary or Wikipedia.'
     }</div>`;
     showDictPopover(x, y);
+    // Even when the online sources whiff — including when we're fully offline —
+    // the local model still runs and can explain the word from context.
+    prepareAiExplain(cleanWord);
   }
 }
 
@@ -1833,6 +1840,80 @@ function hideDictPopover() {
   dictionaryLookupId++;              // any in-flight lookup becomes stale
   dictAbortController?.abort();      // cancel network work too
   dictAbortController = null;
+  resetAiExplain();
+}
+
+/* ------------------------------------------------------------------
+   Smart dictionary — "Explain in context" via the local LLM.
+
+   When a definition is shown and a local model is installed, we offer a
+   button that asks the model to explain the word *as used in this sentence*.
+   This picks up idioms, disambiguates senses, and even helps for words the
+   Free Dictionary API couldn't find. Entirely offline.
+   ------------------------------------------------------------------ */
+let aiExplainWord = '';
+let aiExplainSentence = '';
+let aiExplainInFlight = false;
+
+// Called right after a lookup shows the popover. Decides whether to offer the
+// AI button and stashes the word + its sentence for the click handler.
+function prepareAiExplain(word: string) {
+  aiExplainWord = word;
+  aiExplainSentence = pendingSelectionContext;
+  el.dictAiOutput.hidden = true;
+  el.dictAiOutput.textContent = '';
+  // Only offer the button when a model is actually installed and we have a
+  // real word — otherwise the click would just error.
+  const offer = isLlmReady() && !!word && word.trim().length > 0;
+  el.dictAiBtn.hidden = !offer;
+  el.dictAiBtn.disabled = false;
+  el.dictAiBtn.classList.remove('is-busy');
+}
+
+function resetAiExplain() {
+  aiExplainInFlight = false;
+  el.dictAiBtn.hidden = true;
+  el.dictAiBtn.disabled = false;
+  el.dictAiBtn.classList.remove('is-busy');
+  el.dictAiOutput.hidden = true;
+  el.dictAiOutput.textContent = '';
+}
+
+async function runAiExplain() {
+  if (aiExplainInFlight || !isLlmReady() || !aiExplainWord) return;
+  const model = llmStatus!.models[0];
+
+  aiExplainInFlight = true;
+  el.dictAiBtn.disabled = true;
+  el.dictAiBtn.classList.add('is-busy');
+  el.dictAiOutput.hidden = false;
+  el.dictAiOutput.textContent = 'Thinking…';
+
+  const word = aiExplainWord;
+  const sentence = aiExplainSentence;
+  try {
+    const answer = await invoke<string>('llm_explain', {
+      word,
+      sentence,
+      modelPath: model.path,
+    });
+    // Guard against a stale response after the user moved on to another word.
+    if (aiExplainWord !== word) return;
+    el.dictAiOutput.textContent = answer;   // textContent = XSS-safe
+  } catch (err) {
+    if (aiExplainWord !== word) return;
+    console.error('llm_explain failed:', err);
+    el.dictAiOutput.textContent = `Couldn't run the local model: ${String(err)}`;
+  } finally {
+    if (aiExplainWord === word) {
+      aiExplainInFlight = false;
+      el.dictAiBtn.disabled = false;
+      el.dictAiBtn.classList.remove('is-busy');
+      // Once we've shown an explanation, drop the button — a second click
+      // would just regenerate the same thing.
+      el.dictAiBtn.hidden = true;
+    }
+  }
 }
 
 function showSelectionPopover(pageX: number, pageY: number) {
@@ -3378,6 +3459,31 @@ interface PiperStatus {
 }
 
 let piperStatus: PiperStatus | null = null;
+
+// --- Local LLM (smart dictionary) -------------------------------------
+interface LlmModel { path: string; name: string; size_bytes: number; }
+interface LlmStatus {
+  binary_exists: boolean;
+  binary_path: string;
+  models_dir: string;
+  models: LlmModel[];
+}
+let llmStatus: LlmStatus | null = null;
+
+function isLlmReady(): boolean {
+  return !!llmStatus && llmStatus.binary_exists && llmStatus.models.length > 0;
+}
+
+async function refreshLlmStatus(): Promise<LlmStatus | null> {
+  try {
+    llmStatus = await invoke<LlmStatus>('llm_status');
+  } catch (err) {
+    console.warn('llm_status failed:', err);
+    llmStatus = null;
+  }
+  return llmStatus;
+}
+
 let piperAudio: HTMLAudioElement | null = null;
 let piperAudioUrl: string | null = null;
 // rAF handle for the highlight paint loop. See startPiperPaintLoop —
@@ -5109,6 +5215,10 @@ function wire() {
     e.stopPropagation();
     hideDictPopover();
   });
+  el.dictAiBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    runAiExplain();
+  });
   el.footnoteClose.addEventListener('click', (e) => {
     e.stopPropagation();
     hideFootnotePopover();
@@ -5262,6 +5372,10 @@ function boot() {
   applyGlobalTheme();
   wire();
   goToScreen('library');
+  // Probe for a local LLM in the background — never block startup on it.
+  // If nothing's installed, isLlmReady() stays false and the AI button
+  // simply never appears.
+  refreshLlmStatus();
 }
 
 boot();
