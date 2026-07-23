@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-screen="library">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Read</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <!-- ============================================ -->
+    <!-- LIBRARY SCREEN                                -->
+    <!-- ============================================ -->
+    <section class="screen library-screen" data-screen-name="library">
+      <header class="library-header">
+        <div class="library-brand">
+          <span class="brand-mark"></span>
+          <span class="brand-name">Read</span>
+        </div>
+        <div class="library-actions">
+          <button id="library-vocab-review-btn" class="ghost-btn library-vocab-btn" title="Review vocabulary across all books" hidden>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+            <span id="library-vocab-count" class="library-vocab-count">0</span>
+          </button>
+          <button id="library-theme-btn" class="ghost-btn" title="Cycle theme">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          </button>
+          <button id="import-btn" class="pill-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            <span>Add book</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="library-body">
+        <div class="library-title-row">
+          <h1 class="library-title">Your library</h1>
+          <span id="library-count" class="library-count"></span>
+        </div>
+
+        <!-- Empty state -->
+        <div id="library-empty" class="library-empty">
+          <div class="empty-illustration">
+            <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          </div>
+          <h2>Nothing here yet</h2>
+          <p>Add a book or document to start reading. Supports EPUB, PDF, TXT, and MD formats.</p>
+          <button id="import-btn-empty" class="pill-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            <span>Add your first book</span>
+          </button>
+        </div>
+
+        <!-- Book grid -->
+        <div id="library-grid" class="library-grid" hidden></div>
+      </div>
+    </section>
+
+    <!-- ============================================ -->
+    <!-- READER SCREEN                                 -->
+    <!-- ============================================ -->
+    <section class="screen reader-screen" data-screen-name="reader">
+      <!-- Auto-hiding top chrome -->
+      <div class="edge-sensor edge-sensor-top"></div>
+      <header class="reader-topbar" id="reader-topbar">
+        <div class="topbar-left">
+          <button id="back-to-library-btn" class="ghost-btn" title="Back to library">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+          </button>
+          <button id="toc-btn" class="ghost-btn" title="Contents">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h13M3 12h13M3 18h13M20 6h.01M20 12h.01M20 18h.01"/></svg>
+          </button>
+        </div>
+        <div class="topbar-center">
+          <span id="reader-book-title" class="reader-book-title"></span>
+          <div id="reader-stats" class="reader-stats" title="Reading Stats">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="stats-icon"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            <span id="stats-streak">0</span> <span class="dot-sep">·</span> <span id="stats-mins">0m</span>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <button id="tts-btn" class="ghost-btn" title="Read aloud (R)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10v4a1 1 0 0 0 1 1h3l5 4V5L7 9H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/></svg>
+          </button>
+          <button id="focus-mode-btn" class="ghost-btn" title="Focus reading mode (F)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+          </button>
+          <button id="bookmark-btn" class="ghost-btn" title="Toggle bookmark (B)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          </button>
+          <button id="typography-btn" class="ghost-btn" title="Typography">
+            <span class="aa-label">Aa</span>
+          </button>
+          <button id="theme-btn" class="ghost-btn" title="Cycle theme (T)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- Reader canvas -->
+      <div class="reader-stage">
+        <div id="viewer" class="viewer"></div>
+        <button id="prev-btn" class="edge-nav prev" aria-label="Previous">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <button id="next-btn" class="edge-nav next" aria-label="Next">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+
+      <!-- Auto-hiding bottom chrome (progress) -->
+      <div class="edge-sensor edge-sensor-bottom"></div>
+      <footer class="reader-bottombar" id="reader-bottombar">
+        <div class="progress-track" id="progress-track">
+          <div class="progress-fill" id="progress-fill"></div>
+          <div class="progress-thumb" id="progress-thumb"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="progress-chapter">—</span>
+          <span class="dot-sep">·</span>
+          <span id="progress-percent">0%</span>
+          <span class="dot-sep">·</span>
+          <span id="progress-remaining">—</span>
+        </div>
+      </footer>
+
+      <!-- TOC drawer -->
+      <aside class="drawer drawer-left" id="toc-drawer" hidden>
+        <div class="drawer-header">
+          <h3>Contents</h3>
+          <button id="close-toc-btn" class="ghost-btn" title="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="drawer-tabs">
+          <button class="tab-btn active" data-tab="toc">Chapters</button>
+          <button class="tab-btn" data-tab="bookmarks">Bookmarks</button>
+          <button class="tab-btn" data-tab="highlights">Highlights</button>
+          <button class="tab-btn" data-tab="vocab">Vocab</button>
+        </div>
+        <div class="drawer-body">
+          <ul id="toc-list" class="toc-list" data-panel="toc"></ul>
+          <ul id="bookmarks-list" class="marks-list" data-panel="bookmarks" hidden></ul>
+          <ul id="highlights-list" class="marks-list" data-panel="highlights" hidden></ul>
+          <div id="vocab-panel" class="vocab-panel" data-panel="vocab" hidden>
+            <div class="vocab-header">
+              <div class="vocab-stats">
+                <span id="vocab-count">0 words</span>
+                <span class="dot-sep">·</span>
+                <span id="vocab-due">0 due</span>
+              </div>
+              <button id="vocab-review-btn" class="pill-btn vocab-review-btn" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+                <span>Review</span>
+              </button>
+            </div>
+            <ul id="vocab-list" class="marks-list vocab-list"></ul>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Typography drawer -->
+      <aside class="drawer drawer-right" id="typography-drawer" hidden>
+        <div class="drawer-header">
+          <h3>Typography</h3>
+          <button id="close-typography-btn" class="ghost-btn" title="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="drawer-body typography-body">
+          <div class="control-group">
+            <label class="control-label">Appearance</label>
+            <button id="open-settings-btn" class="settings-trigger-btn">
+              <span>Theme Settings</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+            </button>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Font</label>
+            <div class="segment" data-control="font">
+              <button data-value="serif" style="font-family: 'Newsreader', serif;">Serif</button>
+              <button data-value="sans" style="font-family: 'Inter', sans-serif;">Sans</button>
+              <button data-value="mono" style="font-family: 'JetBrains Mono', monospace;">Mono</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Layout</label>
+            <div class="segment" data-control="layout">
+              <button data-value="paginated">Page</button>
+              <button data-value="spread">Spread</button>
+              <button data-value="scroll">Scroll</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Size</label>
+            <div class="stepper" data-control="size">
+              <button data-action="dec" aria-label="Smaller" title="Smaller (−)">A−</button>
+              <span id="size-value">100%</span>
+              <button data-action="inc" aria-label="Larger" title="Larger (+)">A+</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Line height</label>
+            <div class="segment" data-control="line" title="Cycle line spacing (\)">
+              <button data-value="compact" title="Packed lines">Compact</button>
+              <button data-value="normal">Normal</button>
+              <button data-value="relaxed" title="Spaced lines">Relaxed</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Margins</label>
+            <div class="segment" data-control="margin">
+              <button data-value="narrow" title="Narrower margins (])">Narrow</button>
+              <button data-value="medium">Medium</button>
+              <button data-value="wide" title="Wider margins ([)">Wide</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Focus tracker</label>
+            <div class="segment" data-control="focusTracker" title="Highlights the word or sentence under your cursor. Click to save it as a highlight.">
+              <button data-value="off">Off</button>
+              <button data-value="word">Word</button>
+              <button data-value="sentence">Sentence</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Read-aloud (TTS) control panel -->
+      <div class="focus-panel tts-panel" id="tts-panel" hidden>
+        <button id="tts-prev" class="focus-btn" title="Previous word">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20 9 12l10-8v16zM5 19V5"/></svg>
+        </button>
+        <button id="tts-toggle" class="focus-btn focus-toggle" title="Play / Pause (Space)">
+          <svg id="tts-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+          <svg id="tts-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+        </button>
+        <button id="tts-next" class="focus-btn" title="Next word">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4l10 8-10 8V4zM19 5v14"/></svg>
+        </button>
+        <div class="focus-sep"></div>
+        <div class="focus-speed">
+          <input type="range" id="tts-rate-slider" min="0.5" max="2" step="0.1" value="1" aria-label="Speech rate">
+          <span id="tts-rate-label">1.0×</span>
+        </div>
+        <div class="focus-sep"></div>
+        <select id="tts-engine" class="tts-voice tts-engine" aria-label="Engine">
+          <option value="system">System</option>
+          <option value="piper">Piper (neural)</option>
+        </select>
+        <select id="tts-voice" class="tts-voice" aria-label="Voice"></select>
+        <button id="tts-setup" class="focus-btn tts-setup-btn" title="Piper setup" hidden>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+        </button>
+        <label id="tts-natural-rate-label" class="tts-natural-rate" title="Preserve pitch when changing speed. Costs a small stutter on rate change." hidden>
+          <input type="checkbox" id="tts-natural-rate" />
+          <span>Natural</span>
+        </label>
+        <button id="tts-cache-btn" class="focus-btn tts-cache-btn" title="Cache this chapter for instant audiobook-style playback" hidden>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+        </button>
+        <div class="focus-sep"></div>
+        <button id="tts-close" class="focus-btn" title="Stop reading (Esc)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- Piper setup modal -->
+      <div id="piper-setup-modal" class="modal-backdrop" hidden>
+        <div class="modal-container piper-setup-container">
+          <div class="modal-header">
+            <div class="modal-header-left">
+              <h3>Neural voices (Piper)</h3>
+              <p>Local, high-quality text-to-speech. Runs offline once installed.</p>
+            </div>
+            <div class="modal-header-right">
+              <button id="close-piper-setup-btn" class="ghost-btn" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="modal-body piper-setup-body">
+            <div id="piper-error-banner" class="piper-error-banner" hidden>
+              <div class="piper-error-title">Install failed</div>
+              <pre id="piper-error-body" class="piper-error-body">—</pre>
+              <button id="piper-error-dismiss" class="pill-btn ghost">Dismiss</button>
+            </div>
+            <div class="piper-step">
+              <div class="piper-step-number">1</div>
+              <div class="piper-step-body">
+                <h4>Piper engine</h4>
+                <div class="piper-status" id="piper-binary-status">Checking…</div>
+                <div class="piper-actions">
+                  <button id="piper-install-binary-btn" class="pill-btn">Install</button>
+                  <button id="piper-cancel-binary-btn" class="pill-btn ghost" hidden>Cancel</button>
+                </div>
+                <div class="piper-progress" id="piper-binary-progress" hidden>
+                  <div class="piper-progress-bar"><span></span></div>
+                  <div class="piper-progress-label">—</div>
+                </div>
+              </div>
+            </div>
+            <div class="piper-step">
+              <div class="piper-step-number">2</div>
+              <div class="piper-step-body">
+                <h4>Voices</h4>
+                <div class="piper-status" id="piper-voices-status">Checking…</div>
+                <ul id="piper-voice-catalog" class="piper-voice-catalog"></ul>
+              </div>
+            </div>
+            <div class="piper-step">
+              <div class="piper-step-number">3</div>
+              <div class="piper-step-body">
+                <h4>Install location</h4>
+                <p class="piper-path" id="piper-path">—</p>
+                <div class="piper-actions">
+                  <button id="piper-open-folder-btn" class="pill-btn ghost">Open folder</button>
+                  <button id="piper-refresh-btn" class="pill-btn ghost">Re-check</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Focus reading mode control panel -->
+      <div class="focus-panel" id="focus-panel" hidden>
+        <button id="focus-prev" class="focus-btn" title="Previous word (←)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20 9 12l10-8v16zM5 19V5"/></svg>
+        </button>
+        <button id="focus-toggle" class="focus-btn focus-toggle" title="Play / Pause (Space)">
+          <svg id="focus-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+          <svg id="focus-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+        </button>
+        <button id="focus-next" class="focus-btn" title="Next word (→)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4l10 8-10 8V4zM19 5v14"/></svg>
+        </button>
+        <div class="focus-sep"></div>
+        <div class="focus-speed">
+          <input type="range" id="focus-speed-slider" min="120" max="800" step="20" value="300" aria-label="Words per minute">
+          <span id="focus-wpm">300 wpm</span>
+        </div>
+        <div class="focus-sep"></div>
+        <button id="focus-close" class="focus-btn" title="Exit focus mode (Esc)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- Selection popover for highlights -->
+      <div class="selection-popover" id="selection-popover" hidden>
+        <button data-color="yellow" class="hl-swatch hl-yellow" title="Yellow"></button>
+        <button data-color="green" class="hl-swatch hl-green" title="Green"></button>
+        <button data-color="blue" class="hl-swatch hl-blue" title="Blue"></button>
+        <button data-color="pink" class="hl-swatch hl-pink" title="Pink"></button>
+        <div class="popover-sep"></div>
+        <button id="popover-remove" class="popover-action" title="Remove">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+        </button>
+      </div>
+
+      <!-- Dictionary Popover -->
+      <div class="dict-popover" id="dict-popover" hidden>
+        <button class="popover-close" id="dict-close" aria-label="Close">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+        <div class="dict-header">
+          <h4 id="dict-word">Word</h4>
+          <span id="dict-phonetic" class="dict-phonetic"></span>
+        </div>
+        <div id="dict-meanings" class="dict-meanings"></div>
+      </div>
+
+      <!-- Footnote Popover -->
+      <div class="footnote-popover" id="footnote-popover" hidden>
+        <button class="popover-close" id="footnote-close" aria-label="Close">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+        <div class="footnote-content" id="footnote-content"></div>
+      </div>
+    </section>
+
+    <!-- Theme Settings Modal -->
+    <div id="settings-modal" class="modal-backdrop" hidden>
+      <div class="modal-container">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <h3>Appearance</h3>
+            <p>Choose light or dark appearance.</p>
+          </div>
+          <div class="modal-header-right">
+            <div class="custom-select">
+              <select id="appearance-select">
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </div>
+            <button id="close-settings-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        
+        <div class="modal-body">
+          <div class="section-title">
+            <h3>Theme</h3>
+            <p>Choose the colors used in reading view.</p>
+          </div>
+          
+          <div class="theme-grid">
+            <button class="theme-card" data-theme-val="default">
+              <h4>Default</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="flexoki">
+              <h4>Flexoki</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="ayu">
+              <h4>Ayu</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="catppuccin">
+              <h4>Catppuccin</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="everforest">
+              <h4>Everforest</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="gruvbox">
+              <h4>Gruvbox</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="nord">
+              <h4>Nord</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="rosepine">
+              <h4>Rosé Pine</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="solarized">
+              <h4>Solarized</h4>
+              <span class="theme-date">July 21, 2026</span>
+              <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vocabulary Review Modal -->
+    <div id="vocab-review-modal" class="modal-backdrop" hidden>
+      <div class="modal-container vocab-review-container">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <h3>Vocabulary Review</h3>
+            <p id="vocab-review-progress">—</p>
+          </div>
+          <div class="modal-header-right">
+            <button id="close-vocab-review-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="modal-body vocab-review-body">
+          <div id="vocab-review-empty" class="vocab-review-empty" hidden>
+            <h4>You're all caught up.</h4>
+            <p>Look up more words while reading — new cards appear here.</p>
+          </div>
+
+          <div id="vocab-review-card" class="vocab-card">
+            <div class="vocab-card-front">
+              <h2 id="vocab-card-word">—</h2>
+              <span id="vocab-card-phonetic" class="vocab-card-phonetic"></span>
+              <blockquote id="vocab-card-context" class="vocab-card-context" hidden></blockquote>
+              <span id="vocab-card-chapter" class="vocab-card-chapter"></span>
+            </div>
+            <div id="vocab-card-back" class="vocab-card-back" hidden>
+              <div id="vocab-card-definition" class="vocab-card-definition"></div>
+            </div>
+          </div>
+
+          <div id="vocab-review-actions-reveal" class="vocab-review-actions">
+            <button id="vocab-reveal-btn" class="pill-btn vocab-reveal-btn">Show definition</button>
+          </div>
+
+          <div id="vocab-review-actions-rate" class="vocab-review-actions rate" hidden>
+            <button class="vocab-rate-btn again" data-rating="1">
+              <span class="rate-label">Again</span>
+              <span class="rate-hint" id="vocab-hint-again">&lt; 1m</span>
+            </button>
+            <button class="vocab-rate-btn good" data-rating="3">
+              <span class="rate-label">Good</span>
+              <span class="rate-hint" id="vocab-hint-good">1d</span>
+            </button>
+            <button class="vocab-rate-btn easy" data-rating="5">
+              <span class="rate-label">Easy</span>
+              <span class="rate-hint" id="vocab-hint-easy">4d</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>
