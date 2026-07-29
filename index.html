@@ -7,7 +7,7 @@
     <title>Read</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;500&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,500;0,7..72,600;1,7..72,400&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Bitter:ital,wght@0,400;0,500;0,600;1,400&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
@@ -28,6 +28,12 @@
           </button>
           <button id="library-theme-btn" class="ghost-btn" title="Cycle theme">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          </button>
+          <button id="library-settings-btn" class="ghost-btn" title="Settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+          <button id="import-url-btn" class="ghost-btn" title="Save a web article in reader mode">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/></svg>
           </button>
           <button id="import-btn" class="pill-btn">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -74,6 +80,15 @@
           <button id="toc-btn" class="ghost-btn" title="Contents">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h13M3 12h13M3 18h13M20 6h.01M20 12h.01M20 18h.01"/></svg>
           </button>
+          <div id="pdf-zoom-group" class="pdf-zoom-group">
+            <button id="pdf-zoom-out-btn" class="ghost-btn" title="Zoom out">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/></svg>
+            </button>
+            <span id="pdf-zoom-value" class="pdf-zoom-value">100%</span>
+            <button id="pdf-zoom-in-btn" class="ghost-btn" title="Zoom in">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg>
+            </button>
+          </div>
         </div>
         <div class="topbar-center">
           <span id="reader-book-title" class="reader-book-title"></span>
@@ -89,8 +104,17 @@
           <button id="focus-mode-btn" class="ghost-btn" title="Focus reading mode (F)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
           </button>
+          <button id="chat-btn" class="ghost-btn" title="Chat about this page (local LLM)" hidden>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          </button>
+          <button id="pdf-dict-btn" class="ghost-btn" title="Look up a word (copy it from the PDF first, then click here)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h5"/></svg>
+          </button>
           <button id="bookmark-btn" class="ghost-btn" title="Toggle bookmark (B)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          </button>
+          <button id="open-original-btn" class="ghost-btn" title="Open original article in your browser" hidden>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>
           </button>
           <button id="typography-btn" class="ghost-btn" title="Typography">
             <span class="aa-label">Aa</span>
@@ -175,21 +199,25 @@
           <div class="control-group">
             <label class="control-label">Appearance</label>
             <button id="open-settings-btn" class="settings-trigger-btn">
-              <span>Theme Settings</span>
+              <span>Settings</span>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
             </button>
           </div>
 
           <div class="control-group">
             <label class="control-label">Font</label>
-            <div class="segment" data-control="font">
+            <div class="segment segment-fonts" data-control="font">
               <button data-value="serif" style="font-family: 'Newsreader', serif;">Serif</button>
+              <button data-value="literata" style="font-family: 'Literata', serif;">Literata</button>
+              <button data-value="lora" style="font-family: 'Lora', serif;">Lora</button>
+              <button data-value="bitter" style="font-family: 'Bitter', serif;">Bitter</button>
               <button data-value="sans" style="font-family: 'Inter', sans-serif;">Sans</button>
+              <button data-value="atkinson" style="font-family: 'Atkinson Hyperlegible', sans-serif;">Atkinson</button>
               <button data-value="mono" style="font-family: 'JetBrains Mono', monospace;">Mono</button>
             </div>
           </div>
 
-          <div class="control-group">
+          <div class="control-group" id="layout-control-group" title="Page/Spread pagination is specific to EPUB's renderer">
             <label class="control-label">Layout</label>
             <div class="segment" data-control="layout">
               <button data-value="paginated">Page</button>
@@ -227,10 +255,46 @@
 
           <div class="control-group">
             <label class="control-label">Focus tracker</label>
-            <div class="segment" data-control="focusTracker" title="Highlights the word or sentence under your cursor. Click to save it as a highlight.">
+            <div class="segment" data-control="focusTracker" title="Highlights the word or sentence under your cursor as a read-along guide.">
               <button data-value="off">Off</button>
               <button data-value="word">Word</button>
               <button data-value="sentence">Sentence</button>
+            </div>
+          </div>
+
+          <div class="control-divider"></div>
+
+          <div class="control-group">
+            <label class="control-label">Line width</label>
+            <div class="segment" data-control="measure" title="Cap the number of characters per line — long lines are tiring to read. Numbers are approximate characters.">
+              <button data-value="full">Full</button>
+              <button data-value="ch60">60</button>
+              <button data-value="ch70">70</button>
+              <button data-value="ch80">80</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Reading ruler</label>
+            <div class="segment" data-control="ruler" title="Dims everything except the line under your cursor, so you never lose your place.">
+              <button data-value="off">Off</button>
+              <button data-value="on">On</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Warmth</label>
+            <div class="slider-row">
+              <input type="range" id="warmth-slider" min="0" max="100" step="5" value="0" aria-label="Screen warmth">
+              <span id="warmth-value" class="slider-value">Off</span>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Brightness</label>
+            <div class="slider-row">
+              <input type="range" id="brightness-slider" min="40" max="100" step="5" value="100" aria-label="Screen brightness">
+              <span id="brightness-value" class="slider-value">100%</span>
             </div>
           </div>
         </div>
@@ -374,7 +438,12 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
         <div class="dict-header">
-          <h4 id="dict-word">Word</h4>
+          <div class="dict-header-title">
+            <h4 id="dict-word">Word</h4>
+            <button class="pronounce-btn" id="dict-pronounce-btn" title="Pronounce" hidden>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+            </button>
+          </div>
           <span id="dict-phonetic" class="dict-phonetic"></span>
         </div>
         <div id="dict-meanings" class="dict-meanings"></div>
@@ -383,6 +452,15 @@
           <span>Explain in context</span>
         </button>
         <div id="dict-ai-output" class="dict-ai-output" hidden></div>
+        <div class="dict-ai-actions" id="dict-ai-actions" hidden>
+          <button class="dict-ai-retry" id="dict-ai-retry" title="Try again — the model is non-deterministic, get a fresh explanation">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+          </button>
+          <button class="dict-ai-retry" id="dict-ai-examples-btn" title="Show other example usages of this word">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+          </button>
+        </div>
+        <div id="dict-ai-examples-output" class="dict-ai-output" hidden></div>
       </div>
 
       <!-- Footnote Popover -->
@@ -394,13 +472,13 @@
       </div>
     </section>
 
-    <!-- Theme Settings Modal -->
+    <!-- Settings Modal -->
     <div id="settings-modal" class="modal-backdrop" hidden>
       <div class="modal-container">
         <div class="modal-header">
           <div class="modal-header-left">
-            <h3>Appearance</h3>
-            <p>Choose light or dark appearance.</p>
+            <h3>Settings</h3>
+            <p>Appearance and local AI.</p>
           </div>
           <div class="modal-header-right">
             <div class="custom-select">
@@ -426,6 +504,41 @@
               <h4>Default</h4>
               <span class="theme-date">July 21, 2026</span>
               <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
+            </button>
+            <button class="theme-card" data-theme-val="parchment">
+              <h4>Parchment</h4>
+              <span class="theme-date">Easy on the eyes</span>
+              <p>Warm sepia paper tone that softens screen glare for long, comfortable reading sessions.</p>
+            </button>
+            <button class="theme-card" data-theme-val="almond">
+              <h4>Almond</h4>
+              <span class="theme-date">Easy on the eyes</span>
+              <p>A soft neutral cream — gentle and bright without the harshness of pure white.</p>
+            </button>
+            <button class="theme-card" data-theme-val="sage">
+              <h4>Sage</h4>
+              <span class="theme-date">Easy on the eyes</span>
+              <p>Calming pale green that cuts blue-light glare and keeps eyes relaxed.</p>
+            </button>
+            <button class="theme-card" data-theme-val="mist">
+              <h4>Mist</h4>
+              <span class="theme-date">Easy on the eyes</span>
+              <p>Soft cool gray — a low-glare neutral that reads well in bright rooms.</p>
+            </button>
+            <button class="theme-card" data-theme-val="blush">
+              <h4>Blush</h4>
+              <span class="theme-date">Easy on the eyes</span>
+              <p>A warm muted rose for a soft, cozy page that's kind to tired eyes.</p>
+            </button>
+            <button class="theme-card" data-theme-val="eink">
+              <h4>E-Ink</h4>
+              <span class="theme-date">E-paper look</span>
+              <p>Crisp monochrome, high-contrast grayscale — reads like a Kindle or Kobo e-reader.</p>
+            </button>
+            <button class="theme-card" data-theme-val="einkwarm">
+              <h4>E-Ink Warm</h4>
+              <span class="theme-date">E-paper look</span>
+              <p>The warm front-light e-paper tone — grayscale with a soft amber-gray page.</p>
             </button>
             <button class="theme-card" data-theme-val="flexoki">
               <h4>Flexoki</h4>
@@ -468,6 +581,88 @@
               <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
             </button>
           </div>
+
+          <div class="section-title settings-section-divider">
+            <h3>Local AI</h3>
+            <p>On-device model for chat, explanations, and word examples — runs fully offline once installed.</p>
+          </div>
+
+          <div class="llm-setup-steps">
+            <div id="llm-error-banner" class="piper-error-banner" hidden>
+              <div class="piper-error-title">Install failed</div>
+              <pre id="llm-error-body" class="piper-error-body">—</pre>
+              <button id="llm-error-dismiss" class="pill-btn ghost">Dismiss</button>
+            </div>
+            <div class="piper-step">
+              <div class="piper-step-number">1</div>
+              <div class="piper-step-body">
+                <h4>Engine (llama.cpp)</h4>
+                <div class="piper-status" id="llm-binary-status">Checking…</div>
+                <div class="piper-actions">
+                  <button id="llm-install-binary-btn" class="pill-btn">Install</button>
+                  <button id="llm-cancel-binary-btn" class="pill-btn ghost" hidden>Cancel</button>
+                </div>
+                <div class="piper-progress" id="llm-binary-progress" hidden>
+                  <div class="piper-progress-bar"><span></span></div>
+                  <div class="piper-progress-label">—</div>
+                </div>
+              </div>
+            </div>
+            <div class="piper-step">
+              <div class="piper-step-number">2</div>
+              <div class="piper-step-body">
+                <h4>Models</h4>
+                <div class="piper-status" id="llm-models-status">Checking…</div>
+                <ul id="llm-model-catalog" class="piper-voice-catalog"></ul>
+                <div class="llm-custom-model">
+                  <input type="text" id="llm-custom-url" class="llm-custom-url-input" placeholder="Or paste a direct .gguf download URL…" spellcheck="false">
+                  <button id="llm-custom-install-btn" class="pill-btn ghost" type="button">Download</button>
+                </div>
+                <div class="piper-progress" id="llm-custom-progress" hidden>
+                  <div class="piper-progress-bar"><span></span></div>
+                  <div class="piper-progress-label">—</div>
+                </div>
+              </div>
+            </div>
+            <div class="piper-step">
+              <div class="piper-step-number">3</div>
+              <div class="piper-step-body">
+                <h4>Install location</h4>
+                <p class="piper-path" id="llm-path">—</p>
+                <div class="piper-actions">
+                  <button id="llm-open-folder-btn" class="pill-btn ghost">Open folder</button>
+                  <button id="llm-refresh-btn" class="pill-btn ghost">Re-check</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Save Article (web page reader mode) Modal -->
+    <div id="url-import-modal" class="modal-backdrop" hidden>
+      <div class="modal-container url-import-container">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <h3>Save article</h3>
+            <p>Paste a link — the article is cleaned up (reader mode) and saved to your library for offline reading.</p>
+          </div>
+          <div class="modal-header-right">
+            <button id="close-url-import-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="modal-body url-import-body">
+          <form id="url-import-form" class="url-import-form">
+            <input type="url" id="url-import-input" class="url-import-input" placeholder="https://example.com/an-article" inputmode="url" autocomplete="off" spellcheck="false" required>
+            <button type="submit" id="url-import-submit" class="pill-btn">
+              <svg id="url-import-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+              <span id="url-import-submit-label">Save</span>
+            </button>
+          </form>
+          <div id="url-import-status" class="url-import-status" hidden></div>
         </div>
       </div>
     </div>
@@ -481,6 +676,12 @@
             <p id="vocab-review-progress">—</p>
           </div>
           <div class="modal-header-right">
+            <button id="vocab-skip-btn" class="ghost-btn" title="Skip — review this word another time">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+            </button>
+            <button id="vocab-delete-btn" class="ghost-btn" title="Remove this word from vocabulary">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+            </button>
             <button id="close-vocab-review-btn" class="ghost-btn" aria-label="Close">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
             </button>
@@ -495,13 +696,32 @@
 
           <div id="vocab-review-card" class="vocab-card">
             <div class="vocab-card-front">
-              <h2 id="vocab-card-word">—</h2>
+              <div class="vocab-card-title">
+                <h2 id="vocab-card-word">—</h2>
+                <button class="pronounce-btn lg" id="vocab-pronounce-btn" title="Pronounce" hidden>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+                </button>
+              </div>
               <span id="vocab-card-phonetic" class="vocab-card-phonetic"></span>
               <blockquote id="vocab-card-context" class="vocab-card-context" hidden></blockquote>
               <span id="vocab-card-chapter" class="vocab-card-chapter"></span>
             </div>
             <div id="vocab-card-back" class="vocab-card-back" hidden>
               <div id="vocab-card-definition" class="vocab-card-definition"></div>
+              <button class="dict-ai-btn" id="vocab-ai-btn" hidden>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/></svg>
+                <span>Explain in context</span>
+              </button>
+              <div id="vocab-ai-output" class="dict-ai-output" hidden></div>
+              <div class="dict-ai-actions" id="vocab-ai-actions" hidden>
+                <button class="dict-ai-retry" id="vocab-ai-retry" title="Try again — the model is non-deterministic, get a fresh explanation">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+                </button>
+                <button class="dict-ai-retry" id="vocab-ai-examples-btn" title="Show other example usages of this word">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                </button>
+              </div>
+              <div id="vocab-ai-examples-output" class="dict-ai-output" hidden></div>
             </div>
           </div>
 
@@ -526,6 +746,48 @@
         </div>
       </div>
     </div>
+
+    <!-- Chat Modal — ask the local LLM about the current page/chapter -->
+    <div id="chat-modal" class="modal-backdrop" hidden>
+      <div class="modal-container chat-container">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <h3>Chat</h3>
+            <div class="segment chat-scope-toggle" id="chat-scope-toggle">
+              <button type="button" data-value="page" class="active">Page</button>
+              <button type="button" data-value="chapter">Chapter</button>
+            </div>
+          </div>
+          <div class="modal-header-right">
+            <div class="custom-select">
+              <select id="chat-model-select" class="chat-model-select" title="Local model used for chat and for the dictionary's &quot;Explain in context&quot;"></select>
+            </div>
+            <button id="chat-reset-btn" class="ghost-btn" title="Start a new conversation">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+            </button>
+            <button id="close-chat-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="modal-body chat-body">
+          <p id="chat-truncated-note" class="chat-truncated-note" hidden></p>
+          <div id="chat-messages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <textarea id="chat-input" class="chat-input" placeholder="Ask about this page…" rows="1"></textarea>
+            <button id="chat-send-btn" class="pill-btn chat-send-btn">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Reading ruler — dims the page except the line under the cursor -->
+    <div id="reading-ruler" class="reading-ruler" aria-hidden="true"></div>
+
+    <!-- Night comfort overlays — warm tint + brightness dimming -->
+    <div id="screen-warmth" class="screen-overlay screen-warmth" aria-hidden="true"></div>
+    <div id="screen-dim" class="screen-overlay screen-dim" aria-hidden="true"></div>
 
     <!-- Toast -->
     <div id="toast" class="toast" hidden></div>

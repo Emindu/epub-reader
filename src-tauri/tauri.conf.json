@@ -14,8 +14,9 @@
     "windows": [
       {
         "title": "Read",
-        "width": 800,
-        "height": 600
+        "width": 1050,
+        "height": 750,
+        "center": true
       }
     ],
     "security": {

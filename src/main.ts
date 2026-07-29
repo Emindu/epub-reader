@@ -1,11 +1,15 @@
 import { open } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile, mkdir, remove, exists, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
-import { openPath } from '@tauri-apps/plugin-opener';
+import { openPath, openUrl } from '@tauri-apps/plugin-opener';
+import { readText as readClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import ePub, { Book, Rendition, Location, NavItem } from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { marked } from 'marked';
+import { Readability } from '@mozilla/readability';
+import DOMPurify from 'dompurify';
+import TurndownService from 'turndown';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -13,11 +17,14 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 /* ============================================================
    Types
    ============================================================ */
-type Theme = 'default' | 'flexoki' | 'ayu' | 'catppuccin' | 'everforest' | 'gruvbox' | 'nord' | 'rosepine' | 'solarized';
+type Theme = 'default' | 'parchment' | 'almond' | 'sage' | 'mist' | 'blush'
+  | 'eink' | 'einkwarm'
+  | 'flexoki' | 'ayu' | 'catppuccin' | 'everforest' | 'gruvbox' | 'nord' | 'rosepine' | 'solarized';
 type Appearance = 'light' | 'dark';
-type FontKind = 'serif' | 'sans' | 'mono';
+type FontKind = 'serif' | 'sans' | 'mono' | 'literata' | 'lora' | 'bitter' | 'atkinson';
 type LineKind = 'compact' | 'normal' | 'relaxed';
 type MarginKind = 'narrow' | 'medium' | 'wide';
+type MeasureKind = 'full' | 'ch60' | 'ch70' | 'ch80';
 type LayoutKind = 'paginated' | 'spread' | 'scroll';
 type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
 type FocusTracker = 'off' | 'word' | 'sentence';
@@ -30,10 +37,14 @@ interface Settings {
   sizePct: number;
   line: LineKind;
   margin: MarginKind;
+  measure: MeasureKind;
   layout: LayoutKind;
   focusTracker: FocusTracker;
   lastHighlightColor: HighlightColor;
   focusModeWpm: number;
+  readingRuler: boolean;
+  warmth: number;       // 0–100, screen warmth (amber tint) — 0 = off
+  brightness: number;   // 40–100, screen brightness — 100 = untouched
 }
 
 interface BookRecord {
@@ -49,6 +60,7 @@ interface BookRecord {
   addedAt: number;
   updatedAt: number;
   format?: BookFormat;
+  sourceUrl?: string;               // present for web articles saved via "Read mode"
 }
 
 interface Bookmark {
@@ -128,10 +140,14 @@ const DEFAULT_SETTINGS: Settings = {
   sizePct: 100,
   line: 'normal',
   margin: 'medium',
+  measure: 'full',
   layout: 'paginated',
   focusTracker: 'off',
   lastHighlightColor: 'yellow',
   focusModeWpm: 300,
+  readingRuler: false,
+  warmth: 0,
+  brightness: 100,
 };
 
 const load = <T>(k: string, fallback: T): T => {
@@ -166,6 +182,28 @@ const persistStats = () => save(KEY_STATS, stats);
 let currentBook: Book | null = null;
 let currentRendition: Rendition | null = null;
 let currentPdfBlobUrl: string | null = null;
+// Separate from the native-viewer blob above — this is our own pdf.js parse,
+// kept around purely for data the embedded Chromium viewer doesn't expose:
+// outline, page count, and per-page text (chat, bookmark previews). The
+// native viewer's actual scroll/page state lives inside a nested
+// chrome-extension:// context we can't reach from JS, so page position here
+// is tracked only through actions we control ourselves (TOC clicks, the
+// edge-nav prev/next buttons, and resuming at the last such position) —
+// never by observing the viewer's scroll.
+let currentPdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
+// Kept alongside currentPdfDoc purely so cleanup can call .destroy() on it —
+// that method isn't in PDFDocumentProxy's own type declarations, only the
+// loading task's.
+let currentPdfLoadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
+let currentPdfIframe: HTMLIFrameElement | null = null;
+let currentPdfPage = 1;
+// The native toolbar (and its zoom controls) is suppressed via the
+// `toolbar=0` open-param — see navigateToPdfPage — so this is now the only
+// source of truth for PDF zoom, applied through the same `#zoom=` param.
+let currentPdfZoom = 100;
+let pdfTotalPages = 0;
+let pdfHasOutline = false;
+let pdfPageTextCache: Map<number, string> = new Map();
 let currentTextElement: HTMLDivElement | null = null;
 let activeFormat: BookFormat = 'epub';
 let currentBookRecord: BookRecord | null = null;
@@ -185,7 +223,9 @@ function getBookFormat(recordOrPath: BookRecord | string): BookFormat {
   return 'epub';
 }
 
-function generateTextCoverDataUrl(title: string, format: BookFormat): string {
+// `webArticle` swaps in a distinct teal palette + "WEB" label so saved
+// articles read differently from a plain imported .md file at a glance.
+function generateTextCoverDataUrl(title: string, format: BookFormat, webArticle = false): string {
   const canvas = document.createElement('canvas');
   canvas.width = 300;
   canvas.height = 440;
@@ -193,7 +233,10 @@ function generateTextCoverDataUrl(title: string, format: BookFormat): string {
   if (!ctx) return '';
 
   const grad = ctx.createLinearGradient(0, 0, 300, 440);
-  if (format === 'md') {
+  if (webArticle) {
+    grad.addColorStop(0, '#1b2e30');
+    grad.addColorStop(1, '#132224');
+  } else if (format === 'md') {
     grad.addColorStop(0, '#2b303b');
     grad.addColorStop(1, '#1e222a');
   } else {
@@ -207,9 +250,9 @@ function generateTextCoverDataUrl(title: string, format: BookFormat): string {
   ctx.lineWidth = 12;
   ctx.strokeRect(6, 6, 288, 428);
 
-  ctx.fillStyle = format === 'md' ? '#61afef' : '#98c379';
+  ctx.fillStyle = webArticle ? '#4dd0c4' : (format === 'md' ? '#61afef' : '#98c379');
   ctx.font = 'bold 14px sans-serif';
-  ctx.fillText(format.toUpperCase(), 30, 50);
+  ctx.fillText(webArticle ? 'WEB' : format.toUpperCase(), 30, 50);
 
   ctx.fillStyle = '#ffffff';
   ctx.font = '600 20px sans-serif';
@@ -245,14 +288,30 @@ const el = {
   importBtn: $<HTMLButtonElement>('import-btn'),
   importBtnEmpty: $<HTMLButtonElement>('import-btn-empty'),
   libraryThemeBtn: $<HTMLButtonElement>('library-theme-btn'),
+  librarySettingsBtn: $<HTMLButtonElement>('library-settings-btn'),
   libraryVocabReviewBtn: $<HTMLButtonElement>('library-vocab-review-btn'),
   libraryVocabCount: $<HTMLSpanElement>('library-vocab-count'),
+
+  // Save Article (web page → reader mode)
+  importUrlBtn: $<HTMLButtonElement>('import-url-btn'),
+  urlImportModal: $<HTMLDivElement>('url-import-modal'),
+  closeUrlImportBtn: $<HTMLButtonElement>('close-url-import-btn'),
+  urlImportForm: $<HTMLFormElement>('url-import-form'),
+  urlImportInput: $<HTMLInputElement>('url-import-input'),
+  urlImportSubmit: $<HTMLButtonElement>('url-import-submit'),
+  urlImportSpinner: document.getElementById('url-import-spinner') as unknown as SVGSVGElement,
+  urlImportSubmitLabel: $<HTMLSpanElement>('url-import-submit-label'),
+  urlImportStatus: $<HTMLDivElement>('url-import-status'),
+  openOriginalBtn: $<HTMLButtonElement>('open-original-btn'),
 
   readerTopbar: $<HTMLElement>('reader-topbar'),
   readerBottombar: $<HTMLElement>('reader-bottombar'),
   bookTitle: $<HTMLSpanElement>('reader-book-title'),
   backBtn: $<HTMLButtonElement>('back-to-library-btn'),
   tocBtn: $<HTMLButtonElement>('toc-btn'),
+  pdfZoomOutBtn: $<HTMLButtonElement>('pdf-zoom-out-btn'),
+  pdfZoomInBtn: $<HTMLButtonElement>('pdf-zoom-in-btn'),
+  pdfZoomValue: $<HTMLSpanElement>('pdf-zoom-value'),
   bookmarkBtn: $<HTMLButtonElement>('bookmark-btn'),
   typographyBtn: $<HTMLButtonElement>('typography-btn'),
   themeBtn: $<HTMLButtonElement>('theme-btn'),
@@ -278,6 +337,12 @@ const el = {
   closeTypographyBtn: $<HTMLButtonElement>('close-typography-btn'),
   sizeValue: $<HTMLSpanElement>('size-value'),
 
+  readingRuler: $<HTMLDivElement>('reading-ruler'),
+  warmthSlider: $<HTMLInputElement>('warmth-slider'),
+  warmthValue: $<HTMLSpanElement>('warmth-value'),
+  brightnessSlider: $<HTMLInputElement>('brightness-slider'),
+  brightnessValue: $<HTMLSpanElement>('brightness-value'),
+
   selectionPopover: $<HTMLDivElement>('selection-popover'),
   popoverRemove: $<HTMLButtonElement>('popover-remove'),
 
@@ -288,10 +353,15 @@ const el = {
 
   dictPopover: $<HTMLDivElement>('dict-popover'),
   dictWord: $<HTMLHeadingElement>('dict-word'),
+  dictPronounceBtn: $<HTMLButtonElement>('dict-pronounce-btn'),
   dictPhonetic: $<HTMLSpanElement>('dict-phonetic'),
   dictMeanings: $<HTMLDivElement>('dict-meanings'),
   dictAiBtn: $<HTMLButtonElement>('dict-ai-btn'),
   dictAiOutput: $<HTMLDivElement>('dict-ai-output'),
+  dictAiActions: $<HTMLDivElement>('dict-ai-actions'),
+  dictAiRetry: $<HTMLButtonElement>('dict-ai-retry'),
+  dictAiExamplesBtn: $<HTMLButtonElement>('dict-ai-examples-btn'),
+  dictAiExamplesOutput: $<HTMLDivElement>('dict-ai-examples-output'),
 
   footnotePopover: $<HTMLDivElement>('footnote-popover'),
   footnoteContent: $<HTMLDivElement>('footnote-content'),
@@ -310,6 +380,21 @@ const el = {
   focusSpeedSlider: $<HTMLInputElement>('focus-speed-slider'),
   focusWpmLabel: $<HTMLSpanElement>('focus-wpm'),
 
+  // Dictionary-from-clipboard (PDF only — see #pdf-dict-btn's CSS comment)
+  pdfDictBtn: $<HTMLButtonElement>('pdf-dict-btn'),
+
+  // Chat (local-LLM Q&A about the current page/chapter)
+  chatBtn: $<HTMLButtonElement>('chat-btn'),
+  chatModal: $<HTMLDivElement>('chat-modal'),
+  chatScopeToggle: $<HTMLDivElement>('chat-scope-toggle'),
+  chatModelSelect: $<HTMLSelectElement>('chat-model-select'),
+  chatMessages: $<HTMLDivElement>('chat-messages'),
+  chatInput: $<HTMLTextAreaElement>('chat-input'),
+  chatSendBtn: $<HTMLButtonElement>('chat-send-btn'),
+  chatResetBtn: $<HTMLButtonElement>('chat-reset-btn'),
+  closeChatBtn: $<HTMLButtonElement>('close-chat-btn'),
+  chatTruncatedNote: $<HTMLParagraphElement>('chat-truncated-note'),
+
   openSettingsBtn: $<HTMLButtonElement>('open-settings-btn'),
   closeSettingsBtn: $<HTMLButtonElement>('close-settings-btn'),
   settingsModal: $<HTMLDivElement>('settings-modal'),
@@ -323,14 +408,23 @@ const el = {
   vocabReviewBtn: $<HTMLButtonElement>('vocab-review-btn'),
   vocabReviewModal: $<HTMLDivElement>('vocab-review-modal'),
   vocabReviewProgress: $<HTMLParagraphElement>('vocab-review-progress'),
+  vocabSkipBtn: $<HTMLButtonElement>('vocab-skip-btn'),
+  vocabDeleteBtn: $<HTMLButtonElement>('vocab-delete-btn'),
   vocabReviewEmpty: $<HTMLDivElement>('vocab-review-empty'),
   vocabCard: $<HTMLDivElement>('vocab-review-card'),
   vocabCardWord: $<HTMLHeadingElement>('vocab-card-word'),
+  vocabPronounceBtn: $<HTMLButtonElement>('vocab-pronounce-btn'),
   vocabCardPhonetic: $<HTMLSpanElement>('vocab-card-phonetic'),
   vocabCardContext: $<HTMLQuoteElement>('vocab-card-context'),
   vocabCardChapter: $<HTMLSpanElement>('vocab-card-chapter'),
   vocabCardBack: $<HTMLDivElement>('vocab-card-back'),
   vocabCardDefinition: $<HTMLDivElement>('vocab-card-definition'),
+  vocabAiBtn: $<HTMLButtonElement>('vocab-ai-btn'),
+  vocabAiOutput: $<HTMLDivElement>('vocab-ai-output'),
+  vocabAiActions: $<HTMLDivElement>('vocab-ai-actions'),
+  vocabAiRetry: $<HTMLButtonElement>('vocab-ai-retry'),
+  vocabAiExamplesBtn: $<HTMLButtonElement>('vocab-ai-examples-btn'),
+  vocabAiExamplesOutput: $<HTMLDivElement>('vocab-ai-examples-output'),
   vocabRevealActions: $<HTMLDivElement>('vocab-review-actions-reveal'),
   vocabRateActions: $<HTMLDivElement>('vocab-review-actions-rate'),
   vocabRevealBtn: $<HTMLButtonElement>('vocab-reveal-btn'),
@@ -371,6 +465,22 @@ const el = {
   piperErrorBanner: $<HTMLDivElement>('piper-error-banner'),
   piperErrorBody: $<HTMLPreElement>('piper-error-body'),
   piperErrorDismiss: $<HTMLButtonElement>('piper-error-dismiss'),
+
+  llmErrorBanner: $<HTMLDivElement>('llm-error-banner'),
+  llmErrorBody: $<HTMLPreElement>('llm-error-body'),
+  llmErrorDismiss: $<HTMLButtonElement>('llm-error-dismiss'),
+  llmBinaryStatus: $<HTMLDivElement>('llm-binary-status'),
+  llmModelsStatus: $<HTMLDivElement>('llm-models-status'),
+  llmPath: $<HTMLParagraphElement>('llm-path'),
+  llmOpenFolderBtn: $<HTMLButtonElement>('llm-open-folder-btn'),
+  llmRefreshBtn: $<HTMLButtonElement>('llm-refresh-btn'),
+  llmInstallBinaryBtn: $<HTMLButtonElement>('llm-install-binary-btn'),
+  llmCancelBinaryBtn: $<HTMLButtonElement>('llm-cancel-binary-btn'),
+  llmBinaryProgress: $<HTMLDivElement>('llm-binary-progress'),
+  llmModelCatalog: $<HTMLUListElement>('llm-model-catalog'),
+  llmCustomUrlInput: $<HTMLInputElement>('llm-custom-url'),
+  llmCustomInstallBtn: $<HTMLButtonElement>('llm-custom-install-btn'),
+  llmCustomProgress: $<HTMLDivElement>('llm-custom-progress'),
 };
 
 function hideAllPopovers() {
@@ -412,16 +522,44 @@ function resetReflowTracking(): void {
   if (resizeRaf) { cancelAnimationFrame(resizeRaf); resizeRaf = undefined; }
 }
 
+// Forces WebView2/Chromium to recomposite the page. Minimizing suspends the
+// GPU compositor; on some Windows setups the very first frame after restore
+// is a stale, pre-minimize paint — clicks land on the right DOM element
+// (hit-testing isn't affected) but nothing *looks* like it registered, which
+// reads as "the button doesn't work". A sub-pixel opacity nudge is enough to
+// force a real repaint and is imperceptible; unlike a transform/filter nudge,
+// opacity doesn't create a new containing block, so it can't shift any
+// position:fixed descendants (the reading ruler, modals, screen overlays).
+function forceRepaint(): void {
+  const prev = el.html.style.opacity;
+  el.html.style.opacity = '0.9999';
+  void el.html.offsetHeight; // force synchronous layout so the nudge "takes"
+  requestAnimationFrame(() => { el.html.style.opacity = prev; });
+}
+
 function requestReflow(): void {
   if (resizeRaf) cancelAnimationFrame(resizeRaf);
   resizeRaf = requestAnimationFrame(() => {
     resizeRaf = undefined;
-    if (!currentRendition) return;
+    if (el.html.dataset.screen !== 'reader') return;
     const stage = el.viewer.getBoundingClientRect();
 
     if (stage.width < 20 || stage.height < 20) {
       // Actually minimized / hidden — remember so we redisplay on restore.
       wasMinimized = true;
+      return;
+    }
+
+    const restoring = wasMinimized;
+    wasMinimized = false;
+
+    // PDF and text/md have nothing to re-paginate (the native PDF viewer and
+    // the plain-scroll text container both reflow themselves via CSS), but
+    // still need the restore-from-minimize handling below: close any popover
+    // whose on-screen position may now be stale, and force a repaint in case
+    // the compositor is showing a frame from before the minimize.
+    if (!currentRendition) {
+      if (restoring) { hideAllPopovers(); forceRepaint(); }
       return;
     }
 
@@ -447,8 +585,6 @@ function requestReflow(): void {
     // The floating panel toggle changes size by ~100px, real window resizes
     // by tens or hundreds, so we won't miss anything meaningful.
     const sizeChanged = Math.abs(w - lastReflowW) >= 8 || Math.abs(h - lastReflowH) >= 8;
-    const restoring = wasMinimized;
-    wasMinimized = false;
 
     if (!sizeChanged && !restoring) return;
 
@@ -471,10 +607,22 @@ function requestReflow(): void {
       // so the display() below fixing the layout is enough.
       currentRendition.resize(w, h);
       if (currentLocationCfi) {
-        currentRendition.display(currentLocationCfi).catch(() => {});
+        // display() re-lays out columns against the new width but doesn't
+        // re-fire the 'rendered' hook (that's a section-load event, not a
+        // relayout event), so the vocab-underline overlay's cached rects go
+        // stale — words shift lines but the markers don't follow. Recompute
+        // once the new layout is actually in place, not before — the rAF
+        // inside scheduleVocabHighlightRefresh can otherwise beat this
+        // still-in-flight async display() and re-measure the old rects.
+        currentRendition.display(currentLocationCfi)
+          .then(() => scheduleVocabHighlightRefresh())
+          .catch(() => {});
+      } else {
+        scheduleVocabHighlightRefresh();
       }
       hideAllPopovers();
       updateProgress();
+      if (restoring) forceRepaint();
     } catch (err) { console.error('Reflow failed:', err); }
   });
 }
@@ -505,15 +653,58 @@ function goToScreen(name: 'library' | 'reader') {
    Theme / Settings
    ============================================================ */
 const FONT_MAP: Record<FontKind, string> = {
-  serif: "'Newsreader', 'Georgia', serif",
-  sans:  "'Inter', -apple-system, sans-serif",
-  mono:  "'JetBrains Mono', monospace",
+  serif:    "'Newsreader', 'Georgia', serif",
+  sans:     "'Inter', -apple-system, sans-serif",
+  mono:     "'JetBrains Mono', monospace",
+  // Reading-optimized additions (loaded via the Google Fonts link in index.html)
+  literata: "'Literata', 'Georgia', serif",
+  lora:     "'Lora', 'Georgia', serif",
+  bitter:   "'Bitter', 'Georgia', serif",
+  atkinson: "'Atkinson Hyperlegible', 'Inter', sans-serif",
 };
+
+// Google Fonts stylesheet (kept in sync with the <link> in index.html). EPUB
+// sections render inside their own iframe documents, and @font-face rules are
+// document-scoped — so the web fonts loaded by the parent page aren't visible
+// inside the iframe. Without this, every serif (Newsreader/Literata/Lora/
+// Bitter) silently falls back to Georgia and they all look identical. We
+// inject the same stylesheet into each section document so the real faces load.
+const READER_FONTS_HREF =
+  'https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600' +
+  '&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400' +
+  '&family=JetBrains+Mono:wght@400;500' +
+  '&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,500;0,7..72,600;1,7..72,400' +
+  '&family=Lora:ital,wght@0,400;0,500;0,600;1,400' +
+  '&family=Bitter:ital,wght@0,400;0,500;0,600;1,400' +
+  '&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&display=swap';
+
+function injectReaderFonts(doc: Document) {
+  try {
+    const head = doc.head || doc.querySelector('head');
+    if (!head || doc.getElementById('reader-font-link')) return;
+    const link = doc.createElement('link');
+    link.id = 'reader-font-link';
+    link.rel = 'stylesheet';
+    link.href = READER_FONTS_HREF;
+    head.appendChild(link);
+  } catch { /* cross-origin or headless section — skip */ }
+}
 const MIN_FONT_PCT = 70;
 const MAX_FONT_PCT = 300;
 const FONT_STEP = 10;
 const LINE_MAP: Record<LineKind, number> = { compact: 1.4, normal: 1.65, relaxed: 1.95 };
 const MARGIN_MAP: Record<MarginKind, string> = { narrow: '2rem', medium: '5rem', wide: '8rem' };
+// Line-width cap. 'full' keeps the roomy default; the others cap the readable
+// column so lines stay near a comfortable ~60–80 characters. Widths are rough
+// character targets at the 100% serif baseline (they hold a fixed pixel width,
+// so raising the font size trades a few characters for larger type).
+// Values are the outer column box (text + the current side margins), tuned so
+// that at the default medium margin the readable text lands near the labelled
+// character count. Text/MD mode subtracts the margins again in CSS so both
+// formats settle on the same text-column width.
+const MEASURE_MAP: Record<MeasureKind, string> = {
+  full: '1400px', ch60: '40rem', ch70: '45rem', ch80: '50rem',
+};
 
 function applyGlobalTheme() {
   el.html.dataset.theme = settings.theme;
@@ -523,7 +714,36 @@ function applyGlobalTheme() {
   refreshHighlightColors();
 }
 
+// Reading-comfort knobs that live outside the epub theme: the line-width cap
+// (drives .viewer max-width, which re-paginates epub via its ResizeObserver),
+// the reading ruler toggle, and the night warmth/brightness overlays. Applied
+// app-wide so the warmth/dim carry over to the library too.
+function applyComfortSettings() {
+  el.html.style.setProperty('--reader-measure', MEASURE_MAP[settings.measure]);
+  el.html.dataset.measure = settings.measure;
+  el.html.dataset.ruler = settings.readingRuler ? 'on' : 'off';
+  // Warmth 0–100 → amber tint opacity 0–0.5.
+  el.html.style.setProperty('--screen-warmth', (settings.warmth / 100 * 0.5).toFixed(3));
+  // Brightness 100 = untouched; lower dials in a black overlay up to ~0.42.
+  el.html.style.setProperty('--screen-dim', ((100 - settings.brightness) / 100 * 0.7).toFixed(3));
+  if (!settings.readingRuler) el.readingRuler.style.opacity = '0';
+}
+
+// Slide the reading-ruler band to the cursor's viewport Y. Callers pass a
+// viewport-relative Y (from the main document, or translated out of an epub
+// iframe). No-op unless the ruler is on and we're in the reader.
+function moveRuler(clientY: number) {
+  if (!settings.readingRuler || el.html.dataset.screen !== 'reader') {
+    el.readingRuler.style.opacity = '0';
+    return;
+  }
+  const h = el.readingRuler.offsetHeight;
+  el.readingRuler.style.top = `${Math.round(clientY - h / 2)}px`;
+  el.readingRuler.style.opacity = '1';
+}
+
 function applyReaderSettings() {
+  applyComfortSettings();
   el.html.style.setProperty('--reader-line', String(LINE_MAP[settings.line]));
   el.html.style.setProperty('--reader-margin', MARGIN_MAP[settings.margin]);
   el.html.style.setProperty('--reader-size', `${(1.0625 * settings.sizePct / 100).toFixed(3)}rem`);
@@ -531,7 +751,8 @@ function applyReaderSettings() {
   if (currentTextElement) {
     currentTextElement.style.fontFamily = FONT_MAP[settings.font];
   }
-  // Native PDF iframe manages its own theme; no override needed.
+  // PDF's dark-mode approximation (filter:invert) is pure CSS keyed off
+  // data-appearance — no JS override needed here.
 
   if (!currentRendition) return;
 
@@ -595,11 +816,17 @@ function refreshTypographyUI() {
     if (control === 'font')   match = btn.dataset.value === settings.font;
     if (control === 'line')   match = btn.dataset.value === settings.line;
     if (control === 'margin') match = btn.dataset.value === settings.margin;
+    if (control === 'measure') match = btn.dataset.value === settings.measure;
     if (control === 'layout') match = btn.dataset.value === settings.layout;
     if (control === 'focusTracker') match = btn.dataset.value === settings.focusTracker;
+    if (control === 'ruler')  match = btn.dataset.value === (settings.readingRuler ? 'on' : 'off');
     btn.classList.toggle('active', match);
   });
   el.sizeValue.textContent = `${settings.sizePct}%`;
+  el.warmthSlider.value = String(settings.warmth);
+  el.warmthValue.textContent = settings.warmth === 0 ? 'Off' : `${settings.warmth}%`;
+  el.brightnessSlider.value = String(settings.brightness);
+  el.brightnessValue.textContent = `${settings.brightness}%`;
 }
 
 const MARGIN_ORDER: MarginKind[] = ['narrow', 'medium', 'wide'];
@@ -702,8 +929,8 @@ function renderBookCard(book: BookRecord): HTMLElement {
 
   const fmt = book.format || getBookFormat(book);
   const badge = document.createElement('span');
-  badge.className = `book-format-badge format-${fmt}`;
-  badge.textContent = fmt.toUpperCase();
+  badge.className = book.sourceUrl ? 'book-format-badge format-web' : `book-format-badge format-${fmt}`;
+  badge.textContent = book.sourceUrl ? 'WEB' : fmt.toUpperCase();
   cover.appendChild(badge);
 
   if (book.progress > 0) {
@@ -961,6 +1188,150 @@ async function importBook() {
   }
 }
 
+/* ============================================================
+   Save Article — "read mode" for the open web. Fetches a page's HTML in
+   Rust (sidesteps CORS + lets us set a real browser User-Agent), extracts
+   the article with Mozilla's Readability (the same algorithm behind
+   Firefox Reader View), sanitizes it with DOMPurify, converts it to
+   Markdown with Turndown, and drops it into the library as a normal .md
+   book. Reusing the .md book pipeline means typography, the dictionary,
+   TTS, RSVP, and the reading-comfort features all work on saved articles
+   for free — no separate reader engine needed.
+   ============================================================ */
+let urlImportInFlight = false;
+
+function openUrlImportModal() {
+  el.urlImportModal.hidden = false;
+  el.urlImportInput.value = '';
+  el.urlImportStatus.hidden = true;
+  el.urlImportStatus.className = 'url-import-status';
+  setUrlImportBusy(false);
+  requestAnimationFrame(() => el.urlImportInput.focus());
+}
+
+function closeUrlImportModal() {
+  if (urlImportInFlight) return; // don't yank the modal out from under a fetch in flight
+  el.urlImportModal.hidden = true;
+}
+
+function setUrlImportBusy(busy: boolean) {
+  urlImportInFlight = busy;
+  el.urlImportSubmit.disabled = busy;
+  el.urlImportInput.disabled = busy;
+  (el.urlImportSpinner as any).hidden = !busy;
+  el.urlImportSubmitLabel.textContent = busy ? 'Saving…' : 'Save';
+}
+
+function showUrlImportStatus(kind: 'busy' | 'error', message: string) {
+  el.urlImportStatus.hidden = false;
+  el.urlImportStatus.className = `url-import-status ${kind}`;
+  el.urlImportStatus.textContent = message;
+}
+
+// Normalize pasted input into a fetchable absolute URL — pasting a bare
+// domain/path without a scheme ("example.com/post") is common; assume https.
+function normalizeArticleUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
+async function saveArticleFromUrl(rawUrl: string) {
+  if (urlImportInFlight) return;
+  const url = normalizeArticleUrl(rawUrl);
+
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    showUrlImportStatus('error', "That doesn't look like a valid URL.");
+    return;
+  }
+
+  // Already saved — open the existing copy instead of re-fetching.
+  const existing = library.find(b => b.sourceUrl === url);
+  if (existing) {
+    el.urlImportModal.hidden = true;
+    openFromLibrary(existing);
+    return;
+  }
+
+  setUrlImportBusy(true);
+  showUrlImportStatus('busy', 'Fetching and cleaning up the page…');
+
+  try {
+    const html = await invoke<string>('fetch_url_html', { url });
+
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    // Readability resolves relative image/link URLs against the document's
+    // base; a DOMParser document defaults to about:blank, so point it at the
+    // real page URL first (reuse an existing <base> if the page shipped one).
+    let base = doc.querySelector('base');
+    if (!base) {
+      base = doc.createElement('base');
+      doc.head.prepend(base);
+    }
+    base.setAttribute('href', url);
+
+    const article = new Readability(doc).parse();
+    if (!article || !article.content || (article.textContent || '').trim().length < 200) {
+      showUrlImportStatus(
+        'error',
+        "Couldn't find a readable article on that page — it may be paywalled, script-rendered, or not article content."
+      );
+      setUrlImportBusy(false);
+      return;
+    }
+
+    // DOMPurify strips scripts/handlers by default; the explicit FORBID list
+    // additionally drops interactive/embed tags that make no sense in a
+    // saved article (forms, iframes, buttons).
+    const cleanHtml = DOMPurify.sanitize(article.content, {
+      FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+      FORBID_ATTR: ['style', 'onerror', 'onload'],
+    });
+
+    const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+    const markdownBody = turndown.turndown(cleanHtml);
+
+    const title = (article.title || hostname).trim();
+    const byline = (article.byline || article.siteName || hostname).trim();
+    const markdown = `# ${title}\n\n*${byline} — [${hostname}](${url})*\n\n${markdownBody}\n`;
+
+    const id = safeUuid();
+    const record: BookRecord = {
+      id,
+      title,
+      author: byline,
+      filePath: url,
+      coverDataUrl: generateTextCoverDataUrl(title, 'md', true),
+      lastCfi: null,
+      progress: 0,
+      addedAt: Date.now(),
+      updatedAt: Date.now(),
+      format: 'md',
+      sourceUrl: url,
+    };
+
+    await ensureBooksDir();
+    const rel = `${BOOKS_DIR}/${id}.md`;
+    await writeFile(rel, new TextEncoder().encode(markdown), { baseDir: BaseDirectory.AppData });
+    record.storedRelPath = rel;
+
+    library.push(record);
+    persistLibrary();
+
+    setUrlImportBusy(false);
+    el.urlImportModal.hidden = true;
+    openFromLibrary(record);
+    toast('Article saved to your library');
+  } catch (err) {
+    console.error('saveArticleFromUrl failed:', err);
+    showUrlImportStatus('error', `Couldn't save that page: ${String(err)}`);
+    setUrlImportBusy(false);
+  }
+}
+
 function safeUuid(): string {
   const c = (globalThis as any).crypto;
   if (c?.randomUUID) return c.randomUUID();
@@ -1040,9 +1411,25 @@ function cleanupCurrentReader() {
     URL.revokeObjectURL(currentPdfBlobUrl);
     currentPdfBlobUrl = null;
   }
+  if (currentPdfLoadingTask) {
+    currentPdfLoadingTask.destroy().catch(() => {});
+  }
+  currentPdfDoc = null;
+  currentPdfLoadingTask = null;
+  currentPdfIframe = null;
+  currentPdfPage = 1;
+  currentPdfZoom = 100;
+  el.pdfZoomValue.textContent = '100%';
+  pdfTotalPages = 0;
+  pdfHasOutline = false;
+  pdfPageTextCache = new Map();
   currentTextElement = null;
   el.viewer.innerHTML = '';
   delete document.documentElement.dataset.format;
+  // Chat is per-book — a conversation about one book's chapter makes no
+  // sense carried into the next book opened.
+  chatHistory = [];
+  el.chatModal.hidden = true;
   // Clear the reading position so a ResizeObserver-driven requestReflow that
   // fires during the next book's load can't replay THIS book's CFI against the
   // new rendition. A cross-book CFI won't resolve, and the continuous manager
@@ -1052,24 +1439,49 @@ function cleanupCurrentReader() {
   currentLocationCfi = null;
 }
 
-function renderTocNodes(tocItems: { href: string; label: string }[]) {
+interface TocTreeNode {
+  href: string;
+  label: string;
+  subitems?: TocTreeNode[];
+}
+
+// Renders a nested outline (section/subsection/...) into #toc-list. One
+// click handler covers every format's navigation: PDF pages, EPUB CFIs (via
+// currentRendition, only ever set for EPUB), and plain in-document anchors
+// for text/md's synthetic heading TOC. Nodes without `subitems` just render
+// as flat leaves, so this also replaces the old flat-only renderer.
+function renderTocTree(nodes: TocTreeNode[] | NavItem[]) {
   el.tocList.innerHTML = '';
-  for (const item of tocItems) {
-    const li = document.createElement('li');
-    const a = document.createElement('a');
-    a.className = 'toc-item';
-    a.textContent = item.label;
-    a.href = '#';
-    a.dataset.href = item.href;
-    a.addEventListener('click', (e) => {
-      e.preventDefault();
-      const targetEl = document.getElementById(item.href);
-      if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth' });
-      closeDrawers();
-    });
-    li.appendChild(a);
-    el.tocList.appendChild(li);
-  }
+  const build = (items: TocTreeNode[] | NavItem[], parent: HTMLElement) => {
+    for (const item of items) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.className = 'toc-item';
+      a.textContent = item.label.trim();
+      a.href = '#';
+      a.dataset.href = item.href;
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (item.href.startsWith('pdf-page-')) {
+          navigateToPdfPage(parseInt(item.href.slice('pdf-page-'.length), 10));
+        } else if (currentRendition) {
+          currentRendition.display(item.href);
+        } else {
+          const targetEl = document.getElementById(item.href);
+          if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth' });
+        }
+        closeDrawers();
+      });
+      li.appendChild(a);
+      if (item.subitems && item.subitems.length) {
+        const ul = document.createElement('ul');
+        build(item.subitems, ul);
+        li.appendChild(ul);
+      }
+      parent.appendChild(li);
+    }
+  };
+  build(nodes, el.tocList);
 }
 
 async function openPdfReader(record: BookRecord, buffer: ArrayBuffer) {
@@ -1079,6 +1491,18 @@ async function openPdfReader(record: BookRecord, buffer: ArrayBuffer) {
   const url = URL.createObjectURL(blob);
   currentPdfBlobUrl = url;
 
+  // pdf.js's getDocument() takes ownership of (detaches) whatever ArrayBuffer
+  // it's handed, so it can't share `buffer` with the Blob above — give it an
+  // independent copy for our own outline/text-extraction parse.
+  const docBytes = new Uint8Array(buffer).slice();
+
+  // Resume where the reader last left off (see the module-level currentPdfDoc
+  // comment for why this is set only from explicit nav, never live scroll).
+  const savedPage = record.lastCfi?.startsWith('pdf-page-')
+    ? parseInt(record.lastCfi.slice('pdf-page-'.length), 10)
+    : null;
+  currentPdfPage = savedPage && savedPage > 0 ? savedPage : 1;
+
   const container = document.createElement('div');
   container.className = 'pdf-reader-container';
   container.id = 'pdf-container';
@@ -1086,15 +1510,185 @@ async function openPdfReader(record: BookRecord, buffer: ArrayBuffer) {
 
   const iframe = document.createElement('iframe');
   iframe.className = 'pdf-native-iframe';
-  iframe.src = url;
+  iframe.src = `${url}${pdfViewerFragment(currentPdfPage, currentPdfZoom)}`;
   iframe.title = record.title;
   container.appendChild(iframe);
+  currentPdfIframe = iframe;
 
-  // Minimal TOC: just a single "Document" entry since the native viewer
-  // handles its own page navigation internally.
-  flatToc = [{ href: 'pdf-doc', label: record.title }];
-  renderTocNodes(flatToc);
-  el.progressChapter.textContent = record.title;
+  // Placeholder TOC/progress until the parse below resolves (or if it fails).
+  flatToc = [{ href: 'pdf-page-1', label: record.title }];
+  renderTocTree(flatToc);
+  updatePdfProgressUi(record);
+
+  try {
+    const loadingTask = pdfjsLib.getDocument({ data: docBytes });
+    currentPdfLoadingTask = loadingTask;
+    currentPdfDoc = await loadingTask.promise;
+    pdfTotalPages = currentPdfDoc.numPages;
+    if (currentPdfPage > pdfTotalPages) currentPdfPage = 1;
+    updatePdfProgressUi(record);
+
+    const outline = await currentPdfDoc.getOutline();
+    if (outline && outline.length) {
+      const { flat, tree } = await pdfOutlineToToc(currentPdfDoc, outline);
+      flatToc = flat;
+      pdfHasOutline = true;
+      renderTocTree(tree);
+      updatePdfProgressUi(record);
+    }
+  } catch (err) {
+    console.warn('PDF outline/text setup failed:', err);
+  }
+
+  // Chat's availability depends on currentPdfDoc, which just resolved above.
+  refreshChatButtonVisibility();
+}
+
+// Walks a pdf.js outline tree, resolving each entry's destination to a
+// 1-based page number (encoded as `pdf-page-N`, the same pseudo-cfi
+// bookmarks/progress use). Returns both a flat list in document order (for
+// pdfChapterLabelForPage's "which section am I in" scan, which needs a flat
+// sequence, not a tree) and the nested tree itself (for rendering
+// section/subsection structure in the Contents drawer).
+async function pdfOutlineToToc(
+  pdfDoc: pdfjsLib.PDFDocumentProxy,
+  outline: any[]
+): Promise<{ flat: TocTreeNode[]; tree: TocTreeNode[] }> {
+  const flat: TocTreeNode[] = [];
+
+  async function resolvePage(dest: any): Promise<number | null> {
+    try {
+      const resolved = typeof dest === 'string' ? await pdfDoc.getDestination(dest) : dest;
+      if (!resolved || !Array.isArray(resolved)) return null;
+      const index = await pdfDoc.getPageIndex(resolved[0]);
+      return index + 1;
+    } catch {
+      return null;
+    }
+  }
+
+  async function walk(items: any[]): Promise<TocTreeNode[]> {
+    const nodes: TocTreeNode[] = [];
+    for (const item of items) {
+      const page = item.dest ? await resolvePage(item.dest) : null;
+      const node: TocTreeNode = {
+        href: `pdf-page-${page ?? 1}`,
+        label: (item.title || '').trim() || 'Untitled',
+      };
+      flat.push({ href: node.href, label: node.label });
+      if (item.items && item.items.length) node.subitems = await walk(item.items);
+      nodes.push(node);
+    }
+    return nodes;
+  }
+
+  const tree = await walk(outline);
+  return { flat, tree };
+}
+
+// PDF Open Parameters fragment: pins the page, applies our own tracked zoom
+// (the native toolbar — and its zoom controls — is suppressed via toolbar=0,
+// since its sidebar toggle lives in an unreachable nested chrome-extension://
+// context we can't fix, so we replace the whole thing with our own Contents
+// drawer + zoom buttons).
+function pdfViewerFragment(page: number, zoom: number): string {
+  return `#page=${page}&zoom=${zoom}&toolbar=0`;
+}
+
+// Reassigning `.src` on an already-loaded PDF iframe does NOT reliably
+// re-navigate Chromium's built-in viewer — confirmed empirically: a freshly
+// created iframe honors `#page=N` immediately, but changing `.src` on a live
+// one silently no-ops. So every navigation (page or zoom change) replaces
+// the iframe element outright instead of reassigning its src.
+function reloadPdfIframe(page: number, zoom: number) {
+  if (!currentPdfIframe || !currentPdfBlobUrl) return;
+  const container = currentPdfIframe.parentElement;
+  if (!container) return;
+  const iframe = document.createElement('iframe');
+  iframe.className = 'pdf-native-iframe';
+  iframe.title = currentPdfIframe.title;
+  iframe.src = `${currentPdfBlobUrl}${pdfViewerFragment(page, zoom)}`;
+  container.replaceChild(iframe, currentPdfIframe);
+  currentPdfIframe = iframe;
+}
+
+// Jumps the native viewer to a given 1-based page. Also updates
+// progress/bookmark state, since this is the only moment we actually know
+// what page the reader is on.
+function navigateToPdfPage(page: number) {
+  if (!currentPdfIframe || !currentPdfBlobUrl || !currentBookRecord || !Number.isFinite(page)) return;
+  const clamped = pdfTotalPages > 0 ? Math.min(Math.max(1, page), pdfTotalPages) : Math.max(1, page);
+  currentPdfPage = clamped;
+  reloadPdfIframe(clamped, currentPdfZoom);
+  updatePdfProgressUi(currentBookRecord, true);
+}
+
+// Zoom range mirrors common PDF viewers (50%–300%, 10% steps). Reloads the
+// iframe at the current page so zoom and page position stay in sync.
+function setPdfZoom(zoom: number) {
+  if (!currentPdfIframe) return;
+  currentPdfZoom = Math.min(300, Math.max(50, zoom));
+  el.pdfZoomValue.textContent = `${currentPdfZoom}%`;
+  reloadPdfIframe(currentPdfPage, currentPdfZoom);
+}
+
+// flatToc is built in document order by pdfOutlineToToc's depth-first walk,
+// so the last entry at or before the current page is a reasonable "which
+// section am I in" guess — same idea as epub's updateChapterFromCfi.
+function pdfChapterLabelForPage(page: number): string {
+  // Default covers pages before the first outline entry (e.g. a cover or
+  // title page that isn't itself bookmarked) — only overwritten below once
+  // an entry at or before `page` is actually found.
+  let label = `Page ${page}`;
+  if (!pdfHasOutline) return label;
+  for (const t of flatToc) {
+    const m = /^pdf-page-(\d+)$/.exec(t.href);
+    if (!m) continue;
+    if (parseInt(m[1], 10) <= page) label = t.label; else break;
+  }
+  return label;
+}
+
+// Mirrors the scroll-driven progress handler text/md uses (openTextReader),
+// but PDF has no scroll signal to hook — this is called only from explicit
+// page moves (initial open, TOC clicks, edge-nav prev/next).
+function updatePdfProgressUi(record: BookRecord, persist = false) {
+  const pct = pdfTotalPages > 1 ? (currentPdfPage - 1) / (pdfTotalPages - 1) : 0;
+  currentChapterLabel = pdfHasOutline ? pdfChapterLabelForPage(currentPdfPage) : record.title;
+  el.progressChapter.textContent = currentChapterLabel;
+  el.progressRemaining.textContent = pdfTotalPages ? `Page ${currentPdfPage}/${pdfTotalPages}` : '';
+  el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
+  el.progressFill.style.width = `${pct * 100}%`;
+
+  const pseudoCfi = `pdf-page-${currentPdfPage}`;
+  currentLocationCfi = pseudoCfi;
+  refreshBookmarkButton();
+
+  if (persist) {
+    record.progress = pct;
+    record.lastCfi = pseudoCfi;
+    persistLibrary();
+  }
+}
+
+// Extracts and caches one PDF page's text — used for both the chat passage
+// and bookmark previews. Cached because chat re-derives its passage fresh on
+// every send (see currentChatPassage) and re-parsing the same page each time
+// would be wasteful.
+async function getPdfPageText(pageNum: number): Promise<string> {
+  const cached = pdfPageTextCache.get(pageNum);
+  if (cached !== undefined) return cached;
+  if (!currentPdfDoc) return '';
+  try {
+    const page = await currentPdfDoc.getPage(pageNum);
+    const content = await page.getTextContent();
+    const text = content.items.map((it: any) => it.str || '').join(' ').replace(/\s+/g, ' ').trim();
+    pdfPageTextCache.set(pageNum, text);
+    return text;
+  } catch (err) {
+    console.warn('PDF page text extraction failed:', err);
+    return '';
+  }
 }
 
 
@@ -1122,13 +1716,37 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
   container.innerHTML = renderedHtml;
 
   flatToc = [];
+  const tocTree: TocTreeNode[] = [];
+  // Stack of open ancestors by heading level, so e.g. an h3 nests under the
+  // nearest preceding h2 (which nests under the nearest preceding h1) —
+  // headings carry their own section/subsection structure for free.
+  const openAncestors: { level: number; node: TocTreeNode }[] = [];
   const headings = container.querySelectorAll<HTMLHeadingElement>('h1, h2, h3, h4');
   headings.forEach((h, idx) => {
     const id = `heading-${idx}`;
     h.id = id;
-    flatToc.push({ href: id, label: h.textContent || `Section ${idx + 1}` });
+    const label = h.textContent || `Section ${idx + 1}`;
+    flatToc.push({ href: id, label });
+    const level = parseInt(h.tagName[1], 10);
+    const node: TocTreeNode = { href: id, label };
+    while (openAncestors.length && openAncestors[openAncestors.length - 1].level >= level) {
+      openAncestors.pop();
+    }
+    if (openAncestors.length) {
+      const parent = openAncestors[openAncestors.length - 1].node;
+      (parent.subitems ??= []).push(node);
+    } else {
+      tocTree.push(node);
+    }
+    openAncestors.push({ level, node });
   });
-  renderTocNodes(flatToc);
+  renderTocTree(tocTree);
+
+  // Seed the bookmark-tracking location from the saved position immediately
+  // — otherwise the bookmark button/state stay unset until the first scroll
+  // event fires, which never happens if the reader opens already at the top.
+  currentLocationCfi = record.lastCfi?.startsWith('scroll-') ? record.lastCfi : `scroll-${record.progress.toFixed(4)}`;
+  refreshBookmarkButton();
 
   if (record.progress > 0) {
     setTimeout(() => {
@@ -1142,7 +1760,14 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
     if (totalScroll <= 0) return;
     const pct = Math.min(1, Math.max(0, container.scrollTop / totalScroll));
     record.progress = pct;
-    record.lastCfi = `scroll-${pct.toFixed(4)}`;
+    const pseudoCfi = `scroll-${pct.toFixed(4)}`;
+    record.lastCfi = pseudoCfi;
+    // Bookmarks have no EPUB CFI to anchor to in plain text, so they reuse
+    // this same scroll-percentage encoding — keep the module-level "current
+    // location" in sync so toggleBookmark()/refreshBookmarkButton() work here
+    // exactly like they do for epub's relocated-driven currentLocationCfi.
+    currentLocationCfi = pseudoCfi;
+    refreshBookmarkButton();
 
     el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
     el.progressFill.style.width = `${pct * 100}%`;
@@ -1193,6 +1818,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
   currentRendition.on('relocated', () => hideSelectionPopover());
   currentRendition.hooks.content.register((contents: any) => {
     const doc: Document = contents.document;
+    injectReaderFonts(doc);
     doc.addEventListener('selectionchange', () => {
       const sel = doc.getSelection();
       if (!sel || sel.isCollapsed || sel.toString().trim() === '') {
@@ -1213,6 +1839,30 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
       }
     }, true);
 
+    // Vim nav keys don't bubble out of the iframe to the document-level
+    // keyup listener, so once a click has moved focus into the page content
+    // (e.g. to select a word for lookup) hjkl/gg/G would silently stop
+    // working without this mirror.
+    doc.addEventListener('keyup', (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = (e.target as Element)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === 'h' || e.key === 'k') vimPageNav('prev');
+      else if (e.key === 'j' || e.key === 'l') vimPageNav('next');
+      else if (e.key === 'g') {
+        const now = Date.now();
+        if (now - lastGKeydownAt < GG_CHORD_WINDOW_MS) {
+          lastGKeydownAt = 0;
+          vimGoToStart();
+        } else {
+          lastGKeydownAt = now;
+        }
+      } else if (e.key === 'G') {
+        lastGKeydownAt = 0;
+        vimGoToEnd();
+      }
+    });
+
     doc.addEventListener('click', (e: MouseEvent) => {
       const a = (e.target as Element).closest('a');
       if (a && a.getAttribute('href')) {
@@ -1225,7 +1875,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
       }
     }, true);
 
-    installFocusTracker(contents);
+    installFocusTracker(contents.document, contents.window?.frameElement ?? null);
 
     // Underline any saved-vocab words on the freshly-loaded section. The
     // overlay is body-relative so paginated column turns within the
@@ -1238,7 +1888,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
   currentBook.loaded.navigation.then((nav) => {
     flatToc = [];
     flatTocFromNav(nav.toc);
-    renderToc(nav.toc);
+    renderTocTree(nav.toc);
   });
 
   currentBook.ready.then(async () => {
@@ -1286,8 +1936,14 @@ async function openReader(record: BookRecord, buffer: ArrayBuffer) {
   // real dims — which is exactly the flicker on every book open. Doing it
   // in this order means .viewer is measurable before display() runs.
   el.bookTitle.textContent = record.title;
+  el.openOriginalBtn.hidden = !record.sourceUrl;
   goToScreen('reader');
   resetReflowTracking();
+  // Covers the case where this book opens before the boot-time LLM probe
+  // resolves. For PDF this also correctly hides it pending currentPdfDoc
+  // (still null from cleanup at this point) — openPdfReader re-checks once
+  // its parse resolves.
+  refreshChatButtonVisibility();
   // One layout tick so .viewer's box picks up the display change before
   // renderTo() reads its dimensions.
   await new Promise<void>(r => requestAnimationFrame(() => r()));
@@ -1350,31 +2006,25 @@ function updateProgress() {
 /* ============================================================
    TOC / Bookmarks / Highlights drawer
    ============================================================ */
-function renderToc(items: NavItem[]) {
-  el.tocList.innerHTML = '';
-  const build = (nodes: NavItem[], parent: HTMLElement) => {
-    for (const n of nodes) {
-      const li = document.createElement('li');
-      const a = document.createElement('a');
-      a.className = 'toc-item';
-      a.textContent = n.label.trim();
-      a.href = '#';
-      a.dataset.href = n.href;
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        currentRendition?.display(n.href);
-        closeDrawers();
-      });
-      li.appendChild(a);
-      if (n.subitems && n.subitems.length) {
-        const ul = document.createElement('ul');
-        build(n.subitems, ul);
-        li.appendChild(ul);
-      }
-      parent.appendChild(li);
+// Bookmarks/highlights normally jump via an EPUB CFI (currentRendition.display).
+// Text/md has no CFI, so its entries carry a `scroll-<pct>` pseudo-cfi instead
+// (same encoding openTextReader's scroll handler writes into lastCfi) — this
+// routes to whichever navigation the format actually has.
+function navigateToCfi(cfi: string) {
+  if (cfi.startsWith('scroll-') && currentTextElement) {
+    const pct = parseFloat(cfi.slice('scroll-'.length));
+    if (!Number.isNaN(pct)) {
+      const totalScroll = currentTextElement.scrollHeight - currentTextElement.clientHeight;
+      currentTextElement.scrollTop = pct * totalScroll;
     }
-  };
-  build(items, el.tocList);
+    return;
+  }
+  if (cfi.startsWith('pdf-page-')) {
+    const page = parseInt(cfi.slice('pdf-page-'.length), 10);
+    if (!Number.isNaN(page)) navigateToPdfPage(page);
+    return;
+  }
+  currentRendition?.display(cfi);
 }
 
 function renderBookmarksList() {
@@ -1390,7 +2040,7 @@ function renderBookmarksList() {
       <div class="mark-preview">${escapeHtml(b.text || '(no preview)')}</div>
       <div class="mark-chapter">${escapeHtml(b.chapter)}</div>
     `;
-    li.addEventListener('click', () => { currentRendition?.display(b.cfi); closeDrawers(); });
+    li.addEventListener('click', () => { navigateToCfi(b.cfi); closeDrawers(); });
     el.bookmarksList.appendChild(li);
   }
 }
@@ -1412,7 +2062,7 @@ function renderHighlightsList() {
       <div class="mark-preview" style="padding-left:0.75rem">${escapeHtml(h.text)}</div>
       <div class="mark-chapter" style="padding-left:0.75rem">${escapeHtml(h.chapter)}</div>
     `;
-    li.addEventListener('click', () => { currentRendition?.display(h.cfi); closeDrawers(); });
+    li.addEventListener('click', () => { navigateToCfi(h.cfi); closeDrawers(); });
     el.highlightsList.appendChild(li);
   }
 }
@@ -1421,18 +2071,45 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]!));
 }
 
+// Local-LLM replies routinely come back with markdown formatting (**bold**
+// labels, numbered lists) rather than plain prose — render it instead of
+// dumping asterisks/numbers as literal text. Sanitized because it's model
+// output, not something we've reviewed; same defense-in-depth as the
+// readability-extracted article HTML elsewhere in this file.
+function renderAiMarkdown(text: string): string {
+  return DOMPurify.sanitize(marked.parse(text, { async: false }) as string);
+}
+
 /* ============================================================
    Drawer open/close + tab switching
    ============================================================ */
+// closeDrawers() defers `hidden = true` to let the CSS close transition play.
+// Reopening before that timer fires must cancel it — otherwise the stale
+// timeout still lands after the reopen and force-hides the drawer again
+// (`[hidden]` beats the `open` class), so it flashes open then vanishes.
+const drawerHideTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
+
 function openDrawer(which: 'toc' | 'typography', tab?: DrawerTab) {
   closeDrawers();
+  const target = which === 'toc' ? el.tocDrawer : el.typographyDrawer;
+  const pending = drawerHideTimers.get(target);
+  if (pending != null) {
+    clearTimeout(pending);
+    drawerHideTimers.delete(target);
+  }
+  target.hidden = false;
+  // Force a synchronous layout flush between un-hiding and adding `open` so
+  // the browser registers the closed (translateX) position before the class
+  // change, letting the CSS transition actually play. Avoids requestAnimationFrame
+  // here on purpose — rAF can be throttled/delayed by the browser (observed
+  // firsthand: it can stall indefinitely on a nominally-active tab), which
+  // would leave the drawer stuck at `hidden: false` but never `open` — visible
+  // in the DOM yet still translated off-screen.
+  void target.offsetHeight;
+  target.classList.add('open');
   if (which === 'toc') {
-    el.tocDrawer.hidden = false;
-    requestAnimationFrame(() => el.tocDrawer.classList.add('open'));
     switchTab(tab || 'toc');
   } else {
-    el.typographyDrawer.hidden = false;
-    requestAnimationFrame(() => el.typographyDrawer.classList.add('open'));
     refreshTypographyUI();
   }
 }
@@ -1443,7 +2120,8 @@ function closeDrawers() {
   [el.tocDrawer, el.typographyDrawer].forEach(d => {
     if (!d.classList.contains('open')) return;
     d.classList.remove('open');
-    setTimeout(() => { d.hidden = true; }, 260);
+    const timer = setTimeout(() => { d.hidden = true; drawerHideTimers.delete(d); }, 260);
+    drawerHideTimers.set(d, timer);
   });
 }
 
@@ -1464,7 +2142,10 @@ function switchTab(tab: DrawerTab) {
    Bookmarks
    ============================================================ */
 function toggleBookmark() {
-  if (!currentRendition || !currentBookRecord || !currentLocationCfi) return;
+  // No `!currentRendition` gate: text/md tracks a scroll-percentage pseudo-cfi,
+  // and PDF tracks a page-number pseudo-cfi (see updatePdfProgressUi), into
+  // this same variable — so this works unmodified for all three formats.
+  if (!currentBookRecord || !currentLocationCfi) return;
   const cfi = currentLocationCfi;
   const idx = currentMarks.bookmarks.findIndex(b => b.cfi === cfi);
   if (idx >= 0) {
@@ -1488,6 +2169,32 @@ function refreshBookmarkButton() {
 
 function getVisiblePreviewText(): string {
   try {
+    if (activeFormat === 'pdf') {
+      // Synchronous by necessity (called from the bookmark click handler) —
+      // use whatever's already cached from a chat lookup on this page, or
+      // fall back to a page-number label and let the cache fill in later.
+      const cached = pdfPageTextCache.get(currentPdfPage);
+      if (cached) return cached.slice(0, 160);
+      void getPdfPageText(currentPdfPage);
+      return `Page ${currentPdfPage}`;
+    }
+
+    if (currentTextElement) {
+      // Grab the first block element actually within the container's visible
+      // viewport, rather than just the top of the whole (possibly huge)
+      // document — mirrors "what's on screen right now" like the epub branch.
+      const containerRect = currentTextElement.getBoundingClientRect();
+      const blocks = currentTextElement.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote');
+      for (const node of blocks) {
+        const r = node.getBoundingClientRect();
+        if (r.bottom > containerRect.top && r.top < containerRect.bottom) {
+          const text = (node.textContent || '').trim().replace(/\s+/g, ' ');
+          if (text) return text.slice(0, 160);
+        }
+      }
+      return '';
+    }
+
     const iframes = el.viewer.querySelectorAll('iframe');
     for (const f of iframes) {
       const doc = (f as HTMLIFrameElement).contentDocument;
@@ -1505,9 +2212,20 @@ function getVisiblePreviewText(): string {
    ============================================================ */
 const WORD_CHAR = /[\p{L}\p{N}'’\-]/u;
 
-function installFocusTracker(contents: any) {
-  const doc: Document = contents.document;
+// `frameEl` is the iframe hosting `doc` for epub content, or null when `doc`
+// is the top-level document (the text/md reader, which renders straight into
+// the main page — no iframe to translate coordinates out of). That single
+// flag is also what tells the tracker whether it needs to scope itself to a
+// sub-region: an epub iframe document IS the book, entirely, but the main
+// document also hosts the library screen and reader chrome, so on the main
+// document the tracker only engages inside the live text/md container.
+function installFocusTracker(doc: Document, frameEl: HTMLIFrameElement | null) {
   if (!doc.body) return;
+  const isMainDoc = frameEl === null;
+  const inScope = (target: EventTarget | null): boolean => {
+    if (!isMainDoc) return true;
+    return !!currentTextElement && !!target && currentTextElement.contains(target as Node);
+  };
 
   const overlay = doc.createElement('div');
   overlay.setAttribute('data-focus-overlay', '');
@@ -1573,7 +2291,7 @@ function installFocusTracker(contents: any) {
   const paint = () => {
     rafId = 0;
     if (!lastEvent) return;
-    if (settings.focusTracker === 'off') { hide(); return; }
+    if (settings.focusTracker === 'off' || !inScope(lastEvent.target)) { hide(); return; }
     const range = getRangeAtPoint(lastEvent.clientX, lastEvent.clientY, settings.focusTracker);
     if (!range) { hide(); return; }
     const rect = range.getBoundingClientRect();
@@ -1588,12 +2306,28 @@ function installFocusTracker(contents: any) {
   };
 
   doc.addEventListener('mousemove', (e: MouseEvent) => {
-    if (settings.focusTracker === 'off') { hide(); return; }
+    if (settings.focusTracker === 'off' || !inScope(e.target)) { hide(); return; }
     lastEvent = e;
     if (!rafId) rafId = requestAnimationFrame(paint);
   });
   doc.addEventListener('mouseleave', hide);
   doc.body.addEventListener('mouseleave', hide);
+
+  // Drive the reading ruler from inside the iframe: translate the cursor's
+  // iframe-local Y into the main viewport so the fixed band lines up with the
+  // text the pointer is over. Separate from the focus tracker above — the
+  // ruler runs independently of it. Main-document case (text/md) doesn't need
+  // this: wire() already installs a plain document-level mousemove listener
+  // for the ruler, and there's no iframe offset to translate out of.
+  if (frameEl) {
+    doc.addEventListener('mousemove', (e: MouseEvent) => {
+      if (!settings.readingRuler) return;
+      moveRuler(frameEl.getBoundingClientRect().top + e.clientY);
+    });
+    doc.addEventListener('mouseleave', () => {
+      if (settings.readingRuler) el.readingRuler.style.opacity = '0';
+    });
+  }
 
   // Track drag distance so that a drag-to-select never gets misread as a
   // click-to-highlight-the-word-under-cursor. Any pointer travel of more
@@ -1611,19 +2345,21 @@ function installFocusTracker(contents: any) {
   // Click behavior depends on state:
   //   - Link / footnote → let epub.js handle it (return early)
   //   - Drag-select in progress → let the selection popover handle it
-  //   - TTS on → jump playback to the clicked word (highest priority — the
-  //     user has an audible cursor and wants to move it)
-  //   - Focus tracker on → save the tracked span as a highlight
-  //   - Nothing → let the click through
+  //   - TTS on → jump playback to the clicked word (the user has an audible
+  //     cursor and wants to move it)
+  //   - Otherwise → let the click through. The focus tracker is a passive
+  //     read-along guide; a single click no longer auto-saves a highlight
+  //     (use drag-select → the highlight popover to save one deliberately).
   doc.addEventListener('click', (e: MouseEvent) => {
+    if (!inScope(e.target)) return;
     if ((e.target as Element).closest('a')) return;
     if (isDragging) return;
     const sel = doc.getSelection();
     if (sel && !sel.isCollapsed && sel.toString().trim().length > 0) return;
 
-    // TTS click-to-jump wins over highlight-on-click. We need a word range
-    // to jump to — prefer the currently-hovered focus range (if focus tracker
-    // is on), fall back to computing one at the click point in 'word' mode.
+    // TTS click-to-jump. We need a word range to jump to — prefer the
+    // currently-hovered focus range (if focus tracker is on), fall back to
+    // computing one at the click point in 'word' mode.
     if (isTtsOn()) {
       const jumpRange = (overlay as any)._activeRange as Range | undefined
         ?? getRangeAtPoint(e.clientX, e.clientY, 'word');
@@ -1638,24 +2374,7 @@ function installFocusTracker(contents: any) {
       jumpTtsToWordIdx(idx);
       e.preventDefault();
       e.stopPropagation();
-      return;
     }
-
-    if (settings.focusTracker === 'off') return;
-
-    const range = (overlay as any)._activeRange as Range | undefined
-      ?? getRangeAtPoint(e.clientX, e.clientY, settings.focusTracker);
-    if (!range) return;
-    const text = range.toString().trim();
-    if (text.length < 2) return;
-    let cfi: string | null = null;
-    try { cfi = contents.cfiFromRange(range); } catch { /* ignore */ }
-    if (!cfi) return;
-    pendingSelectionCfi = cfi;
-    pendingSelectionText = text;
-    addHighlight(settings.lastHighlightColor);
-    e.preventDefault();
-    e.stopPropagation();
   }, true);
 }
 
@@ -1749,6 +2468,51 @@ function onSelected(cfiRange: string, contents: any) {
   } catch (e) { console.error(e); }
 }
 
+// Dictionary lookup for the Text/Markdown reader. epub content lives inside
+// an iframe and finalizes selections via epub.js's own 'selected' event
+// (onSelected, above); the text/md reader renders straight into the main
+// document, so a plain mouseup is the equivalent "selection is done" signal.
+// Only the word-lookup half of onSelected applies here — highlight swatches
+// stay epub-only because persisted highlights are anchored to an EPUB CFI,
+// which plain text has no equivalent of.
+function onTextReaderMouseUp(e: MouseEvent) {
+  if (!currentTextElement) return;
+  // This listener is global (registered once on `document`), so it fires for
+  // EVERY mouseup in the app — including clicks on the dict popover's own
+  // buttons, which live in the same main document as the text reader. Without
+  // checking the click's actual target, clicking "Explain in context" (or any
+  // other popover button) while a just-made word selection is still technically
+  // non-collapsed would be misread as "a new selection just finished here",
+  // triggering hideDictPopover() and hiding the very popover being clicked —
+  // the button's own handler still runs afterward, but on a display:none
+  // element nobody can see. mouseup fires before click, so this race is real.
+  if (!currentTextElement.contains(e.target as Node)) return;
+
+  const sel = window.getSelection();
+  const text = (sel?.toString() || '').trim();
+  if (!sel || sel.isCollapsed || !text) return;
+  const anchorNode = sel.anchorNode;
+  if (!anchorNode || !currentTextElement.contains(anchorNode)) return;
+
+  const range = sel.getRangeAt(0);
+  const rect = range.getBoundingClientRect();
+  if (!rect.width && !rect.height) return;
+  const pageX = rect.left + rect.width / 2;
+  const pageY = rect.top - 10;
+
+  pendingSelectionCfi = null;
+  pendingSelectionText = text;
+  pendingSelectionContext = extractSentenceContext(range);
+
+  hideDictPopover();
+  hideFootnotePopover();
+  const currentId = ++dictionaryLookupId;
+
+  if (!text.includes(' ') && text.length > 1) {
+    lookupWord(text, pageX, pageY, currentId);
+  }
+}
+
 async function lookupWord(word: string, x: number, y: number, lookupId: number) {
   const cleanWord = word.replace(/[^a-zA-Z]/g, '');
   if (!cleanWord) return;
@@ -1781,7 +2545,8 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
       const wikiHtml = `<div>${escapeHtml(wikiData.extract)}</div>`;
       el.dictMeanings.innerHTML = wikiHtml;
       showDictPopover(x, y);
-      prepareAiExplain(wikiData.title);
+      dictAi.prepare(wikiData.title, pendingSelectionContext);
+      preparePronounceBtn(el.dictPronounceBtn, wikiData.title);
       saveVocabEntry({ display: wikiData.title, definitionHtml: wikiHtml, phonetic: 'Wikipedia' });
       return;
     }
@@ -1805,7 +2570,8 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
     }
 
     showDictPopover(x, y);
-    prepareAiExplain(entry.word);
+    dictAi.prepare(entry.word, pendingSelectionContext);
+    preparePronounceBtn(el.dictPronounceBtn, entry.word);
     saveVocabEntry({ display: entry.word, definitionHtml: el.dictMeanings.innerHTML, phonetic });
   } catch (err) {
     if ((err as any)?.name === 'AbortError') return;
@@ -1822,17 +2588,118 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
     showDictPopover(x, y);
     // Even when the online sources whiff — including when we're fully offline —
     // the local model still runs and can explain the word from context.
-    prepareAiExplain(cleanWord);
+    dictAi.prepare(cleanWord, pendingSelectionContext);
+    preparePronounceBtn(el.dictPronounceBtn, cleanWord);
   }
 }
 
+// Dictionary lookup for PDF: the native viewer's own text selection isn't
+// reachable from JS — its actual page content lives inside a nested
+// chrome-extension:// context, the same wall documented on currentPdfDoc —
+// so there's no selection/mouseup event to hook the way epub/text do. This
+// is copy-paste driven instead: the user selects+copies a word using the
+// native viewer's own (fully working) selection, then clicks this button,
+// which reads it back off the clipboard.
+async function lookupWordFromPdfClipboard() {
+  let clip: string | null = null;
+  try {
+    clip = await readClipboardText();
+  } catch (err) {
+    console.error('Clipboard read failed:', err);
+    toast("Couldn't read the clipboard.");
+    return;
+  }
+
+  const word = (clip || '').trim();
+  if (!word) {
+    toast('Select a word in the PDF and copy it (Ctrl+C), then try again.');
+    return;
+  }
+  if (/\s/.test(word)) {
+    toast('Copy a single word to look it up.');
+    return;
+  }
+
+  pendingSelectionCfi = null;
+  pendingSelectionText = word;
+  pendingSelectionContext = await pdfWordSentenceContext(word);
+
+  hideDictPopover();
+  hideFootnotePopover();
+  const currentId = ++dictionaryLookupId;
+
+  // No selection rect to anchor to (see above) — center the popover under
+  // the button that triggered it instead.
+  const btnRect = el.pdfDictBtn.getBoundingClientRect();
+  lookupWord(word, btnRect.left + btnRect.width / 2, btnRect.bottom + 10, currentId);
+}
+
+// Plain-text counterpart of extractSentenceContext (which needs a DOM
+// Range) — PDF has no DOM to range over, only the page text pdf.js already
+// extracted for chat (see getPdfPageText). Finds the word's first
+// case-insensitive occurrence on the current page and returns the sentence
+// around it, so the AI "explain in context" button has something to work
+// with. Falls back to '' (context-free explain) if the word isn't found on
+// this page — e.g. the user copied it, then turned the page before clicking
+// the lookup button.
+async function pdfWordSentenceContext(word: string): Promise<string> {
+  const pageText = await getPdfPageText(currentPdfPage);
+  const idx = pageText.toLowerCase().indexOf(word.toLowerCase());
+  if (idx === -1) return '';
+
+  let start = idx;
+  while (start > 0 && !/[.!?…]/.test(pageText[start - 1])) start--;
+  while (start < pageText.length && /[\s"'`«»‹›]/.test(pageText[start])) start++;
+
+  let end = idx + word.length;
+  while (end < pageText.length && !/[.!?…]/.test(pageText[end])) end++;
+  if (end < pageText.length) end++; // include the terminator
+
+  return pageText.slice(start, end).trim();
+}
+
+// Anchor point (viewport coords, above the selection) the dict popover was
+// last opened at. Stashed so repositionDictPopover() can re-clamp after the
+// popover's own content changes size (the "Explain in context" button and
+// AI output appear later, asynchronously, after the popover is first shown).
+let dictAnchorX = 0;
+let dictAnchorY = 0;
+
 function showDictPopover(pageX: number, pageY: number) {
+  dictAnchorX = pageX;
+  dictAnchorY = pageY;
+  el.dictPopover.hidden = false;
+  repositionDictPopover();
+}
+
+// Clamps the popover fully inside the viewport on every edge, not just the
+// top-left. The original version only floored `top` at 8px — on a short
+// window (or a word selected low in the Markdown reader's long scrolling
+// page, which — unlike EPUB's padded, paginated columns — can put a
+// selection anywhere including near the bottom edge) the popover could be
+// positioned with its bottom, including the "Explain in context" button,
+// past `window.innerHeight`: invisible/unreachable, which looks exactly
+// like the button "not working". Also re-run this after the popover's
+// content grows (AI button appearing, AI answer streaming in) since its
+// rendered height at those points is larger than when first opened.
+function repositionDictPopover() {
   const p = el.dictPopover;
-  p.hidden = false;
+  if (p.hidden) return;
   const w = p.offsetWidth || 300;
   const h = p.offsetHeight || 200;
-  p.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, pageX - w / 2))}px`;
-  p.style.top  = `${Math.max(8, pageY - h - 50)}px`;
+
+  const left = Math.max(8, Math.min(window.innerWidth - w - 8, dictAnchorX - w / 2));
+
+  // Prefer above the selection (matches the original behavior). If it
+  // doesn't fit above, flip to below the selection instead of just clamping
+  // to the top edge and hoping the content fits — that's what let the AI
+  // button end up hidden below the fold.
+  let top = dictAnchorY - h - 50;
+  if (top < 8) top = dictAnchorY + 60;
+  top = Math.max(8, Math.min(window.innerHeight - h - 8, top));
+
+  p.style.left = `${left}px`;
+  p.style.top = `${top}px`;
 }
 
 function hideDictPopover() {
@@ -1840,79 +2707,481 @@ function hideDictPopover() {
   dictionaryLookupId++;              // any in-flight lookup becomes stale
   dictAbortController?.abort();      // cancel network work too
   dictAbortController = null;
-  resetAiExplain();
+  dictAi.reset();
+  el.dictPronounceBtn.hidden = true;
+  stopPronounce();
 }
 
 /* ------------------------------------------------------------------
-   Smart dictionary — "Explain in context" via the local LLM.
+   Smart AI — "Explain in context" / "Try again" / usage examples via the
+   local LLM. Two surfaces use this: the dictionary popover (opened from an
+   in-text word lookup) and the vocab review card (opened once a saved
+   word's definition is revealed during spaced-repetition review). Both
+   drive the same llm_explain / llm_word_examples commands with identical
+   busy/staleness/timeout handling, so it's one controller factory
+   instantiated per surface rather than duplicated per call site.
 
    When a definition is shown and a local model is installed, we offer a
    button that asks the model to explain the word *as used in this sentence*.
    This picks up idioms, disambiguates senses, and even helps for words the
    Free Dictionary API couldn't find. Entirely offline.
    ------------------------------------------------------------------ */
-let aiExplainWord = '';
-let aiExplainSentence = '';
-let aiExplainInFlight = false;
-
-// Called right after a lookup shows the popover. Decides whether to offer the
-// AI button and stashes the word + its sentence for the click handler.
-function prepareAiExplain(word: string) {
-  aiExplainWord = word;
-  aiExplainSentence = pendingSelectionContext;
-  el.dictAiOutput.hidden = true;
-  el.dictAiOutput.textContent = '';
-  // Only offer the button when a model is actually installed and we have a
-  // real word — otherwise the click would just error.
-  const offer = isLlmReady() && !!word && word.trim().length > 0;
-  el.dictAiBtn.hidden = !offer;
-  el.dictAiBtn.disabled = false;
-  el.dictAiBtn.classList.remove('is-busy');
+interface AiExplainElements {
+  btn: HTMLButtonElement;
+  output: HTMLDivElement;
+  actions: HTMLDivElement;
+  retryBtn: HTMLButtonElement;
+  examplesBtn: HTMLButtonElement;
+  examplesOutput: HTMLDivElement;
+  // Popover surfaces need re-clamping as their content grows; the vocab
+  // review card is a fixed-position modal and doesn't need this.
+  onLayoutChange?: () => void;
 }
 
-function resetAiExplain() {
-  aiExplainInFlight = false;
-  el.dictAiBtn.hidden = true;
-  el.dictAiBtn.disabled = false;
-  el.dictAiBtn.classList.remove('is-busy');
-  el.dictAiOutput.hidden = true;
-  el.dictAiOutput.textContent = '';
+interface AiExplainController {
+  prepare(word: string, sentence: string): void;
+  reset(): void;
+  explain(): Promise<void>;
+  examples(): Promise<void>;
 }
 
-async function runAiExplain() {
-  if (aiExplainInFlight || !isLlmReady() || !aiExplainWord) return;
-  const model = llmStatus!.models[0];
+// Rejects with `message` if `promise` hasn't settled within `ms`. The
+// underlying Tauri invoke() has no cancellation, so a hung `llama-cli`
+// subprocess (e.g. CPU-starved while the whole app is minimized/throttled
+// by the OS) would otherwise leave the controller's in-flight flag stuck
+// true forever — its own guard clause would then permanently no-op every
+// future click, which looks exactly like "the button doesn't work". This
+// guarantees the UI always recovers within `ms` regardless of backend state.
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
+}
 
-  aiExplainInFlight = true;
-  el.dictAiBtn.disabled = true;
-  el.dictAiBtn.classList.add('is-busy');
-  el.dictAiOutput.hidden = false;
-  el.dictAiOutput.textContent = 'Thinking…';
+function createAiExplainController(els: AiExplainElements): AiExplainController {
+  let word = '';
+  let sentence = '';
+  let explainInFlight = false;
+  let examplesInFlight = false;
 
-  const word = aiExplainWord;
-  const sentence = aiExplainSentence;
-  try {
-    const answer = await invoke<string>('llm_explain', {
-      word,
-      sentence,
-      modelPath: model.path,
-    });
-    // Guard against a stale response after the user moved on to another word.
-    if (aiExplainWord !== word) return;
-    el.dictAiOutput.textContent = answer;   // textContent = XSS-safe
-  } catch (err) {
-    if (aiExplainWord !== word) return;
-    console.error('llm_explain failed:', err);
-    el.dictAiOutput.textContent = `Couldn't run the local model: ${String(err)}`;
-  } finally {
-    if (aiExplainWord === word) {
-      aiExplainInFlight = false;
-      el.dictAiBtn.disabled = false;
-      el.dictAiBtn.classList.remove('is-busy');
-      // Once we've shown an explanation, drop the button — a second click
-      // would just regenerate the same thing.
-      el.dictAiBtn.hidden = true;
+  // Called right after a lookup/reveal shows this surface. Decides whether
+  // to offer the AI button and stashes the word + its sentence for the
+  // click handlers.
+  function prepare(w: string, s: string) {
+    word = w;
+    sentence = s;
+    // A fresh word abandons any prior in-flight run (its response is now
+    // stale and its finally-block will no-op on the word mismatch), so
+    // clear the flags here — otherwise the buttons could stay wedged as
+    // "in flight".
+    explainInFlight = false;
+    examplesInFlight = false;
+    els.output.hidden = true;
+    els.output.textContent = '';
+    // Only offer the button when a model is actually installed and we have
+    // a real word — otherwise the click would just error.
+    const offer = isLlmReady() && !!w && w.trim().length > 0;
+    els.btn.hidden = !offer;
+    els.btn.disabled = false;
+    els.btn.classList.remove('is-busy');
+    // Retry + usage-examples only appear once the first explanation lands.
+    els.actions.hidden = true;
+    els.retryBtn.disabled = false;
+    els.retryBtn.classList.remove('is-busy');
+    els.examplesBtn.disabled = false;
+    els.examplesBtn.classList.remove('is-busy');
+    els.examplesOutput.hidden = true;
+    els.examplesOutput.textContent = '';
+    // The AI button showing/hiding changes the popover's rendered height —
+    // re-clamp so it (and the button) stay fully on-screen.
+    els.onLayoutChange?.();
+  }
+
+  function reset() {
+    explainInFlight = false;
+    examplesInFlight = false;
+    els.btn.hidden = true;
+    els.btn.disabled = false;
+    els.btn.classList.remove('is-busy');
+    els.actions.hidden = true;
+    els.retryBtn.disabled = false;
+    els.retryBtn.classList.remove('is-busy');
+    els.examplesBtn.disabled = false;
+    els.examplesBtn.classList.remove('is-busy');
+    els.examplesOutput.hidden = true;
+    els.examplesOutput.textContent = '';
+    els.output.hidden = true;
+    els.output.textContent = '';
+  }
+
+  async function explain() {
+    if (explainInFlight || !isLlmReady() || !word) return;
+    const model = currentLlmModel()!;
+
+    explainInFlight = true;
+    els.btn.disabled = true;
+    els.btn.classList.add('is-busy');
+    // While a run is in flight, keep the retry pill visible but spinning +
+    // disabled so a regenerate can't stack a second request.
+    els.retryBtn.disabled = true;
+    els.retryBtn.classList.add('is-busy');
+    els.output.hidden = false;
+    els.output.textContent = 'Thinking…';
+    // The output area just appeared, growing the surface — re-clamp.
+    els.onLayoutChange?.();
+
+    const w = word;
+    const s = sentence;
+    try {
+      const answer = await withTimeout(
+        invoke<string>('llm_explain', { word: w, sentence: s, modelPath: model.path }),
+        60_000,
+        'Timed out waiting for the local model — it may have stalled while the app was minimized. Try again.'
+      );
+      // Guard against a stale response after the user moved on to another word.
+      if (word !== w) return;
+      els.output.innerHTML = renderAiMarkdown(answer);   // sanitized — see renderAiMarkdown
+    } catch (err) {
+      if (word !== w) return;
+      console.error('llm_explain failed:', err);
+      els.output.textContent = `Couldn't run the local model: ${String(err)}`;
+    } finally {
+      if (word === w) {
+        explainInFlight = false;
+        els.btn.disabled = false;
+        els.btn.classList.remove('is-busy');
+        // The first-run button is done; swap in the retry + usage-examples
+        // icons. The model is non-deterministic, so a second explain pass
+        // yields a fresh explanation for the same word + sentence (like
+        // ChatGPT's regenerate).
+        els.btn.hidden = true;
+        els.actions.hidden = false;
+        els.retryBtn.disabled = false;
+        els.retryBtn.classList.remove('is-busy');
+        // The final answer/error text is in and the button row swapped —
+        // the surface's final height is now settled, so re-clamp once more.
+        els.onLayoutChange?.();
+      }
     }
+  }
+
+  // "Show other example usages" — asks the local model for a few sentences
+  // using the current word in senses/contexts other than the one the reader
+  // is currently looking at. Shares the same word/sentence bookkeeping as
+  // explain() (word doubles as the staleness guard for both), since this
+  // button only ever appears for the word that's currently explained.
+  async function examples() {
+    if (examplesInFlight || !isLlmReady() || !word) return;
+    const model = currentLlmModel()!;
+
+    examplesInFlight = true;
+    els.examplesBtn.disabled = true;
+    els.examplesBtn.classList.add('is-busy');
+    els.examplesOutput.hidden = false;
+    els.examplesOutput.textContent = 'Finding other examples…';
+    els.onLayoutChange?.();
+
+    const w = word;
+    const s = sentence;
+    try {
+      const answer = await withTimeout(
+        invoke<string>('llm_word_examples', { word: w, sentence: s, modelPath: model.path }),
+        60_000,
+        'Timed out waiting for the local model — it may have stalled while the app was minimized. Try again.'
+      );
+      if (word !== w) return;
+      els.examplesOutput.innerHTML = renderAiMarkdown(answer);
+    } catch (err) {
+      if (word !== w) return;
+      console.error('llm_word_examples failed:', err);
+      els.examplesOutput.textContent = `Couldn't run the local model: ${String(err)}`;
+    } finally {
+      if (word === w) {
+        examplesInFlight = false;
+        els.examplesBtn.disabled = false;
+        els.examplesBtn.classList.remove('is-busy');
+        els.onLayoutChange?.();
+      }
+    }
+  }
+
+  return { prepare, reset, explain, examples };
+}
+
+const dictAi = createAiExplainController({
+  btn: el.dictAiBtn,
+  output: el.dictAiOutput,
+  actions: el.dictAiActions,
+  retryBtn: el.dictAiRetry,
+  examplesBtn: el.dictAiExamplesBtn,
+  examplesOutput: el.dictAiExamplesOutput,
+  onLayoutChange: () => repositionDictPopover(),
+});
+
+const vocabAi = createAiExplainController({
+  btn: el.vocabAiBtn,
+  output: el.vocabAiOutput,
+  actions: el.vocabAiActions,
+  retryBtn: el.vocabAiRetry,
+  examplesBtn: el.vocabAiExamplesBtn,
+  examplesOutput: el.vocabAiExamplesOutput,
+});
+
+/* ------------------------------------------------------------------
+   Chat — free-form Q&A about the current page/chapter via the local LLM.
+
+   Unlike dictAi/vocabAi above (one word/sentence pair, one request), this
+   is a genuine multi-turn conversation. But llama-cli has no persistent-
+   conversation mode the way we invoke it (see llm_chat_reply on the Rust
+   side) — every call is a fresh process, so "chat" means resending a capped
+   slice of prior turns as plain text alongside the passage on every send.
+   That keeps the whole thing inside the shared 4096-token context, which is
+   also why the passage is scoped to the visible page by default rather than
+   the whole chapter (a chapter routinely doesn't fit; a screen always does).
+   ------------------------------------------------------------------ */
+interface ChatMessage { role: 'user' | 'assistant'; content: string; }
+let chatHistory: ChatMessage[] = [];
+let chatScope: 'page' | 'chapter' = 'page';
+let chatInFlight = false;
+// Resent as context on every send (capped independently of the full,
+// unbounded chatHistory kept for on-screen scrollback) — keeps the prompt
+// from growing without bound turn after turn.
+const CHAT_HISTORY_MAX_TURNS = 3;
+// Chapter scope gets a hard word budget; page scope is naturally small
+// (one screen) and never needs it.
+const CHAT_CHAPTER_WORD_BUDGET = 1800;
+
+// Extracts the text to answer against. Always recomputed fresh right before
+// a send (never cached at modal-open time) — if the reader turns a page
+// mid-conversation, the next answer simply reflects what's on screen now,
+// same as a person looking over your shoulder would. `focusWords` is the
+// same word-token array TTS/focus-mode/chapter-caching already build via
+// collectFocusWords(); classifyWord() is the same visible/before/after
+// classifier focus mode uses to know when to turn a page.
+async function currentChatPassage(scope: 'page' | 'chapter'): Promise<{ text: string; truncated: boolean }> {
+  if (activeFormat === 'pdf') {
+    if (!currentPdfDoc) return { text: '', truncated: false };
+    if (scope === 'page') {
+      return { text: await getPdfPageText(currentPdfPage), truncated: false };
+    }
+    // No epub-style "chapter" to bound chapter scope by, so it's approximated
+    // as however many pages starting at the current one fit the same word
+    // budget epub/text chapter scope uses.
+    const words: string[] = [];
+    let truncated = false;
+    for (let p = currentPdfPage; p <= pdfTotalPages; p++) {
+      const pageWords = (await getPdfPageText(p)).split(/\s+/).filter(Boolean);
+      if (words.length + pageWords.length > CHAT_CHAPTER_WORD_BUDGET) {
+        words.push(...pageWords.slice(0, CHAT_CHAPTER_WORD_BUDGET - words.length));
+        truncated = true;
+        break;
+      }
+      words.push(...pageWords);
+    }
+    return { text: words.join(' '), truncated };
+  }
+
+  if (!currentRendition && !currentTextElement) return { text: '', truncated: false };
+  collectFocusWords();
+
+  if (scope === 'page') {
+    const words: string[] = [];
+    for (const fw of focusWords) {
+      if (classifyWord(fw).pos !== 'visible') continue;
+      const text = (fw.node.textContent || '').slice(fw.start, fw.end).trim();
+      if (text) words.push(text);
+    }
+    return { text: words.join(' '), truncated: false };
+  }
+
+  const { texts } = collectSectionSentences();
+  const words = texts.join(' ').split(/\s+/).filter(Boolean);
+  const truncated = words.length > CHAT_CHAPTER_WORD_BUDGET;
+  return { text: words.slice(0, CHAT_CHAPTER_WORD_BUDGET).join(' '), truncated };
+}
+
+function renderChatMessages(): void {
+  if (chatHistory.length === 0) {
+    el.chatMessages.innerHTML = '<div class="chat-empty">Ask a question about what you\'re reading — it can see whatever\'s on screen (or the chapter, if you switch scope above).</div>';
+    return;
+  }
+  el.chatMessages.innerHTML = '';
+  for (const m of chatHistory) {
+    const div = document.createElement('div');
+    div.className = `chat-msg ${m.role}`;
+    if (m.role === 'assistant') div.innerHTML = renderAiMarkdown(m.content);
+    else div.textContent = m.content;
+    el.chatMessages.appendChild(div);
+  }
+  el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+}
+
+function openChat(): void {
+  if (!currentRendition && !currentTextElement && !currentPdfDoc) { toast('Open a book first'); return; }
+  if (!isLlmReady()) { toast('Set up a local LLM to chat (see TTS/AI setup)'); return; }
+  el.chatModal.hidden = false;
+  renderLlmModelSelect();
+  renderChatMessages();
+  el.chatInput.focus();
+}
+
+function closeChat(): void {
+  el.chatModal.hidden = true;
+}
+
+function resetChat(): void {
+  chatHistory = [];
+  el.chatTruncatedNote.hidden = true;
+  renderChatMessages();
+}
+
+async function sendChatMessage(): Promise<void> {
+  if (chatInFlight || !isLlmReady()) return;
+  const question = el.chatInput.value.trim();
+  if (!question) return;
+  const model = currentLlmModel()!;
+
+  chatHistory.push({ role: 'user', content: question });
+  el.chatInput.value = '';
+  el.chatInput.style.height = 'auto';
+  renderChatMessages();
+
+  chatInFlight = true;
+  el.chatInput.disabled = true;
+  el.chatSendBtn.disabled = true;
+
+  // Placeholder bubble while the model thinks — replaced in place below
+  // rather than re-pushed onto chatHistory, so a failure doesn't leave a
+  // bogus assistant turn in the resent-history slice.
+  const placeholder = document.createElement('div');
+  placeholder.className = 'chat-msg assistant is-busy';
+  placeholder.textContent = 'Thinking…';
+  el.chatMessages.appendChild(placeholder);
+  el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+
+  const { text: passage, truncated } = await currentChatPassage(chatScope);
+  el.chatTruncatedNote.hidden = !truncated;
+  if (truncated) {
+    el.chatTruncatedNote.textContent = `Using the first ~${CHAT_CHAPTER_WORD_BUDGET} words of this chapter.`;
+  }
+
+  if (!passage) {
+    placeholder.className = 'chat-msg assistant is-error';
+    placeholder.textContent = "Couldn't find any text to answer against — try scrolling to a page with content.";
+    chatInFlight = false;
+    el.chatInput.disabled = false;
+    el.chatSendBtn.disabled = false;
+    return;
+  }
+
+  // Everything except the user turn just pushed, capped to the last few
+  // exchanges — chatHistory itself stays unbounded for on-screen scrollback.
+  const historyForPrompt = chatHistory.slice(0, -1).slice(-CHAT_HISTORY_MAX_TURNS * 2);
+
+  try {
+    const answer = await withTimeout(
+      invoke<string>('llm_chat_reply', {
+        passage,
+        history: historyForPrompt,
+        question,
+        modelPath: model.path,
+      }),
+      // Larger prompts (page/chapter text + history) take longer to evaluate
+      // on CPU before generation even starts — more headroom than the 60s
+      // used for single-word explain.
+      90_000,
+      'Timed out waiting for the local model — it may have stalled while the app was minimized. Try again.'
+    );
+    chatHistory.push({ role: 'assistant', content: answer });
+    renderChatMessages();
+  } catch (err) {
+    console.error('llm_chat_reply failed:', err);
+    placeholder.className = 'chat-msg assistant is-error';
+    placeholder.textContent = `Couldn't run the local model: ${String(err)}`;
+  } finally {
+    chatInFlight = false;
+    el.chatInput.disabled = false;
+    el.chatSendBtn.disabled = false;
+    el.chatInput.focus();
+  }
+}
+
+/* ------------------------------------------------------------------
+   Pronounce — plays a single word through the local Piper voice model.
+   Shared by the dictionary popover (word lookup) and the vocab review
+   card, same reasoning as the AI controller above: identical synth +
+   playback + busy-state handling, two call sites.
+
+   Reuses `piper_synthesize` (already used for read-aloud chunks) rather
+   than any new backend command — a single word is just a very short chunk.
+   Length scale is pinned to 1.0 regardless of the reader's TTS speed
+   setting, since a pronunciation check should sound natural, not sped up.
+   ------------------------------------------------------------------ */
+let pronounceAudio: HTMLAudioElement | null = null;
+let pronounceAudioUrl: string | null = null;
+let pronounceInFlight = false;
+
+function stopPronounce(): void {
+  if (pronounceAudio) {
+    pronounceAudio.pause();
+    pronounceAudio = null;
+  }
+  if (pronounceAudioUrl) {
+    URL.revokeObjectURL(pronounceAudioUrl);
+    pronounceAudioUrl = null;
+  }
+}
+
+// Shows/hides a pronounce button for `word`, mirroring how prepareAiExplain
+// gates the AI button on isLlmReady(). Call whenever the surface starts
+// showing a new word; also stops any pronunciation still playing for the
+// previous word.
+function preparePronounceBtn(btn: HTMLButtonElement, word: string): void {
+  stopPronounce();
+  const offer = isPiperReady() && !!ttsSettings.piperVoicePath && !!word && word.trim().length > 0;
+  btn.hidden = !offer;
+  btn.disabled = false;
+  btn.classList.remove('is-busy');
+  btn.dataset.word = word;
+}
+
+async function pronounceWord(word: string, btn: HTMLButtonElement): Promise<void> {
+  const text = word.trim();
+  if (!text || pronounceInFlight || !ttsSettings.piperVoicePath) return;
+
+  stopPronounce();
+  pronounceInFlight = true;
+  btn.disabled = true;
+  btn.classList.add('is-busy');
+
+  try {
+    const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
+      text,
+      voicePath: ttsSettings.piperVoicePath,
+      lengthScale: 1.0,
+    });
+    const wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+    const blob = new Blob([wavBytes.buffer as ArrayBuffer], { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    pronounceAudio = audio;
+    pronounceAudioUrl = url;
+    audio.addEventListener('ended', () => {
+      if (pronounceAudioUrl === url) { URL.revokeObjectURL(url); pronounceAudioUrl = null; }
+      if (pronounceAudio === audio) pronounceAudio = null;
+    });
+    await audio.play();
+  } catch (err) {
+    console.error('pronounce failed:', err);
+    toast(`Couldn't pronounce "${text}": ${String(err)}`);
+  } finally {
+    pronounceInFlight = false;
+    btn.disabled = false;
+    btn.classList.remove('is-busy');
   }
 }
 
@@ -2347,6 +3616,25 @@ function persistCrossBookUpdate(card: CrossBookVocabWord): void {
   }
 }
 
+// Delete a review card's word from its source book's journal entirely —
+// the review-modal counterpart to removeVocabEntry(), which only ever
+// operates on the currently-open book's journal (currentVocab). A
+// cross-book "Review all" session can show a card from a book that isn't
+// open, so deletion needs the same same-book/other-book branch as
+// persistCrossBookUpdate above.
+function deleteCrossBookVocabWord(card: CrossBookVocabWord): void {
+  if (currentBookRecord && card.bookId === currentBookRecord.id) {
+    currentVocab.words = currentVocab.words.filter(w => w.word !== card.word);
+    persistVocab();
+    refreshVocabPanelIfOpen();
+    scheduleVocabHighlightRefresh();
+    return;
+  }
+  const journal = loadVocab(card.bookId);
+  journal.words = journal.words.filter(w => w.word !== card.word);
+  save(KEY_VOCAB(card.bookId), journal);
+}
+
 function refreshVocabPanelIfOpen() {
   // Only rebuild if the drawer is showing the vocab panel — avoids DOM
   // churn every time a word is looked up during quiet reading.
@@ -2466,6 +3754,8 @@ function openVocabReview(scope: 'current' | 'all' = 'current') {
 function closeVocabReview() {
   el.vocabReviewModal.hidden = true;
   reviewQueue = [];
+  vocabAi.reset();
+  stopPronounce();
   refreshVocabPanelIfOpen();
   // The library button's count may have changed if we rated any cards.
   refreshLibraryVocabButton();
@@ -2477,6 +3767,11 @@ function showReviewEmpty() {
   el.vocabRevealActions.hidden = true;
   el.vocabRateActions.hidden = true;
   el.vocabReviewProgress.textContent = 'Nothing due right now';
+  el.vocabSkipBtn.disabled = true;
+  el.vocabDeleteBtn.disabled = true;
+  el.vocabPronounceBtn.hidden = true;
+  vocabAi.reset();
+  stopPronounce();
 }
 
 function showReviewCard() {
@@ -2507,9 +3802,17 @@ function showReviewCard() {
   el.vocabCardChapter.textContent = chapterLine;
   el.vocabCardBack.hidden = true;
   el.vocabCardDefinition.innerHTML = w.definition;
+  // Stashes word + context for the AI buttons living inside vocab-card-back;
+  // they only become reachable once revealReviewCard() unhides that panel.
+  vocabAi.prepare(w.displayWord, w.context || '');
+  // Pronounce is on the card front, so available immediately — no need to
+  // reveal the definition first to hear the word.
+  preparePronounceBtn(el.vocabPronounceBtn, w.displayWord);
 
   el.vocabRevealActions.hidden = false;
   el.vocabRateActions.hidden = true;
+  el.vocabSkipBtn.disabled = false;
+  el.vocabDeleteBtn.disabled = false;
 
   const remaining = reviewQueue.length - reviewIdx;
   el.vocabReviewProgress.textContent = `${reviewSessionDone} done · ${remaining} to go`;
@@ -2574,6 +3877,44 @@ function rateReviewCard(rating: 1 | 3 | 5) {
   showReviewCard();
 }
 
+// "Skip" — move past this card without rating it, so its SM-2 schedule is
+// left untouched (it stays due and will show up again next session) rather
+// than being penalized or promoted. Doesn't count toward reviewSessionDone
+// or the daily new-card cap since nothing was actually reviewed.
+function skipReviewCard() {
+  const w = reviewQueue[reviewIdx];
+  if (!w) return;
+  reviewIdx++;
+  if (reviewIdx >= reviewQueue.length) {
+    showReviewEmpty();
+    el.vocabReviewProgress.textContent = `Session done — ${reviewSessionDone} card${reviewSessionDone === 1 ? '' : 's'}`;
+    return;
+  }
+  showReviewCard();
+}
+
+// "Remove" — delete this word from vocabulary entirely (not just skip it).
+// Works the same whether the card came from the currently-open book or a
+// different one in a cross-book "Review all" session, since
+// deleteCrossBookVocabWord branches on that internally.
+function removeCurrentReviewCard() {
+  const w = reviewQueue[reviewIdx];
+  if (!w) return;
+  deleteCrossBookVocabWord(w);
+  reviewQueue.splice(reviewIdx, 1);   // next card lands at the same index
+  toast(`Removed "${w.displayWord}" from vocabulary`);
+  refreshLibraryVocabButton();
+
+  if (reviewIdx >= reviewQueue.length) {
+    showReviewEmpty();
+    el.vocabReviewProgress.textContent = reviewSessionDone === 0
+      ? 'Nothing due right now'
+      : `Session done — ${reviewSessionDone} card${reviewSessionDone === 1 ? '' : 's'}`;
+    return;
+  }
+  showReviewCard();
+}
+
 // Ensure Layout toggles work
 document.querySelectorAll<HTMLButtonElement>('[data-control="layout"] button').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -2597,9 +3938,21 @@ document.querySelectorAll<HTMLButtonElement>('[data-control="layout"] button').f
    Progress bar seek
    ============================================================ */
 function seekFromClick(e: MouseEvent) {
-  if (!currentBook || !currentRendition) return;
   const rect = el.progressTrack.getBoundingClientRect();
   const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+
+  if (activeFormat === 'pdf') {
+    // Inverse of updatePdfProgressUi's pct formula: (page-1)/(total-1).
+    if (!pdfTotalPages) return;
+    navigateToPdfPage(Math.round(pct * (pdfTotalPages - 1)) + 1);
+    return;
+  }
+  if (currentTextElement) {
+    const totalScroll = currentTextElement.scrollHeight - currentTextElement.clientHeight;
+    if (totalScroll > 0) currentTextElement.scrollTop = pct * totalScroll;
+    return;
+  }
+  if (!currentBook || !currentRendition) return;
   const cfi = currentBook.locations.cfiFromPercentage(pct);
   if (cfi) currentRendition.display(cfi);
 }
@@ -2684,13 +4037,17 @@ function refreshHighlightColors(): void {
       (n as HTMLDivElement).style.background = sentenceBg;
     });
   }
-  // Hover tracker overlay lives inside each iframe; find and repaint.
+  // Hover tracker overlay lives inside each epub iframe; find and repaint.
   const iframes = el.viewer?.querySelectorAll('iframe');
   iframes?.forEach((raw) => {
     const doc = (raw as HTMLIFrameElement).contentDocument;
     const trackerOverlay = doc?.querySelector('[data-focus-overlay]') as HTMLDivElement | null;
     if (trackerOverlay) trackerOverlay.style.background = `rgba(${rgb}, 0.18)`;
   });
+  // The text/md reader's tracker overlay lives directly on the main document
+  // (installFocusTracker(document, null) in boot()) rather than in an iframe.
+  const mainTrackerOverlay = document.querySelector('[data-focus-overlay]') as HTMLDivElement | null;
+  if (mainTrackerOverlay) mainTrackerOverlay.style.background = `rgba(${rgb}, 0.18)`;
 }
 
 function isFocusModeOn(): boolean { return focusModeOn; }
@@ -2746,6 +4103,10 @@ function getVisibleIframe(): HTMLIFrameElement | null {
        ordinary paging never flickers or jumps.
    ============================================================ */
 let navBusy = false;
+// Timestamp of the last standalone 'g' press, for detecting the vim "gg"
+// (go to start) chord — a second 'g' within the window counts as the pair.
+let lastGKeydownAt = 0;
+const GG_CHORD_WINDOW_MS = 500;
 
 function viewportIsBlank(): boolean {
   const iframe = getVisibleIframe();
@@ -2762,6 +4123,10 @@ function viewportIsBlank(): boolean {
 }
 
 async function navGo(dir: 'prev' | 'next'): Promise<void> {
+  if (activeFormat === 'pdf') {
+    navigateToPdfPage(currentPdfPage + (dir === 'prev' ? -1 : 1));
+    return;
+  }
   const r = currentRendition;
   const book = currentBook;
   if (!r || navBusy) return;
@@ -2804,24 +4169,51 @@ async function navGo(dir: 'prev' | 'next'): Promise<void> {
   }
 }
 
-function collectFocusWords(): void {
-  focusWords = [];
-  focusOverlay = null;
-  focusIframeDoc = null;
+// Vim-style h/j/k/l page stepping. epub already has navGo(); text/md books
+// have no scroll-stepping equivalent (Space/PageUp/PageDown page them via
+// native browser scrolling instead), so this adds a matching one-viewport
+// scroll step for those formats.
+function vimPageNav(dir: 'prev' | 'next'): void {
+  if (currentRendition) { navGo(dir); return; }
+  if (currentTextElement) {
+    const box = currentTextElement;
+    box.scrollTop += (dir === 'next' ? 1 : -1) * box.clientHeight * 0.9;
+  }
+}
 
-  const iframe = getVisibleIframe();
-  if (!iframe || !iframe.contentDocument?.body) return;
-  const doc = iframe.contentDocument;
-  focusIframeDoc = doc;
+// Vim-style gg/G jump to the start/end of the book.
+async function vimGoToStart(): Promise<void> {
+  if (currentRendition && currentBook) {
+    const first = (currentBook.spine as any).first();
+    if (first?.href) await currentRendition.display(first.href).catch(() => {});
+  } else if (currentTextElement) {
+    currentTextElement.scrollTop = 0;
+  }
+}
 
-  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
+async function vimGoToEnd(): Promise<void> {
+  if (currentRendition && currentBook) {
+    const last = (currentBook.spine as any).last();
+    if (last?.href) await currentRendition.display(last.href).catch(() => {});
+  } else if (currentTextElement) {
+    currentTextElement.scrollTop = currentTextElement.scrollHeight;
+  }
+}
+
+// Shared by both content sources RSVP/TTS can read from: an epub section's
+// iframe body, or (for text/md) the live .text-reader-container in the main
+// document. `root` is the tree-walk root; `doc` owns range/style creation.
+function walkFocusWords(doc: Document, root: Node): FocusWord[] {
+  const win = doc.defaultView;
+  const words: FocusWord[] = [];
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (!node.textContent || !node.textContent.trim()) return NodeFilter.FILTER_REJECT;
       const parent = node.parentElement;
       if (!parent) return NodeFilter.FILTER_REJECT;
       const tag = parent.tagName.toLowerCase();
       if (tag === 'script' || tag === 'style' || tag === 'noscript') return NodeFilter.FILTER_REJECT;
-      const style = doc.defaultView?.getComputedStyle(parent);
+      const style = win?.getComputedStyle(parent);
       if (style && (style.display === 'none' || style.visibility === 'hidden')) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     }
@@ -2833,9 +4225,61 @@ function collectFocusWords(): void {
     const text = node.textContent || '';
     let m: RegExpExecArray | null;
     while ((m = wordRe.exec(text))) {
-      focusWords.push({ node: node as Text, start: m.index, end: m.index + m[0].length });
+      words.push({ node: node as Text, start: m.index, end: m.index + m[0].length });
     }
   }
+  return words;
+}
+
+function collectFocusWords(): void {
+  focusWords = [];
+  focusOverlay = null;
+  focusIframeDoc = null;
+
+  // Text/md has no per-section iframe — its content is the live container
+  // in the main document. Walking from it (rather than doc.body) means the
+  // reader's own chrome (topbar, drawers, popovers) never gets swept in.
+  if (currentTextElement) {
+    focusIframeDoc = document;
+    focusWords = walkFocusWords(document, currentTextElement);
+    return;
+  }
+
+  const iframe = getVisibleIframe();
+  if (!iframe || !iframe.contentDocument?.body) return;
+  const doc = iframe.contentDocument;
+  focusIframeDoc = doc;
+  focusWords = walkFocusWords(doc, doc.body);
+}
+
+// Text/md documents render into `currentTextElement` (.text-reader-container),
+// which scrolls internally (overflow-y:auto) while `document`/`body` never
+// scroll (see html,body{overflow:hidden} in styles.css). An overlay appended
+// to `doc.body` and positioned from `window.scrollX/Y` is anchored to the
+// (static) page instead of that scrolling container, so it visibly detaches
+// from the highlighted word the moment the container scrolls out from under
+// it. Anchoring the overlay to the scrolling container itself — and
+// expressing its position in that container's own content coordinates —
+// makes it scroll natively with the text, same as epub's per-iframe overlays
+// already do relative to their iframe document.
+function overlayHostFor(doc: Document): HTMLElement {
+  if (doc === document && currentTextElement) return currentTextElement;
+  return doc.body;
+}
+
+// Companion to overlayHostFor: the (sx, sy) to add to a viewport-relative
+// rect so the result is in overlayHostFor(doc)'s own content coordinate
+// space, valid regardless of how the host has scrolled since.
+function overlayOffset(doc: Document): { sx: number; sy: number } {
+  if (doc === document && currentTextElement) {
+    const hostRect = currentTextElement.getBoundingClientRect();
+    return {
+      sx: currentTextElement.scrollLeft - hostRect.left,
+      sy: currentTextElement.scrollTop - hostRect.top,
+    };
+  }
+  const win = doc.defaultView;
+  return { sx: win?.scrollX || 0, sy: win?.scrollY || 0 };
 }
 
 function ensureFocusOverlay(doc: Document): HTMLDivElement {
@@ -2857,7 +4301,7 @@ function ensureFocusOverlay(doc: Document): HTMLDivElement {
     'opacity:0',
     'mix-blend-mode:multiply',
   ].join(';');
-  doc.body.appendChild(div);
+  overlayHostFor(doc).appendChild(div);
   focusOverlay = div;
   return div;
 }
@@ -2884,7 +4328,7 @@ function ensureSentenceOverlay(doc: Document): HTMLDivElement {
     'opacity:0',
     'transition:opacity 180ms ease',
   ].join(';');
-  doc.body.appendChild(div);
+  overlayHostFor(doc).appendChild(div);
   sentenceOverlay = div;
   currentSentenceKey = '';
   return div;
@@ -3031,6 +4475,18 @@ function classifyWord(fw: FocusWord): { pos: WordPos; range: Range | null; rect:
   const rect = range.getBoundingClientRect();
   if (!rect.width || !rect.height) return { pos: 'gone', range, rect };
 
+  // Text/md is one continuous scrolling container (overflow-y:auto), not
+  // epub's paginated columns — "visible" means inside that container's own
+  // clipped box. Its content lives in the main document, so unlike the epub
+  // iframe case below, `rect` is already in top-window coordinates — no
+  // offset translation needed.
+  if (currentTextElement) {
+    const box = currentTextElement.getBoundingClientRect();
+    if (rect.bottom <= box.top + 4) return { pos: 'before', range, rect };
+    if (rect.top >= box.bottom - 4) return { pos: 'after', range, rect };
+    return { pos: 'visible', range, rect };
+  }
+
   const iframe = getVisibleIframe();
   if (!iframe) return { pos: 'gone', range, rect };
 
@@ -3065,6 +4521,29 @@ function classifyWord(fw: FocusWord): { pos: WordPos; range: Range | null; rect:
 // until we cross a sentence-ending word (or hit the start of focusWords),
 // then forward until the next sentence-ending word (or end). Returns the
 // [firstWordIdx, lastWordIdx] range inclusive.
+// Block-level tags that end a "sentence" on their own even without trailing
+// punctuation — a heading, list item, or table cell is never a run-on into
+// whatever follows it just because it lacks a period. Markdown/web-article
+// content is dense with these (headings, bullet lists) in a way prose-heavy
+// EPUB chapters usually aren't, which is why a purely punctuation-based walk
+// (the only check this function used to do) mostly got away with it in EPUB
+// but visibly over-dims across whole sections of a Markdown/web article —
+// every un-punctuated heading and list item got silently swallowed into one
+// enormous "sentence".
+const SENTENCE_BLOCK_TAGS = new Set([
+  'P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'BLOCKQUOTE', 'TD', 'TH', 'PRE', 'FIGCAPTION', 'DT', 'DD',
+]);
+
+function sentenceBlockAncestor(node: Node): Element | null {
+  let el = node.parentElement;
+  while (el) {
+    if (SENTENCE_BLOCK_TAGS.has(el.tagName)) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
 function sentenceRangeAround(wordIdx: number): [number, number] {
   if (wordIdx < 0 || wordIdx >= focusWords.length) return [-1, -1];
 
@@ -3074,11 +4553,13 @@ function sentenceRangeAround(wordIdx: number): [number, number] {
   let start = wordIdx;
   while (start > 0) {
     if (endsSentence(wordText(focusWords[start - 1]))) break;
+    if (sentenceBlockAncestor(focusWords[start - 1].node) !== sentenceBlockAncestor(focusWords[start].node)) break;
     start--;
   }
   let end = wordIdx;
   while (end < focusWords.length - 1) {
     if (endsSentence(wordText(focusWords[end]))) break;
+    if (sentenceBlockAncestor(focusWords[end].node) !== sentenceBlockAncestor(focusWords[end + 1].node)) break;
     end++;
   }
   return [start, end];
@@ -3126,8 +4607,7 @@ function paintSentenceRange(startWordIdx: number, endWordIdx: number): void {
   }
 
   const rects = sr.getClientRects();
-  const sx = focusIframeDoc.defaultView?.scrollX || 0;
-  const sy = focusIframeDoc.defaultView?.scrollY || 0;
+  const { sx, sy } = overlayOffset(focusIframeDoc);
   const rgb = accentRgbTuple();
 
   // Rebuild children — one <div> per line rect. Reusing existing children
@@ -3172,8 +4652,7 @@ function paintRange(range: Range, rect: DOMRect, wordIdx: number = -1): void {
   }
 
   const overlay = ensureFocusOverlay(focusIframeDoc);
-  const sx = focusIframeDoc.defaultView?.scrollX || 0;
-  const sy = focusIframeDoc.defaultView?.scrollY || 0;
+  const { sx, sy } = overlayOffset(focusIframeDoc);
 
   // Detect line break vs. same-line motion. A diagonal transition across
   // two lines looks wrong (the highlight swipes through the paragraph
@@ -3232,8 +4711,35 @@ const raf = () => new Promise<void>(r => requestAnimationFrame(() => r()));
 const wait = (ms: number) => new Promise<void>(r => window.setTimeout(r, ms));
 
 async function turnPageAndContinue(cb: () => void): Promise<void> {
-  if (!currentRendition) { cb(); return; }
   if (advancingPage) return;
+
+  // Text/md is one continuous scroll, not epub's discrete pages — "turning
+  // the page" means scrolling the container to reveal more content. No
+  // section swap ever happens, so unlike the epub path below we never need
+  // to re-collect focusWords: the same live DOM nodes stay valid, we just
+  // need one paint frame for their new on-screen position to register.
+  if (currentTextElement) {
+    if (!focusModeOn && !ttsOn) { cb(); return; }
+    advancingPage = true;
+    const box = currentTextElement;
+    const before = box.scrollTop;
+    const max = box.scrollHeight - box.clientHeight;
+    box.scrollTop = Math.min(max, before + box.clientHeight * 0.85);
+    await raf();
+    advancingPage = false;
+    if (!focusModeOn && !ttsOn) return;
+    if (box.scrollTop <= before) {
+      // Scroll position didn't move — genuinely nothing left below the fold.
+      toast('End of book');
+      if (focusModeOn) stopFocusMode();
+      if (ttsOn) stopTts();
+      return;
+    }
+    cb();
+    return;
+  }
+
+  if (!currentRendition) { cb(); return; }
   advancingPage = true;
 
   const prevDoc = focusIframeDoc;
@@ -3254,7 +4760,7 @@ async function turnPageAndContinue(cb: () => void): Promise<void> {
   // finish laying out its body before we re-index its words.
   const deadline = performance.now() + 800;
   while (performance.now() < deadline) {
-    if (!focusModeOn) { advancingPage = false; return; }
+    if (!focusModeOn && !ttsOn) { advancingPage = false; return; }
     const vis = getVisibleIframe();
     const doc = vis?.contentDocument ?? null;
 
@@ -3273,7 +4779,12 @@ async function turnPageAndContinue(cb: () => void): Promise<void> {
   }
 
   advancingPage = false;
-  if (focusModeOn) cb();
+  // Fixes a pre-existing gap while here: this function is also called from
+  // TTS's page-turn paths (speakNextChunk/speakNextChunkPipelined), but the
+  // callback used to only fire when RSVP focus mode was on — TTS and focus
+  // mode are mutually exclusive, so TTS's own page turns across an epub
+  // chapter boundary could never actually resume.
+  if (focusModeOn || ttsOn) cb();
 }
 
 function focusTick(): void {
@@ -3334,7 +4845,7 @@ function findFirstVisibleWordIndex(): number {
 }
 
 function startFocusMode(): void {
-  if (!currentRendition) { toast('Open a book first'); return; }
+  if (!currentRendition && !currentTextElement) { toast('Open a book first'); return; }
   focusModeOn = true;
   focusPaused = false;
   el.html.dataset.focusMode = 'on';
@@ -3470,8 +4981,70 @@ interface LlmStatus {
 }
 let llmStatus: LlmStatus | null = null;
 
+// Which installed .gguf to use — persisted across sessions, same pattern as
+// ttsSettings.piperVoicePath. Before this existed, every AI feature just
+// took llmStatus.models[0] (alphabetically-first file in the models
+// folder), so a second installed model was silently never used.
+const KEY_LLM_MODEL = 'read.llm.modelPath';
+let llmModelPath: string = load<string>(KEY_LLM_MODEL, '');
+const persistLlmModel = () => save(KEY_LLM_MODEL, llmModelPath);
+
+// Resolves the persisted choice against what's actually installed, falling
+// back to the first available model if the saved one was deleted/renamed
+// (or nothing was ever chosen) — same fallback shape as the Piper voice
+// picker's "saved voice no longer exists" handling.
+function currentLlmModel(): LlmModel | null {
+  if (!isLlmReady()) return null;
+  const models = llmStatus!.models;
+  return models.find(m => m.path === llmModelPath) || models[0];
+}
+
+// Populates the model picker in the chat modal header. Only called when the
+// modal is about to be shown (openChat already guards on isLlmReady, so
+// there's always at least one model by the time this runs) — no need for a
+// live boot-time refresh the way refreshChatButtonVisibility needs one.
+function renderLlmModelSelect(): void {
+  el.chatModelSelect.innerHTML = '';
+  if (!isLlmReady()) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No local model installed';
+    opt.disabled = true;
+    el.chatModelSelect.appendChild(opt);
+    el.chatModelSelect.disabled = true;
+    return;
+  }
+  el.chatModelSelect.disabled = false;
+  const models = llmStatus!.models;
+  for (const m of models) {
+    const opt = document.createElement('option');
+    opt.value = m.path;
+    opt.textContent = `${m.name} (${fmtBytes(m.size_bytes)})`;
+    if (m.path === llmModelPath) opt.selected = true;
+    el.chatModelSelect.appendChild(opt);
+  }
+  // Saved choice no longer exists (deleted/renamed) — fall back to first,
+  // same as the Piper voice select does.
+  if (!models.some(m => m.path === llmModelPath)) {
+    llmModelPath = models[0].path;
+    persistLlmModel();
+    el.chatModelSelect.value = llmModelPath;
+  }
+}
+
 function isLlmReady(): boolean {
   return !!llmStatus && llmStatus.binary_exists && llmStatus.models.length > 0;
+}
+
+// The chat toolbar button is persistent chrome (not gated per-lookup like
+// dictAiBtn/vocabAiBtn), so it needs its own visibility refresh whenever LLM
+// readiness could have changed — after the boot-time probe resolves, and
+// whenever a new book opens. Also stays hidden for PDF until the parallel
+// pdf.js parse in openPdfReader resolves currentPdfDoc — otherwise the
+// button would appear before there's any text to extract.
+function refreshChatButtonVisibility(): void {
+  const pdfNotReady = activeFormat === 'pdf' && !currentPdfDoc;
+  el.chatBtn.hidden = !isLlmReady() || pdfNotReady;
 }
 
 async function refreshLlmStatus(): Promise<LlmStatus | null> {
@@ -3626,7 +5199,7 @@ function getSelectedVoice(): SpeechSynthesisVoice | null {
 }
 
 function startTts(): void {
-  if (!currentRendition) { toast('Open a book first'); return; }
+  if (!currentRendition && !currentTextElement) { toast('Open a book first'); return; }
   if (ttsSettings.engine === 'system' && !isTtsSupported()) {
     toast('Text-to-speech not supported'); return;
   }
@@ -3946,6 +5519,31 @@ function voiceJsonUrl(v: CatalogVoice): string {
   return `${voiceOnnxUrl(v)}.json`;
 }
 
+interface CatalogModel {
+  id: string;      // file stem — must match what Rust's file_stem() produces
+                    // for `file`, since renderLlmModelCatalog cross-references
+                    // this against installed LlmModel.name the same way
+                    // PIPER_CATALOG's `id` is matched against installed voices.
+  label: string;
+  desc: string;
+  repo: string;     // Hugging Face repo, e.g. "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+  file: string;     // exact filename inside that repo
+  sizeMb: number;
+}
+
+// Small, curated set from one trusted publisher (Qwen's own GGUF repos),
+// spanning fast/balanced/best-quality — mirrors PIPER_CATALOG's shape for
+// voices. All three URLs and sizes were verified live before adding here.
+const LLM_CATALOG: CatalogModel[] = [
+  { id: 'qwen2.5-0.5b-instruct-q4_k_m', label: 'Qwen2.5 0.5B Instruct', desc: 'Fastest, lower quality', repo: 'Qwen/Qwen2.5-0.5B-Instruct-GGUF', file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf', sizeMb: 469 },
+  { id: 'qwen2.5-1.5b-instruct-q4_k_m', label: 'Qwen2.5 1.5B Instruct', desc: 'Balanced (recommended)',  repo: 'Qwen/Qwen2.5-1.5B-Instruct-GGUF', file: 'qwen2.5-1.5b-instruct-q4_k_m.gguf', sizeMb: 1066 },
+  { id: 'qwen2.5-3b-instruct-q4_k_m',   label: 'Qwen2.5 3B Instruct',   desc: 'Best quality, slower',     repo: 'Qwen/Qwen2.5-3B-Instruct-GGUF',   file: 'qwen2.5-3b-instruct-q4_k_m.gguf',   sizeMb: 2008 },
+];
+
+function modelGgufUrl(m: CatalogModel): string {
+  return `https://huggingface.co/${m.repo}/resolve/main/${m.file}`;
+}
+
 // GitHub redirects `/releases/latest/download/<name>` to the current release
 // asset. The archive names have been stable across piper releases.
 function piperBinaryUrl(): { url: string; archiveName: string } | null {
@@ -3980,21 +5578,84 @@ function piperBinaryUrl(): { url: string; archiveName: string } | null {
   return null;
 }
 
+// Unlike Piper's release assets, llama.cpp's asset filenames embed a
+// changing build tag (e.g. "llama-b10099-bin-win-cpu-x64.zip" today,
+// "llama-b10098-..." on the prior release) — there's no stable filename to
+// hardcode, so GitHub's `/releases/latest/download/<name>` redirect trick
+// doesn't apply here. Instead this resolves the current release via the
+// GitHub API and pattern-matches the plain CPU-only asset for this platform
+// (the same release also ships cuda/vulkan/rocm/hip/sycl/opencl/openvino
+// variants, which the anchored suffix match below deliberately excludes —
+// we can't assume the right GPU drivers are present). This is genuinely
+// async where piperBinaryUrl() is sync; don't "fix" it back to sync.
+async function llamaBinaryUrl(): Promise<{ url: string; archiveName: string } | null> {
+  const ua = navigator.userAgent;
+  const platform = (navigator as any).userAgentData?.platform || '';
+  const isWindows = /Windows/i.test(ua);
+  const isMac = /Mac/i.test(ua) || platform === 'macOS';
+  const isLinux = /Linux/i.test(ua) && !/Android/i.test(ua);
+
+  let suffix: string;
+  let ext: 'zip' | 'tar.gz';
+  if (isWindows) {
+    suffix = 'win-cpu-x64';
+    ext = 'zip';
+  } else if (isMac) {
+    const isArm = /arm64|aarch64/i.test(ua) || /Mac.*ARM/i.test(platform);
+    suffix = isArm ? 'macos-arm64' : 'macos-x64';
+    ext = 'tar.gz';
+  } else if (isLinux) {
+    suffix = 'ubuntu-x64';
+    ext = 'tar.gz';
+  } else {
+    return null;
+  }
+
+  let assets: Array<{ name: string; browser_download_url: string }>;
+  try {
+    const res = await fetch('https://api.github.com/repos/ggml-org/llama.cpp/releases/latest');
+    if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
+    const data = await res.json();
+    assets = data.assets || [];
+  } catch (err) {
+    console.error('llamaBinaryUrl: failed to resolve latest release:', err);
+    throw new Error("Couldn't reach GitHub to find the latest llama.cpp release. Check your connection and try again.");
+  }
+
+  // Anchored suffix match — a GPU-backend asset inserts an extra segment
+  // before the platform suffix (e.g. "llama-b10099-bin-win-cuda-12.4-x64.zip"),
+  // so it never matches this pattern.
+  const re = new RegExp(`^llama-b\\d+-bin-${suffix.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\.(zip|tar\\.gz)$`);
+  const asset = assets.find(a => re.test(a.name));
+  if (!asset) return null;
+
+  return {
+    url: asset.browser_download_url,
+    archiveName: `_llm_download.${ext}`,
+  };
+}
+
 // Track in-flight downloads so we don't launch duplicates when a button is
 // clicked twice. Values are truthy sentinels; the Rust side owns the actual
 // curl process and there's no cancel path currently (curl runs to completion
 // or errors out on its own timeout).
 const activeDownloads = new Map<string, boolean>();
 
-// Download `url` into `<piper_root>/<relPath>` via the Rust curl command,
-// while polling the destination file's size every 500ms to render live
-// progress. We don't know the total size up front — the UI shows bytes
-// downloaded, and (if `estimateMb` is provided) an approximate percentage.
+// Download `url` into `<root>/<relPath>` via the Rust curl command, while
+// polling the destination file's size every 500ms to render live progress.
+// We don't know the total size up front — the UI shows bytes downloaded,
+// and (if `estimateMb` is provided) an approximate percentage.
+//
+// `commands` selects which pair of Tauri commands to drive this with —
+// defaults to the Piper (TTS) ones so every existing call site is
+// unaffected; the local-LLM install flow passes the llm_* pair to land
+// downloads in the LLM root instead.
 async function downloadFileWithProgress(
   url: string,
   relPath: string,
   onProgress: (received: number, estimateBytes: number) => void,
   estimateMb = 0,
+  commands: { download: string; size: string } = { download: 'piper_download_file', size: 'piper_file_size' },
 ): Promise<void> {
   const estimateBytes = estimateMb > 0 ? estimateMb * 1024 * 1024 : 0;
   let cancelled = false;
@@ -4002,13 +5663,13 @@ async function downloadFileWithProgress(
   const poll = window.setInterval(async () => {
     if (cancelled) return;
     try {
-      const size = await invoke<number>('piper_file_size', { relPath });
+      const size = await invoke<number>(commands.size, { relPath });
       onProgress(size, estimateBytes);
     } catch { /* file not yet written */ }
   }, 500);
 
   try {
-    const finalSize = await invoke<number>('piper_download_file', { url, relPath });
+    const finalSize = await invoke<number>(commands.download, { url, relPath });
     onProgress(finalSize, finalSize);
   } finally {
     cancelled = true;
@@ -4163,6 +5824,267 @@ async function installPiperVoice(voice: CatalogVoice, row: HTMLElement): Promise
   }
 }
 
+/* --- Local LLM: automated install --------------------------------------
+   Same shape as the Piper install flow above, but rendered inside the
+   Settings modal's "Local AI" section rather than a dedicated modal (there
+   was no other natural home for "configure the model chat/explain/examples
+   all share" — see renderLlmSetupSection). One real difference: resolving
+   the llama-cli binary URL is async (llamaBinaryUrl hits the GitHub API),
+   where piperBinaryUrl() is a synchronous hardcoded lookup.
+   ---------------------------------------------------------------------- */
+function showLlmError(message: string): void {
+  el.llmErrorBody.textContent = message;
+  el.llmErrorBanner.hidden = false;
+}
+function hideLlmError(): void { el.llmErrorBanner.hidden = true; }
+
+async function ensureLlmDirs(): Promise<void> {
+  const roots = ['llm', 'llm/models'];
+  for (const p of roots) {
+    if (!(await exists(p, { baseDir: BaseDirectory.AppData }))) {
+      await mkdir(p, { baseDir: BaseDirectory.AppData, recursive: true });
+    }
+  }
+}
+
+// Populates the "Local AI" section of the Settings modal from llmStatus.
+// Called whenever Settings opens and after every install/refresh.
+function renderLlmSetupSection(): void {
+  const s = llmStatus;
+  if (!s) {
+    el.llmBinaryStatus.textContent = 'Could not read llm folder';
+    el.llmBinaryStatus.className = 'piper-status err';
+    el.llmModelsStatus.textContent = '—';
+    el.llmModelsStatus.className = 'piper-status';
+    el.llmModelCatalog.innerHTML = '';
+    return;
+  }
+
+  el.llmPath.textContent = s.models_dir.replace(/\\models$/i, '').replace(/\/models$/, '');
+
+  if (s.binary_exists) {
+    el.llmBinaryStatus.textContent = 'Binary installed';
+    el.llmBinaryStatus.className = 'piper-status ok';
+    el.llmInstallBinaryBtn.textContent = 'Re-install';
+  } else {
+    el.llmBinaryStatus.textContent = 'Not installed (~30-50 MB download)';
+    el.llmBinaryStatus.className = 'piper-status warn';
+    el.llmInstallBinaryBtn.textContent = 'Install';
+  }
+
+  if (s.models.length === 0) {
+    el.llmModelsStatus.textContent = 'No models installed — pick one below';
+    el.llmModelsStatus.className = 'piper-status warn';
+  } else {
+    el.llmModelsStatus.textContent = `${s.models.length} model${s.models.length === 1 ? '' : 's'} installed`;
+    el.llmModelsStatus.className = 'piper-status ok';
+  }
+
+  renderLlmModelCatalog();
+}
+
+// Opens the Settings modal and refreshes both its sections (Theme, Local
+// AI). Shared by every entry point — the library toolbar's gear icon and
+// the "Settings" link inside the reader's Typography drawer — so both
+// always show current status rather than whatever was last rendered.
+function openSettings(): void {
+  el.settingsModal.hidden = false;
+  el.appearanceSelect.value = settings.appearance;
+
+  document.querySelectorAll('.theme-card').forEach(card => {
+    if ((card as HTMLElement).dataset.themeVal === settings.theme) {
+      card.classList.add('active');
+    } else {
+      card.classList.remove('active');
+    }
+  });
+
+  hideLlmError();
+  el.llmBinaryStatus.textContent = 'Checking…';
+  el.llmModelsStatus.textContent = 'Checking…';
+  renderLlmSetupSection();
+  // Status may be stale from boot or a while-ago install — refresh live
+  // every time Settings opens rather than only once at startup.
+  refreshLlmStatus().then(renderLlmSetupSection);
+}
+
+async function installLlmBinary(): Promise<void> {
+  if (activeDownloads.has('llm-binary')) return;
+  activeDownloads.set('llm-binary', true);
+
+  hideLlmError();
+  el.llmInstallBinaryBtn.disabled = true;
+  el.llmBinaryProgress.hidden = false;
+  paintProgress(el.llmBinaryProgress, 0, 40 * 1024 * 1024, 'Resolving latest release…');
+
+  try {
+    const spec = await llamaBinaryUrl();
+    if (!spec) {
+      throw new Error('No prebuilt llama.cpp binary found for your platform — install manually.');
+    }
+
+    await ensureLlmDirs();
+
+    // relPath is llm-root-relative (Rust joins onto llm_root()) — no
+    // leading "llm/" here, otherwise the extract step wouldn't find it.
+    // ~40MB estimate for the CPU-only zip — not to be confused with the
+    // much larger model downloads below.
+    await downloadFileWithProgress(
+      spec.url,
+      spec.archiveName,
+      (r, est) => paintProgress(el.llmBinaryProgress, r, est, 'Downloading'),
+      40,
+      { download: 'llm_download_file', size: 'llm_file_size' },
+    );
+
+    paintProgress(el.llmBinaryProgress, 1, 1, 'Extracting');
+    await invoke('llm_extract_downloaded_archive', { archiveName: spec.archiveName });
+
+    paintProgress(el.llmBinaryProgress, 1, 1, 'Done');
+    toast('llama.cpp installed');
+  } catch (err: any) {
+    const msg = typeof err === 'string' ? err : (err?.message || String(err));
+    console.error('llm binary install failed:', err);
+    showLlmError(msg);
+  } finally {
+    activeDownloads.delete('llm-binary');
+    el.llmInstallBinaryBtn.disabled = false;
+    setTimeout(() => { el.llmBinaryProgress.hidden = true; }, 1200);
+    await refreshLlmStatus();
+    renderLlmSetupSection();
+    renderLlmModelSelect();
+    refreshChatButtonVisibility();
+  }
+}
+
+// Same no-op-with-toast shape as cancelPiperBinaryInstall — curl has no
+// cancel path here either.
+function cancelLlmBinaryInstall(): void {
+  toast('Install runs to completion; wait or restart the app');
+}
+
+async function installLlmModel(model: CatalogModel, row: HTMLElement): Promise<void> {
+  const key = `model:${model.id}`;
+  if (activeDownloads.has(key)) return;
+  activeDownloads.set(key, true);
+
+  hideLlmError();
+  const btn = row.querySelector<HTMLButtonElement>('.piper-mini-btn');
+  const progress = row.querySelector<HTMLElement>('.piper-progress');
+  if (btn) { btn.disabled = true; btn.textContent = 'Downloading…'; }
+  if (progress) {
+    progress.hidden = false;
+    paintProgress(progress, 0, model.sizeMb * 1024 * 1024, 'Model');
+  }
+
+  try {
+    await ensureLlmDirs();
+
+    // Single file — GGUF has no sidecar config the way Piper voices do.
+    await downloadFileWithProgress(
+      modelGgufUrl(model),
+      `models/${model.file}`,
+      (r, est) => progress && paintProgress(progress, r, est, 'Model'),
+      model.sizeMb,
+      { download: 'llm_download_file', size: 'llm_file_size' },
+    );
+
+    if (progress) paintProgress(progress, 1, 1, 'Done');
+    toast(`Installed ${model.label}`);
+  } catch (err: any) {
+    const msg = typeof err === 'string' ? err : (err?.message || String(err));
+    console.error('model install failed:', err);
+    showLlmError(`${model.label}: ${msg}`);
+    if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+  } finally {
+    activeDownloads.delete(key);
+    await refreshLlmStatus();
+    renderLlmSetupSection();
+    renderLlmModelSelect();
+    refreshChatButtonVisibility();
+  }
+}
+
+// Extracts a safe destination filename from a user-pasted URL: the last
+// path segment, URL-decoded, and validated as a plain "name.gguf" with no
+// path separators or traversal sequences. This matters because the result
+// becomes `rel_path` for llm_download_file, which joins it straight onto
+// llm_root() on the Rust side — an unsanitized "../../something" here
+// would let a pasted URL write outside the models folder. The catalog's
+// own `installLlmModel` doesn't need this check because its filenames come
+// from LLM_CATALOG, not from arbitrary user input.
+function ggufFilenameFromUrl(rawUrl: string): string {
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    throw new Error('Enter a valid URL.');
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+    throw new Error('URL must start with http:// or https://.');
+  }
+  const segments = u.pathname.split('/').filter(Boolean);
+  const last = decodeURIComponent(segments[segments.length - 1] || '');
+  // No slashes/backslashes (rules out any encoded path-traversal sequence
+  // surviving decodeURIComponent), must end in .gguf.
+  if (!/^[^\\/]+\.gguf$/i.test(last)) {
+    throw new Error('URL must point directly to a .gguf file.');
+  }
+  return last;
+}
+
+async function installLlmCustomModel(): Promise<void> {
+  const rawUrl = el.llmCustomUrlInput.value.trim();
+  if (!rawUrl) return;
+
+  let filename: string;
+  try {
+    filename = ggufFilenameFromUrl(rawUrl);
+  } catch (err: any) {
+    showLlmError(err?.message || 'Enter a valid URL to a .gguf file.');
+    return;
+  }
+
+  const key = `custom:${filename}`;
+  if (activeDownloads.has(key)) return;
+  activeDownloads.set(key, true);
+
+  hideLlmError();
+  el.llmCustomInstallBtn.disabled = true;
+  el.llmCustomUrlInput.disabled = true;
+  el.llmCustomProgress.hidden = false;
+  // No size estimate up front for an arbitrary URL — paintProgress shows
+  // bytes-received-so-far without a percentage bar in that case.
+  paintProgress(el.llmCustomProgress, 0, 0, 'Starting…');
+
+  try {
+    await ensureLlmDirs();
+    await downloadFileWithProgress(
+      rawUrl,
+      `models/${filename}`,
+      (r, est) => paintProgress(el.llmCustomProgress, r, est, 'Downloading'),
+      0,
+      { download: 'llm_download_file', size: 'llm_file_size' },
+    );
+    paintProgress(el.llmCustomProgress, 1, 1, 'Done');
+    toast(`Installed ${filename}`);
+    el.llmCustomUrlInput.value = '';
+  } catch (err: any) {
+    const msg = typeof err === 'string' ? err : (err?.message || String(err));
+    console.error('custom model install failed:', err);
+    showLlmError(`${filename}: ${msg}`);
+  } finally {
+    activeDownloads.delete(key);
+    el.llmCustomInstallBtn.disabled = false;
+    el.llmCustomUrlInput.disabled = false;
+    setTimeout(() => { el.llmCustomProgress.hidden = true; }, 1200);
+    await refreshLlmStatus();
+    renderLlmSetupSection();
+    renderLlmModelSelect();
+    refreshChatButtonVisibility();
+  }
+}
+
 // Render the curated voice catalog. Installed voices get an "Installed" tag
 // and disabled button; downloadable ones show a size hint + install button.
 function renderVoiceCatalog(): void {
@@ -4191,6 +6113,35 @@ function renderVoiceCatalog(): void {
     const btn = li.querySelector<HTMLButtonElement>('.piper-mini-btn');
     if (btn) btn.addEventListener('click', () => installPiperVoice(voice, li));
     el.piperVoiceCatalog.appendChild(li);
+  }
+}
+
+function renderLlmModelCatalog(): void {
+  const installedIds = new Set(
+    (llmStatus?.models || []).map(m => m.name),
+  );
+  el.llmModelCatalog.innerHTML = '';
+  for (const model of LLM_CATALOG) {
+    const li = document.createElement('li');
+    li.className = 'piper-voice-row' + (installedIds.has(model.id) ? ' installed' : '');
+    li.innerHTML = `
+      <div class="piper-voice-meta">
+        <span class="piper-voice-name">${escapeHtml(model.label)}</span>
+        <span class="piper-voice-desc">${escapeHtml(model.desc)} · ${model.sizeMb} MB</span>
+      </div>
+      <div class="piper-voice-action">
+        <div class="piper-progress" hidden>
+          <div class="piper-progress-bar"><span></span></div>
+          <div class="piper-progress-label">—</div>
+        </div>
+        ${installedIds.has(model.id)
+          ? '<span class="installed-tag">Installed</span>'
+          : '<button class="piper-mini-btn" type="button">Install</button>'}
+      </div>
+    `;
+    const btn = li.querySelector<HTMLButtonElement>('.piper-mini-btn');
+    if (btn) btn.addEventListener('click', () => installLlmModel(model, li));
+    el.llmModelCatalog.appendChild(li);
   }
 }
 
@@ -4952,11 +6903,11 @@ async function tryStartCachedPlayback(): Promise<boolean> {
 
 let cachingInFlight = false;
 
-function updateCacheButtonState(cached: boolean): void {
+function updateCacheButtonState(cached: boolean, progressLabel?: string): void {
   el.ttsCacheBtn.classList.toggle('cached', cached);
   el.ttsCacheBtn.classList.toggle('caching', cachingInFlight);
   el.ttsCacheBtn.title = cachingInFlight
-    ? 'Caching chapter…'
+    ? (progressLabel || 'Caching chapter…')
     : cached
       ? 'Chapter cached — playback is instant'
       : 'Cache this chapter for instant audiobook-style playback';
@@ -5009,7 +6960,23 @@ async function cacheCurrentChapter(): Promise<void> {
 
   cachingInFlight = true;
   updateCacheButtonState(false);
-  toast(`Caching ${texts.length} sentences… ~${Math.max(10, Math.round(texts.length * 0.6))}s`);
+  toast(`Caching ${texts.length} sentences… 0%`);
+
+  // Sentences synthesize entirely in-memory (nothing on disk to size-poll
+  // like the voice-model downloads), so progress comes from a small atomic
+  // counter on the Rust side — poll it the same way downloadFileWithProgress
+  // polls piper_file_size.
+  const progressPoll = window.setInterval(async () => {
+    try {
+      const [done, total] = await invoke<[number, number]>('piper_batch_progress');
+      if (total > 0) {
+        const pct = Math.round((done / total) * 100);
+        const label = `Caching… ${pct}% (${done}/${total})`;
+        toast(label);
+        updateCacheButtonState(false, label);
+      }
+    } catch { /* transient — ignore, next tick retries */ }
+  }, 400);
 
   try {
     await invoke('piper_batch_synthesize', {
@@ -5024,6 +6991,7 @@ async function cacheCurrentChapter(): Promise<void> {
     console.error('cache failed:', err);
     toast(`Cache failed: ${err?.message || err}`);
   } finally {
+    clearInterval(progressPoll);
     cachingInFlight = false;
     await refreshCacheButtonForCurrentSection();
   }
@@ -5034,6 +7002,20 @@ function wire() {
   el.importBtnEmpty.addEventListener('click', importBook);
   el.libraryThemeBtn.addEventListener('click', cycleTheme);
   el.libraryVocabReviewBtn.addEventListener('click', () => openVocabReview('all'));
+
+  // Save Article (web page → reader mode)
+  el.importUrlBtn.addEventListener('click', openUrlImportModal);
+  el.closeUrlImportBtn.addEventListener('click', closeUrlImportModal);
+  el.urlImportModal.addEventListener('click', (e) => {
+    if (e.target === el.urlImportModal) closeUrlImportModal();
+  });
+  el.urlImportForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    saveArticleFromUrl(el.urlImportInput.value);
+  });
+  el.openOriginalBtn.addEventListener('click', () => {
+    if (currentBookRecord?.sourceUrl) openUrl(currentBookRecord.sourceUrl);
+  });
 
   el.backBtn.addEventListener('click', () => {
     closeDrawers();
@@ -5046,6 +7028,8 @@ function wire() {
   });
 
   el.tocBtn.addEventListener('click', () => openDrawer('toc', 'toc'));
+  el.pdfZoomOutBtn.addEventListener('click', () => setPdfZoom(currentPdfZoom - 10));
+  el.pdfZoomInBtn.addEventListener('click', () => setPdfZoom(currentPdfZoom + 10));
   el.closeTocBtn.addEventListener('click', closeDrawers);
   el.typographyBtn.addEventListener('click', () => openDrawer('typography'));
   el.closeTypographyBtn.addEventListener('click', closeDrawers);
@@ -5137,6 +7121,34 @@ function wire() {
   el.piperCancelBinaryBtn.addEventListener('click', cancelPiperBinaryInstall);
   el.piperErrorDismiss.addEventListener('click', hidePiperError);
 
+  // Local AI (Settings modal section)
+  el.llmOpenFolderBtn.addEventListener('click', async () => {
+    if (!llmStatus) return;
+    const folder = llmStatus.models_dir.replace(/[\\/]models$/i, '');
+    try {
+      await openPath(folder);
+    } catch (err) {
+      console.warn('openPath failed:', err);
+      try {
+        await navigator.clipboard.writeText(folder);
+        toast('Path copied to clipboard');
+      } catch { toast(`Path: ${folder}`); }
+    }
+  });
+  el.llmRefreshBtn.addEventListener('click', async () => {
+    el.llmBinaryStatus.textContent = 'Checking…';
+    el.llmModelsStatus.textContent = 'Checking…';
+    await refreshLlmStatus();
+    renderLlmSetupSection();
+  });
+  el.llmInstallBinaryBtn.addEventListener('click', installLlmBinary);
+  el.llmCancelBinaryBtn.addEventListener('click', cancelLlmBinaryInstall);
+  el.llmErrorDismiss.addEventListener('click', hideLlmError);
+  el.llmCustomInstallBtn.addEventListener('click', () => { void installLlmCustomModel(); });
+  el.llmCustomUrlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); void installLlmCustomModel(); }
+  });
+
   // Initial engine UI + eager Piper status probe when the user has Piper
   // set as their preferred engine (so the voice dropdown is populated
   // by the time they open the panel).
@@ -5154,10 +7166,51 @@ function wire() {
     if (e.target === el.vocabReviewModal) closeVocabReview();
   });
   el.vocabRevealBtn.addEventListener('click', revealReviewCard);
+  el.vocabSkipBtn.addEventListener('click', skipReviewCard);
+  el.vocabDeleteBtn.addEventListener('click', removeCurrentReviewCard);
   el.vocabRateActions.querySelectorAll<HTMLButtonElement>('.vocab-rate-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const rating = parseInt(btn.dataset.rating || '3', 10) as 1 | 3 | 5;
       rateReviewCard(rating);
+    });
+  });
+
+  // PDF dictionary (clipboard-driven — see lookupWordFromPdfClipboard)
+  el.pdfDictBtn.addEventListener('click', lookupWordFromPdfClipboard);
+
+  // Chat
+  el.chatBtn.addEventListener('click', openChat);
+  el.closeChatBtn.addEventListener('click', closeChat);
+  el.chatModal.addEventListener('click', (e) => {
+    if (e.target === el.chatModal) closeChat();
+  });
+  el.chatResetBtn.addEventListener('click', resetChat);
+  el.chatModelSelect.addEventListener('change', () => {
+    llmModelPath = el.chatModelSelect.value;
+    persistLlmModel();
+  });
+  el.chatSendBtn.addEventListener('click', () => { void sendChatMessage(); });
+  el.chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void sendChatMessage();
+    }
+  });
+  // Auto-grow the textarea up to the CSS max-height (120px), then let it
+  // scroll internally — matches .chat-input's `resize: none`.
+  el.chatInput.addEventListener('input', () => {
+    el.chatInput.style.height = 'auto';
+    el.chatInput.style.height = `${Math.min(el.chatInput.scrollHeight, 120)}px`;
+  });
+  el.chatScopeToggle.querySelectorAll<HTMLButtonElement>('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const v = btn.dataset.value as 'page' | 'chapter';
+      if (chatScope === v) return;
+      chatScope = v;
+      el.chatScopeToggle.querySelectorAll<HTMLButtonElement>('button').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
+      el.chatTruncatedNote.hidden = true;
     });
   });
 
@@ -5170,6 +7223,8 @@ function wire() {
         if (control === 'font' && v)    settings.font = v as FontKind;
         if (control === 'line' && v)    settings.line = v as LineKind;
         if (control === 'margin' && v)  settings.margin = v as MarginKind;
+        if (control === 'measure' && v) settings.measure = v as MeasureKind;
+        if (control === 'ruler' && v)   settings.readingRuler = v === 'on';
         if (control === 'focusTracker' && v) settings.focusTracker = v as FocusTracker;
         if (control === 'size') {
           const action = btn.dataset.action;
@@ -5184,6 +7239,26 @@ function wire() {
     });
   });
 
+  // Night-comfort sliders — warmth (amber tint) and brightness (dimming).
+  el.warmthSlider.addEventListener('input', () => {
+    settings.warmth = parseInt(el.warmthSlider.value, 10) || 0;
+    persistSettings();
+    applyComfortSettings();
+    el.warmthValue.textContent = settings.warmth === 0 ? 'Off' : `${settings.warmth}%`;
+  });
+  el.brightnessSlider.addEventListener('input', () => {
+    settings.brightness = parseInt(el.brightnessSlider.value, 10) || 100;
+    persistSettings();
+    applyComfortSettings();
+    el.brightnessValue.textContent = `${settings.brightness}%`;
+  });
+
+  // Reading ruler follows the cursor. Content in the main document (text/MD
+  // readers, the general window) is tracked here; epub content lives in
+  // iframes and is tracked from installFocusTracker with translated coords.
+  document.addEventListener('mousemove', (e) => moveRuler(e.clientY));
+  document.addEventListener('mouseleave', () => { el.readingRuler.style.opacity = '0'; });
+
   el.prevBtn.addEventListener('click', () => navGo('prev'));
   el.nextBtn.addEventListener('click', () => navGo('next'));
 
@@ -5195,13 +7270,11 @@ function wire() {
     el.progressThumb.style.left = `${pct * 100}%`;
   });
   el.progressTrack.addEventListener('mouseleave', () => {
-    if (currentRendition && currentBook) {
-      const loc = currentRendition.currentLocation() as any;
-      if (loc?.start) {
-        const pct = currentBook.locations.percentageFromCfi(loc.start.cfi);
-        el.progressThumb.style.left = `${pct * 100}%`;
-      }
-    }
+    // progressFill's width is kept in sync with the real position for every
+    // format (EPUB's relocated handler, text/md's scroll listener, PDF's
+    // updatePdfProgressUi) — reuse it instead of re-deriving from an
+    // EPUB-only API, so the thumb snaps back correctly everywhere.
+    el.progressThumb.style.left = el.progressFill.style.width;
   });
 
   // Selection popover buttons
@@ -5217,12 +7290,45 @@ function wire() {
   });
   el.dictAiBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    runAiExplain();
+    dictAi.explain();
+  });
+  el.dictAiRetry.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dictAi.explain();
+  });
+  el.dictAiExamplesBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dictAi.examples();
+  });
+  el.vocabAiBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    vocabAi.explain();
+  });
+  el.vocabAiRetry.addEventListener('click', (e) => {
+    e.stopPropagation();
+    vocabAi.explain();
+  });
+  el.vocabAiExamplesBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    vocabAi.examples();
+  });
+  el.dictPronounceBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    pronounceWord(el.dictPronounceBtn.dataset.word || '', el.dictPronounceBtn);
+  });
+  el.vocabPronounceBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    pronounceWord(el.vocabPronounceBtn.dataset.word || '', el.vocabPronounceBtn);
   });
   el.footnoteClose.addEventListener('click', (e) => {
     e.stopPropagation();
     hideFootnotePopover();
   });
+
+  // Dictionary lookup for the Text/Markdown reader (see onTextReaderMouseUp).
+  // Registered once, globally — it no-ops whenever currentTextElement isn't
+  // mounted, so it's safe regardless of which screen/format is active.
+  document.addEventListener('mouseup', onTextReaderMouseUp);
 
   // Any pointerdown outside a popover closes it. pointerdown fires before mouse/click
   // and unifies mouse/touch/pen, so this catches every "click outside" intent.
@@ -5306,6 +7412,25 @@ function wire() {
     if (e.key === 'b' || e.key === 'B') toggleBookmark();
     if (e.key === 't' || e.key === 'T') cycleTheme();
 
+    // Vim-style navigation: h/k step back a page, j/l step forward — this
+    // way both the "left/right = back/forward" and "down = forward, up =
+    // back" mental models work. gg jumps to the start of the book, G to
+    // the end.
+    if (e.key === 'h' || e.key === 'k') vimPageNav('prev');
+    if (e.key === 'j' || e.key === 'l') vimPageNav('next');
+    if (e.key === 'g') {
+      const now = Date.now();
+      if (now - lastGKeydownAt < GG_CHORD_WINDOW_MS) {
+        lastGKeydownAt = 0;
+        vimGoToStart();
+      } else {
+        lastGKeydownAt = now;
+      }
+    } else if (e.key === 'G') {
+      lastGKeydownAt = 0;
+      vimGoToEnd();
+    }
+
     // Typography shortcuts
     if (e.key === '-' || e.key === '_')      bumpFontSize(-10);
     else if (e.key === '=' || e.key === '+') bumpFontSize(+10);
@@ -5325,18 +7450,8 @@ function wire() {
   });
 
   // Settings Modal
-  el.openSettingsBtn.addEventListener('click', () => {
-    el.settingsModal.hidden = false;
-    el.appearanceSelect.value = settings.appearance;
-    
-    document.querySelectorAll('.theme-card').forEach(card => {
-      if ((card as HTMLElement).dataset.themeVal === settings.theme) {
-        card.classList.add('active');
-      } else {
-        card.classList.remove('active');
-      }
-    });
-  });
+  el.openSettingsBtn.addEventListener('click', openSettings);
+  el.librarySettingsBtn.addEventListener('click', openSettings);
 
   el.closeSettingsBtn.addEventListener('click', () => {
     el.settingsModal.hidden = true;
@@ -5370,12 +7485,21 @@ function wire() {
    ============================================================ */
 function boot() {
   applyGlobalTheme();
+  applyComfortSettings();
+  refreshTypographyUI();
   wire();
+  // Text/md content renders straight into the main document (no per-section
+  // iframe like epub gets), so this installs once for the app's lifetime —
+  // it scopes itself to the live currentTextElement internally and is inert
+  // whenever no text/md book is open (see installFocusTracker's isMainDoc gate).
+  installFocusTracker(document, null);
   goToScreen('library');
   // Probe for a local LLM in the background — never block startup on it.
   // If nothing's installed, isLlmReady() stays false and the AI button
-  // simply never appears.
-  refreshLlmStatus();
+  // simply never appears. The chat toolbar button (unlike the per-lookup
+  // AI buttons) is persistent chrome, so it needs an explicit refresh once
+  // the probe resolves.
+  refreshLlmStatus().then(() => refreshChatButtonVisibility());
 }
 
 boot();

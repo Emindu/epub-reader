@@ -10,16 +10,21 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-opener": "^2",
+    "dompurify": "^3.4.12",
     "epubjs": "^0.3.93",
     "marked": "^18.0.7",
-    "pdfjs-dist": "^6.1.200"
+    "pdfjs-dist": "^6.1.200",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/turndown": "^5.0.6",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"
   }

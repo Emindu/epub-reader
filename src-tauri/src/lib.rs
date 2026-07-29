@@ -2,9 +2,17 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+
+// Progress counters for the currently-running (or most recently finished)
+// piper_batch_synthesize call. There's only ever one batch cache job in
+// flight at a time (the JS side gates on `cachingInFlight`), so a couple of
+// plain atomics are enough — no need for a per-job id or mutex-guarded map.
+static BATCH_DONE: AtomicUsize = AtomicUsize::new(0);
+static BATCH_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
 /// Where we look for the piper install:
 ///   <APPDATA>/com.read.app/piper/
@@ -238,25 +246,21 @@ async fn piper_synthesize(
     Ok(wrap_wav(&pcm, sample_rate))
 }
 
-/// Download `url` to `<piper_root>/<rel_path>` via the system `curl`.
+/// Download `url` to `<root>/<rel_path>` via the system `curl`. Shared by
+/// both the Piper (TTS) and local-LLM download flows — the only thing that
+/// differs between them is which root directory they land in.
 ///
 /// **Async on purpose:** the curl subprocess can run for 10–30 seconds on
 /// a 30 MB download, and Tauri sync commands (`fn`) run on the main
 /// thread — which would freeze the whole window ("Not Responding" in Task
 /// Manager). We wrap the blocking subprocess work in `spawn_blocking` so
 /// the async runtime can keep servicing other commands (in particular the
-/// `piper_file_size` progress poll) while curl runs.
+/// file-size progress poll) while curl runs.
 ///
 /// curl handles the GitHub → S3 redirect chain transparently, doesn't care
 /// about CORS, and ships with Windows 10 1803+ / macOS / Linux.
-#[tauri::command]
-async fn piper_download_file(
-    app: tauri::AppHandle,
-    url: String,
-    rel_path: String,
-) -> Result<u64, String> {
-    let root = piper_root(&app)?;
-    let dest = root.join(&rel_path);
+async fn download_file_into(root: &Path, url: &str, rel_path: &str) -> Result<u64, String> {
+    let dest = root.join(rel_path);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
@@ -265,6 +269,7 @@ async fn piper_download_file(
     }
 
     let dest_for_task = dest.clone();
+    let url_for_task = url.to_string();
     let output = tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = Command::new("curl");
         cmd.arg("-L")                    // follow redirects (GitHub → S3)
@@ -274,7 +279,7 @@ async fn piper_download_file(
             .arg("--connect-timeout").arg("30")
             .arg("--retry").arg("2")
             .arg("--output").arg(&dest_for_task)
-            .arg(&url);
+            .arg(&url_for_task);
 
         #[cfg(target_os = "windows")]
         {
@@ -307,18 +312,55 @@ async fn piper_download_file(
     Ok(size)
 }
 
-/// Report the size of a file inside the piper root — used by the JS side
-/// to poll progress while a `piper_download_file` command is in flight.
-#[tauri::command]
-fn piper_file_size(app: tauri::AppHandle, rel_path: String) -> Result<u64, String> {
-    let root = piper_root(&app)?;
-    let path = root.join(&rel_path);
+/// Report the size of a file inside `root` — used by the JS side to poll
+/// progress while a download command is in flight. Returns 0 (not an
+/// error) if the file doesn't exist yet, since that's the normal state
+/// right before curl writes its first bytes.
+fn file_size_in(root: &Path, rel_path: &str) -> Result<u64, String> {
+    let path = root.join(rel_path);
     if !path.exists() {
         return Ok(0);
     }
     fs::metadata(&path)
         .map(|m| m.len())
         .map_err(|e| format!("stat: {e}"))
+}
+
+#[tauri::command]
+async fn piper_download_file(
+    app: tauri::AppHandle,
+    url: String,
+    rel_path: String,
+) -> Result<u64, String> {
+    let root = piper_root(&app)?;
+    download_file_into(&root, &url, &rel_path).await
+}
+
+/// Report the size of a file inside the piper root — used by the JS side
+/// to poll progress while a `piper_download_file` command is in flight.
+#[tauri::command]
+fn piper_file_size(app: tauri::AppHandle, rel_path: String) -> Result<u64, String> {
+    let root = piper_root(&app)?;
+    file_size_in(&root, &rel_path)
+}
+
+/// Local-LLM counterparts of `piper_download_file`/`piper_file_size` — same
+/// mechanics, targeting `llm_root` instead. Used to fetch the llama-cli
+/// binary archive and GGUF model files.
+#[tauri::command]
+async fn llm_download_file(
+    app: tauri::AppHandle,
+    url: String,
+    rel_path: String,
+) -> Result<u64, String> {
+    let root = llm_root(&app)?;
+    download_file_into(&root, &url, &rel_path).await
+}
+
+#[tauri::command]
+fn llm_file_size(app: tauri::AppHandle, rel_path: String) -> Result<u64, String> {
+    let root = llm_root(&app)?;
+    file_size_in(&root, &rel_path)
 }
 
 /// -----------------------------------------------------------------------
@@ -378,6 +420,17 @@ fn cache_meta_path(
         .join(format!("{}_{}.json", section_key, voice_id)))
 }
 
+/// Cheap poll target for `piper_batch_synthesize` progress — mirrors the
+/// `piper_file_size` polling pattern used for downloads, since sentences
+/// synthesize in-memory (nothing on disk to size-check until the very end).
+#[tauri::command]
+fn piper_batch_progress() -> (usize, usize) {
+    (
+        BATCH_DONE.load(Ordering::SeqCst),
+        BATCH_TOTAL.load(Ordering::SeqCst),
+    )
+}
+
 /// Synthesize an ordered list of sentences into a single WAV on disk.
 /// Async + spawn_blocking because a chapter can be dozens of sentences =
 /// tens of seconds of piper CPU; we don't want the UI to freeze.
@@ -432,6 +485,9 @@ async fn piper_batch_synthesize(
     let voice_for_task = voice.clone();
     let sentences_for_task = sentences.clone();
 
+    BATCH_TOTAL.store(sentences_for_task.len(), Ordering::SeqCst);
+    BATCH_DONE.store(0, Ordering::SeqCst);
+
     let (all_pcm, sentence_starts, total_duration) =
         tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<u8>, Vec<f32>, f32), String> {
             let mut all_pcm: Vec<u8> = Vec::new();
@@ -441,6 +497,7 @@ async fn piper_batch_synthesize(
             for (i, text) in sentences_for_task.iter().enumerate() {
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
+                    BATCH_DONE.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
 
@@ -495,6 +552,7 @@ async fn piper_batch_synthesize(
                 }
 
                 all_pcm.extend_from_slice(&pcm);
+                BATCH_DONE.fetch_add(1, Ordering::SeqCst);
             }
 
             let total_duration = all_pcm.len() as f32 / bytes_per_sec;
@@ -587,29 +645,32 @@ fn piper_cache_delete_book(app: tauri::AppHandle, book_id: String) -> Result<(),
     Ok(())
 }
 
-/// Extract a downloaded archive that lives inside the piper root.
+/// Extract a downloaded archive that lives inside `root`, optionally
+/// hoisting a nested top-level directory's contents up one level afterward.
+/// Shared by the Piper and local-LLM install flows.
 ///
 /// We use the system `tar` binary (bsdtar on Windows 10+ / macOS / Linux)
 /// so we don't have to pull the ~1MB `zip` crate into the bundle. Works on
 /// both `.zip` and `.tar.gz`.
 ///
 /// The Piper release archive nests everything inside a top-level `piper/`
-/// directory. We detect that and hoist the contents up so the binary lands
-/// at `<piper_root>/piper.exe` where the synth command looks for it.
+/// directory, so its caller passes `hoist_folder: Some("piper")` to hoist
+/// the contents up so the binary lands at `<root>/piper.exe` where the synth
+/// command looks for it. llama.cpp's release archives extract flat with no
+/// wrapping folder, so its caller passes `None` and this step is a no-op.
 /// Async so tar's extraction (~1-2s on the piper zip) doesn't block the
 /// main thread the same way curl would.
-#[tauri::command]
-async fn piper_extract_downloaded_archive(
-    app: tauri::AppHandle,
-    archive_name: String,
+async fn extract_downloaded_archive(
+    root: &Path,
+    archive_name: &str,
+    hoist_folder: Option<&str>,
 ) -> Result<(), String> {
-    let root = piper_root(&app)?;
-    let archive = root.join(&archive_name);
+    let archive = root.join(archive_name);
     if !archive.exists() {
         return Err(format!("archive not found: {}", archive.to_string_lossy()));
     }
 
-    let root_for_task = root.clone();
+    let root_for_task = root.to_path_buf();
     let archive_for_task = archive.clone();
     let output = tauri::async_runtime::spawn_blocking(move || {
         let mut cmd = Command::new("tar");
@@ -635,34 +696,57 @@ async fn piper_extract_downloaded_archive(
         ));
     }
 
-    // Piper's release zip contains a top-level `piper/` directory. Hoist
-    // its contents up one level and remove the empty directory.
-    let inner = root.join("piper");
-    if inner.exists() && inner.is_dir() {
-        if let Ok(entries) = fs::read_dir(&inner) {
-            for entry in entries.flatten() {
-                let src = entry.path();
-                let dst = root.join(entry.file_name());
-                // fs::rename fails across drives; on same-drive-in-appdata
-                // it's cheap. If a same-name file already exists (re-install),
-                // remove it first so rename doesn't error on Windows.
-                if dst.exists() {
-                    if dst.is_dir() {
-                        let _ = fs::remove_dir_all(&dst);
-                    } else {
-                        let _ = fs::remove_file(&dst);
+    // Hoist the nested folder's contents up one level and remove the now-
+    // empty directory, if this archive is known to nest that way.
+    if let Some(folder) = hoist_folder {
+        let inner = root.join(folder);
+        if inner.exists() && inner.is_dir() {
+            if let Ok(entries) = fs::read_dir(&inner) {
+                for entry in entries.flatten() {
+                    let src = entry.path();
+                    let dst = root.join(entry.file_name());
+                    // fs::rename fails across drives; on same-drive-in-appdata
+                    // it's cheap. If a same-name file already exists (re-install),
+                    // remove it first so rename doesn't error on Windows.
+                    if dst.exists() {
+                        if dst.is_dir() {
+                            let _ = fs::remove_dir_all(&dst);
+                        } else {
+                            let _ = fs::remove_file(&dst);
+                        }
                     }
+                    fs::rename(&src, &dst)
+                        .map_err(|e| format!("hoist {}: {e}", entry.file_name().to_string_lossy()))?;
                 }
-                fs::rename(&src, &dst)
-                    .map_err(|e| format!("hoist {}: {e}", entry.file_name().to_string_lossy()))?;
             }
+            let _ = fs::remove_dir(&inner);
         }
-        let _ = fs::remove_dir(&inner);
     }
 
     // Delete the archive itself — we don't need it once extracted.
     let _ = fs::remove_file(&archive);
     Ok(())
+}
+
+#[tauri::command]
+async fn piper_extract_downloaded_archive(
+    app: tauri::AppHandle,
+    archive_name: String,
+) -> Result<(), String> {
+    let root = piper_root(&app)?;
+    extract_downloaded_archive(&root, &archive_name, Some("piper")).await
+}
+
+/// Local-LLM counterpart of `piper_extract_downloaded_archive` — llama.cpp's
+/// release archives extract flat (no wrapping top-level folder), so no hoist
+/// step is needed.
+#[tauri::command]
+async fn llm_extract_downloaded_archive(
+    app: tauri::AppHandle,
+    archive_name: String,
+) -> Result<(), String> {
+    let root = llm_root(&app)?;
+    extract_downloaded_archive(&root, &archive_name, None).await
 }
 
 /// -----------------------------------------------------------------------
@@ -804,6 +888,83 @@ fn clean_llm_output(raw: &str, prompt: &str) -> String {
     out.trim().trim_start_matches('>').trim().to_string()
 }
 
+/// Drives `llama-cli` in single-turn mode with `--jinja` so the model's own
+/// chat template (baked into the GGUF) is applied — that keeps instruct
+/// models behaving correctly without us hardcoding a per-model prompt
+/// format. stdin is wired to /dev/null so a build that doesn't understand
+/// `-st` gets EOF and exits rather than hanging forever waiting for
+/// interactive input. Shared by every local-LLM feature (explain, usage
+/// examples, …); callers own prompt-building and output-cleaning.
+fn run_llama_cli(
+    binary: &Path,
+    model: &Path,
+    root: &Path,
+    prompt: &str,
+    n_predict: u32,
+) -> Result<String, String> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("-m").arg(model)
+        .arg("-st") // single user turn, then exit (no interactive loop)
+        .arg("--jinja") // apply the model's embedded chat template
+        .arg("--simple-io") // plain IO for subprocesses: no ANSI/cursor codes
+        .arg("--no-display-prompt")
+        .arg("-p").arg(prompt)
+        .arg("-n").arg(n_predict.to_string())
+        .arg("-c").arg("4096")
+        .arg("--temp").arg("0.2")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Keep model resolution of any sidecar files relative to the install
+    // root, mirroring how we run piper.
+    cmd.current_dir(root);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let output = cmd.output().map_err(|e| format!("spawn llama-cli: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: String = stderr.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
+        return Err(format!(
+            "llama-cli exit {}: {}",
+            output.status.code().unwrap_or(-1),
+            if tail.trim().is_empty() { "no output" } else { tail.trim() }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Validates the llama-cli binary + model exist and the word isn't blank —
+/// shared precondition for every local-LLM word command.
+fn llm_preflight(
+    app: &tauri::AppHandle,
+    word: &str,
+    model_path: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf, String), String> {
+    let root = llm_root(app)?;
+    let binary = llm_binary(&root);
+    if !binary.exists() {
+        return Err(format!(
+            "llama-cli not found at {}",
+            binary.to_string_lossy()
+        ));
+    }
+    let model = PathBuf::from(model_path);
+    if !model.exists() {
+        return Err(format!("model not found at {model_path}"));
+    }
+    let word = word.trim().to_string();
+    if word.is_empty() {
+        return Err("no word/phrase to explain".into());
+    }
+    Ok((root, binary, model, word))
+}
+
 /// Ask the local model to explain `word` *as it is used in* `sentence`.
 ///
 /// This is the backing command for the smart dictionary: unlike the Free
@@ -812,12 +973,6 @@ fn clean_llm_output(raw: &str, prompt: &str) -> String {
 ///
 /// Async + spawn_blocking for the same reason as piper: a 1-2B model on CPU
 /// takes a few seconds to answer, and we can't block the UI thread that long.
-///
-/// We drive `llama-cli` in single-turn mode with `--jinja` so the model's own
-/// chat template (baked into the GGUF) is applied — that keeps instruct models
-/// behaving correctly without us hardcoding a per-model prompt format. stdin is
-/// wired to /dev/null so a build that doesn't understand `-st` gets EOF and
-/// exits rather than hanging forever waiting for interactive input.
 #[tauri::command]
 async fn llm_explain(
     app: tauri::AppHandle,
@@ -826,23 +981,7 @@ async fn llm_explain(
     model_path: String,
     max_tokens: Option<u32>,
 ) -> Result<String, String> {
-    let root = llm_root(&app)?;
-    let binary = llm_binary(&root);
-    if !binary.exists() {
-        return Err(format!(
-            "llama-cli not found at {}",
-            binary.to_string_lossy()
-        ));
-    }
-    let model = PathBuf::from(&model_path);
-    if !model.exists() {
-        return Err(format!("model not found at {model_path}"));
-    }
-
-    let word = word.trim().to_string();
-    if word.is_empty() {
-        return Err("no word/phrase to explain".into());
-    }
+    let (root, binary, model, word) = llm_preflight(&app, &word, &model_path)?;
     let n_predict = max_tokens.unwrap_or(200).clamp(32, 512);
 
     // Fold instruction + context into one user turn; `--jinja` wraps it in the
@@ -870,42 +1009,134 @@ Sentence: {sentence_flat}"
     let root_for_task = root.clone();
     let prompt_for_task = prompt.clone(); // keep `prompt` for clean_llm_output below
 
-    let raw = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let mut cmd = Command::new(&binary_for_task);
-        cmd.arg("-m").arg(&model_for_task)
-            .arg("-st") // single user turn, then exit (no interactive loop)
-            .arg("--jinja") // apply the model's embedded chat template
-            .arg("--simple-io") // plain IO for subprocesses: no ANSI/cursor codes
-            .arg("--no-display-prompt")
-            .arg("-p").arg(&prompt_for_task)
-            .arg("-n").arg(n_predict.to_string())
-            .arg("-c").arg("4096")
-            .arg("--temp").arg("0.2")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+    let raw = tauri::async_runtime::spawn_blocking(move || {
+        run_llama_cli(&binary_for_task, &model_for_task, &root_for_task, &prompt_for_task, n_predict)
+    })
+    .await
+    .map_err(|e| format!("task join: {e}"))??;
 
-        // Keep model resolution of any sidecar files relative to the install
-        // root, mirroring how we run piper.
-        cmd.current_dir(&root_for_task);
+    let cleaned = clean_llm_output(&raw, &prompt);
+    if cleaned.is_empty() {
+        return Err("model returned an empty answer".into());
+    }
+    Ok(cleaned)
+}
 
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
+/// Ask the local model for a few example sentences that use `word` in
+/// contexts/senses *other than* the one the reader is currently looking at
+/// (`sentence`, used only to steer the model away from repeating it) — this
+/// backs the "usage examples" button next to the smart-dictionary
+/// explanation, for readers who want a feel for a word beyond its one
+/// occurrence on the page.
+#[tauri::command]
+async fn llm_word_examples(
+    app: tauri::AppHandle,
+    word: String,
+    sentence: String,
+    model_path: String,
+    max_tokens: Option<u32>,
+) -> Result<String, String> {
+    let (root, binary, model, word) = llm_preflight(&app, &word, &model_path)?;
+    let n_predict = max_tokens.unwrap_or(220).clamp(32, 512);
 
-        let output = cmd.output().map_err(|e| format!("spawn llama-cli: {e}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let tail: String = stderr.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
-            return Err(format!(
-                "llama-cli exit {}: {}",
-                output.status.code().unwrap_or(-1),
-                if tail.trim().is_empty() { "no output" } else { tail.trim() }
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let sentence_flat = sentence.trim().split_whitespace().collect::<Vec<_>>().join(" ");
+    let avoid = if sentence_flat.is_empty() {
+        String::new()
+    } else {
+        format!(" Don't reuse the reader's own sentence: \"{sentence_flat}\".")
+    };
+    let prompt = format!(
+        "Give 3 short example sentences that each use the word or phrase '{word}' in a \
+different context or sense than the others, to help a reader learn how it's used. Number them \
+1-3, one sentence per line, with no extra commentary before or after.{avoid}"
+    );
+
+    let binary_for_task = binary.clone();
+    let model_for_task = model.clone();
+    let root_for_task = root.clone();
+    let prompt_for_task = prompt.clone();
+
+    let raw = tauri::async_runtime::spawn_blocking(move || {
+        run_llama_cli(&binary_for_task, &model_for_task, &root_for_task, &prompt_for_task, n_predict)
+    })
+    .await
+    .map_err(|e| format!("task join: {e}"))??;
+
+    let cleaned = clean_llm_output(&raw, &prompt);
+    if cleaned.is_empty() {
+        return Err("model returned an empty answer".into());
+    }
+    Ok(cleaned)
+}
+
+/// One turn of prior conversation, sent back to the model as plain-text
+/// context — see `llm_chat_reply`.
+#[derive(Deserialize)]
+struct ChatTurn {
+    role: String, // "user" | "assistant"
+    content: String,
+}
+
+/// Ask the local model a free-form question about `passage` (the reader's
+/// current page or chapter, extracted client-side — see `currentChatPassage`
+/// in main.ts), given the last few turns of `history` for continuity.
+///
+/// `llama-cli` has no persistent-conversation mode in how we invoke it (every
+/// call is a fresh `-st` process, no KV-cache carried over), so "chat" is
+/// simulated by re-sending a capped slice of prior turns as plain text inside
+/// one flattened single-turn prompt, same as every other local-LLM command
+/// here. The caller is expected to keep `passage` and `history` small enough
+/// to fit the shared 4096-token context (`run_llama_cli`) alongside the
+/// question and the reply itself — `passage` gets a defensive re-cap below
+/// regardless, since that's the piece most likely to blow the budget.
+#[tauri::command]
+async fn llm_chat_reply(
+    app: tauri::AppHandle,
+    passage: String,
+    history: Vec<ChatTurn>,
+    question: String,
+    model_path: String,
+    max_tokens: Option<u32>,
+) -> Result<String, String> {
+    let (root, binary, model, question) = llm_preflight(&app, &question, &model_path)?;
+    let n_predict = max_tokens.unwrap_or(300).clamp(32, 512);
+
+    let passage_flat = passage.trim().split_whitespace().collect::<Vec<_>>().join(" ");
+    // Defensive cap — the JS caller already truncates to a smaller budget
+    // per scope (page/chapter), this is just a backstop against a bug or a
+    // future caller sending too much.
+    let passage_capped: String = passage_flat
+        .split_whitespace()
+        .take(2200)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut convo = String::new();
+    for turn in &history {
+        let label = if turn.role == "assistant" { "Assistant" } else { "Reader" };
+        let flat = turn.content.trim().split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.is_empty() { continue; }
+        convo.push_str(&format!("{label}: {flat} "));
+    }
+
+    let prompt_readable = format!(
+        "You are helping a reader understand a passage from a book they're currently on. \
+Answer using only the passage and the conversation below; if the answer isn't in the passage, \
+say so briefly. Be concise.\n\nPassage: {passage_capped}\n\n{convo}Reader: {question}\nAssistant:"
+    );
+    // clean_llm_output extracts the reply via an exact substring match against
+    // the echoed prompt, which is only proven reliable for single-line
+    // prompts (see llm_explain) — flatten before sending rather than risk the
+    // fragile multi-line fallback.
+    let prompt = prompt_readable.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let binary_for_task = binary.clone();
+    let model_for_task = model.clone();
+    let root_for_task = root.clone();
+    let prompt_for_task = prompt.clone();
+
+    let raw = tauri::async_runtime::spawn_blocking(move || {
+        run_llama_cli(&binary_for_task, &model_for_task, &root_for_task, &prompt_for_task, n_predict)
     })
     .await
     .map_err(|e| format!("task join: {e}"))??;
@@ -940,6 +1171,65 @@ fn wrap_wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     out
 }
 
+/// Fetch a web page's raw HTML for the "Save article" reader-mode importer.
+/// Runs in Rust (not the webview) so we sidestep CORS entirely — the same
+/// reason piper_download_file shells out to curl rather than using the
+/// webview's fetch(). A desktop-browser User-Agent is set because many sites
+/// serve a stripped/blocked page to unrecognized clients.
+#[tauri::command]
+async fn fetch_url_html(url: String) -> Result<String, String> {
+    let trimmed = url.trim().to_string();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("Only http:// and https:// URLs are supported".into());
+    }
+
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = Command::new("curl");
+        cmd.arg("-L")                    // follow redirects
+            .arg("--fail")               // exit non-zero on HTTP errors (404, 403, ...)
+            .arg("--silent")
+            .arg("--show-error")
+            .arg("--compressed")         // request + auto-decode gzip/deflate/br
+            .arg("--connect-timeout").arg("15")
+            .arg("--max-time").arg("30")
+            .arg("--max-filesize").arg("20000000") // 20MB safety cap
+            .arg("-A").arg(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            )
+            .arg("-H").arg("Accept: text/html,application/xhtml+xml")
+            .arg(&trimmed);
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+
+        cmd.output()
+    })
+    .await
+    .map_err(|e| format!("task join: {e}"))?
+    .map_err(|e| format!("failed to spawn curl (is it installed?): {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!(
+            "curl exit {}: {}",
+            output.status.code().unwrap_or(-1),
+            if stderr.trim().is_empty() { "no response — check the URL" } else { stderr.trim() }
+        ));
+    }
+    if output.stdout.is_empty() {
+        return Err("the page returned no content".into());
+    }
+
+    // Lossy UTF-8 decode. Good enough for the vast majority of modern pages
+    // (UTF-8 is close to universal); a page served in a legacy 8-bit charset
+    // may show mangled characters rather than a hard failure.
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -952,18 +1242,26 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             greet,
+            fetch_url_html,
             piper_status,
             piper_synthesize,
             piper_extract_downloaded_archive,
             piper_download_file,
             piper_file_size,
             piper_batch_synthesize,
+            piper_batch_progress,
             piper_cache_lookup,
             piper_cache_delete_book,
             llm_status,
-            llm_explain
+            llm_explain,
+            llm_word_examples,
+            llm_chat_reply,
+            llm_download_file,
+            llm_file_size,
+            llm_extract_downloaded_archive
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
