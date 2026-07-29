@@ -2,6 +2,12 @@
 
 **Read** is a modern, high-performance desktop application for reading e-books and documents. Built with **Tauri v2**, **TypeScript**, and **Rust**, it offers an offline-first, distraction-free reading experience with neural text-to-speech, a local AI assistant, built-in dictionary lookups, spaced-repetition vocabulary learning, bionic focus reading, and deeply customizable typography.
 
+## 🖥️ Platform Support
+
+Currently released for **Windows 11** (installers below) — **macOS support is coming soon**. Linux isn't packaged yet either, but the app builds and runs from source on all three via Tauri.
+
+➡️ **[Download the latest Windows release](https://github.com/Emindu/epub-reader/releases/latest)**
+
 ---
 
 ## 📸 Screenshots
@@ -130,7 +136,7 @@ Read uses a decoupled architecture separating the lightweight native OS shell (R
 ### Prerequisites
 - [Node.js](https://nodejs.org/) (v18+)
 - [Rust](https://www.rust-lang.org/) (v1.75+)
-- Windows, macOS, or Linux
+- Windows, macOS, or Linux — packaged installers currently ship for Windows 11 only; macOS builds are in progress, and other platforms run from source in the meantime.
 
 ### Setup
 ```bash
