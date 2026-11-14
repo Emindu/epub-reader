@@ -1,0 +1,13 @@
+{
+  "name": "Read — E-book & Document Reader",
+  "short_name": "Read",
+  "description": "A distraction-free e-book and document reader that runs in your browser.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fbfaf7",
+  "theme_color": "#fbfaf7",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

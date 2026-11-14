@@ -7,7 +7,7 @@
     <title>Read</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;500&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,500;0,7..72,600;1,7..72,400&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Bitter:ital,wght@0,400;0,500;0,600;1,400&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=Inter:wght@400;450;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;500&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,500;0,7..72,600;1,7..72,400&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Bitter:ital,wght@0,400;0,500;0,600;1,400&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
@@ -15,56 +15,161 @@
     <!-- ============================================ -->
     <!-- LIBRARY SCREEN                                -->
     <!-- ============================================ -->
-    <section class="screen library-screen" data-screen-name="library">
-      <header class="library-header">
-        <div class="library-brand">
-          <span class="brand-mark"></span>
-          <span class="brand-name">Read</span>
-        </div>
-        <div class="library-actions">
-          <button id="library-vocab-review-btn" class="ghost-btn library-vocab-btn" title="Review vocabulary across all books" hidden>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
-            <span id="library-vocab-count" class="library-vocab-count">0</span>
-          </button>
-          <button id="library-theme-btn" class="ghost-btn" title="Cycle theme">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
-          </button>
-          <button id="library-settings-btn" class="ghost-btn" title="Settings">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </button>
-          <button id="import-url-btn" class="ghost-btn" title="Save a web article in reader mode">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/></svg>
-          </button>
-          <button id="import-btn" class="pill-btn">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-            <span>Add book</span>
-          </button>
-        </div>
-      </header>
-
-      <div class="library-body">
-        <div class="library-title-row">
-          <h1 class="library-title">Your library</h1>
-          <span id="library-count" class="library-count"></span>
+        <section class="screen library-screen" data-screen-name="library">
+      <aside class="library-sidebar">
+        <div class="sidebar-brand">
+          <span class="sidebar-mark" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10a2 2 0 0 1 2 2v14a2 2 0 0 0-2-2H4z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v14a2 2 0 0 1 2-2h6z"/></svg>
+          </span>
+          <span class="sidebar-wordmark">Read</span>
         </div>
 
-        <!-- Empty state -->
-        <div id="library-empty" class="library-empty">
-          <div class="empty-illustration">
-            <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <nav class="sidebar-nav" aria-label="Main">
+          <button class="sidebar-nav-item active" data-library-nav="library">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            <span>Library</span>
+            <span id="nav-library-count" class="sidebar-nav-count">0</span>
+          </button>
+          <button class="sidebar-nav-item" data-library-nav="highlights">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l-4 4 4 4"/><path d="M5 15h9a5 5 0 0 0 0-10H11"/></svg>
+            <span>Highlights</span>
+          </button>
+          <button class="sidebar-nav-item" data-library-nav="bookmarks">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4z"/></svg>
+            <span>Bookmarks</span>
+          </button>
+          <button id="library-vocab-review-btn" class="sidebar-nav-item sidebar-vocab-item" title="Review vocabulary across all books">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V6a2 2 0 0 1 2-2h12v13H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 0 2 2h12"/><path d="M9 9h5"/></svg>
+            <span>Vocabulary</span>
+            <span id="library-vocab-count" class="sidebar-due-badge" hidden>0 due</span>
+          </button>
+        </nav>
+
+        <section class="sidebar-streak" aria-label="Reading streak">
+          <div class="streak-heading">
+            <span id="sidebar-streak-title" class="streak-title">0-day streak</span>
+            <span id="sidebar-streak-today" class="streak-today">0 min today</span>
           </div>
-          <h2>Nothing here yet</h2>
-          <p>Add a book or document to start reading. Supports EPUB, PDF, TXT, and MD formats.</p>
-          <button id="import-btn-empty" class="pill-btn">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-            <span>Add your first book</span>
+          <div id="sidebar-streak-week" class="streak-week" aria-hidden="true"></div>
+        </section>
+
+        <div class="sidebar-footer">
+          <button id="library-settings-btn" class="sidebar-settings-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+            <span>Settings</span>
+          </button>
+          <button id="library-theme-btn" class="sidebar-theme-btn" title="Switch light / dark appearance">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
           </button>
         </div>
+      </aside>
 
-        <!-- Book grid -->
-        <div id="library-grid" class="library-grid" hidden></div>
-      </div>
+      <main class="library-main">
+        <div class="min-library-head">
+          <span class="min-brand">Read</span>
+          <button id="min-settings-btn" class="min-dots-btn" type="button" aria-label="Settings">···</button>
+        </div>
+        <header class="library-header">
+          <div class="library-heading">
+            <h1 class="library-title">Library</h1>
+            <p class="library-subtitle"><span id="library-count"></span><span class="subtitle-sep"> · </span>books, PDFs and saved articles</p>
+          </div>
+          <div class="library-actions">
+            <label class="library-search">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+              <span class="sr-only">Search library</span>
+              <input type="search" id="library-search" placeholder="Search titles, authors" autocomplete="off" spellcheck="false">
+              <kbd>⌘K</kbd>
+            </label>
+            <button id="import-url-btn" class="library-action-btn" title="Save a web article in reader mode">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
+              <span>Save article</span>
+            </button>
+            <button id="import-btn" class="pill-btn library-add-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              <span>Add book</span>
+            </button>
+          </div>
+        </header>
+
+        <section id="continue-reading" class="continue-reading" aria-label="Continue reading" hidden>
+          <div id="continue-cover" class="continue-cover">
+            <span id="continue-format" class="continue-cover-format">EPUB</span>
+            <span id="continue-title" class="continue-cover-title">—</span>
+            <span id="continue-author" class="continue-cover-author">—</span>
+          </div>
+          <div class="continue-main">
+            <span class="eyebrow">Continue reading</span>
+            <div class="continue-title-block">
+              <h2 id="continue-heading">—</h2>
+              <p id="continue-meta">—</p>
+            </div>
+            <p id="continue-quote" class="continue-quote" hidden></p>
+            <div class="continue-progress">
+              <div class="continue-progress-track"><div id="continue-progress-fill" class="continue-progress-fill"></div></div>
+              <div class="continue-progress-meta">
+                <span id="continue-progress-chapter">—</span>
+                <span id="continue-progress-meta">0%</span>
+              </div>
+            </div>
+            <div class="continue-actions">
+              <button id="continue-resume-btn" class="pill-btn continue-resume">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"/></svg>
+                <span>Resume</span>
+              </button>
+              <button id="continue-listen-btn" class="library-action-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8 8 0 0 1 0 12"/></svg>
+                <span>Listen</span>
+              </button>
+            </div>
+          </div>
+          <div class="continue-up-next">
+            <span class="eyebrow">Up next</span>
+            <div id="continue-up-next-list" class="up-next-list"></div>
+          </div>
+        </section>
+
+        <section class="library-titles" aria-label="All titles">
+          <div class="library-toolbar">
+            <div class="format-tabs" role="tablist" aria-label="Filter by format">
+              <button class="format-tab active" data-filter="all" role="tab" aria-selected="true">All <span id="filter-count-all">0</span></button>
+              <button class="format-tab" data-filter="epub" role="tab" aria-selected="false">EPUB <span id="filter-count-epub">0</span></button>
+              <button class="format-tab" data-filter="pdf" role="tab" aria-selected="false">PDF <span id="filter-count-pdf">0</span></button>
+              <button class="format-tab" data-filter="web" role="tab" aria-selected="false">Articles <span id="filter-count-web">0</span></button>
+              <button class="format-tab" data-filter="read" role="tab" aria-selected="false">Read <span id="filter-count-read">0</span></button>
+            </div>
+            <button id="library-sort-btn" class="library-sort-btn" type="button">
+              <span id="library-sort-label">Recently opened</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+          </div>
+
+          <!-- Empty state -->
+          <div id="library-empty" class="library-empty">
+            <div class="empty-illustration">
+              <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            </div>
+            <h2>Nothing here yet</h2>
+            <p>Add a book or document to start reading. Supports EPUB, PDF, TXT, and MD formats.</p>
+            <button id="import-btn-empty" class="pill-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+              <span>Add your first book</span>
+            </button>
+          </div>
+
+          <!-- Book grid -->
+          <div id="library-grid" class="library-grid" hidden></div>
+        </section>
+        <div class="min-library-foot">
+          <a href="#" id="min-vocab-link" class="min-link" hidden></a>
+          <span class="min-foot-actions">
+            <a href="#" id="min-add-book" class="min-link">Add a book</a>
+            <a href="#" id="min-save-article" class="min-link">Save an article</a>
+          </span>
+        </div>
+      </main>
     </section>
+
 
     <!-- ============================================ -->
     <!-- READER SCREEN                                 -->
@@ -74,54 +179,64 @@
       <div class="edge-sensor edge-sensor-top"></div>
       <header class="reader-topbar" id="reader-topbar">
         <div class="topbar-left">
-          <button id="back-to-library-btn" class="ghost-btn" title="Back to library">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+          <button id="back-to-library-btn" class="topbar-icon-btn" title="Back to library">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
           </button>
-          <button id="toc-btn" class="ghost-btn" title="Contents">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h13M3 12h13M3 18h13M20 6h.01M20 12h.01M20 18h.01"/></svg>
+          <button id="toc-btn" class="topbar-icon-btn" title="Contents">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg>
           </button>
           <div id="pdf-zoom-group" class="pdf-zoom-group">
-            <button id="pdf-zoom-out-btn" class="ghost-btn" title="Zoom out">
+            <button id="pdf-zoom-out-btn" class="topbar-icon-btn" title="Zoom out">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/></svg>
             </button>
             <span id="pdf-zoom-value" class="pdf-zoom-value">100%</span>
-            <button id="pdf-zoom-in-btn" class="ghost-btn" title="Zoom in">
+            <button id="pdf-zoom-in-btn" class="topbar-icon-btn" title="Zoom in">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg>
             </button>
           </div>
         </div>
         <div class="topbar-center">
           <span id="reader-book-title" class="reader-book-title"></span>
-          <div id="reader-stats" class="reader-stats" title="Reading Stats">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="stats-icon"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-            <span id="stats-streak">0</span> <span class="dot-sep">·</span> <span id="stats-mins">0m</span>
-          </div>
+          <span id="reader-chapter-title" class="reader-chapter-title"></span>
         </div>
         <div class="topbar-right">
-          <button id="tts-btn" class="ghost-btn" title="Read aloud (R)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10v4a1 1 0 0 0 1 1h3l5 4V5L7 9H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/></svg>
-          </button>
-          <button id="focus-mode-btn" class="ghost-btn" title="Focus reading mode (F)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
-          </button>
-          <button id="chat-btn" class="ghost-btn" title="Chat about this page (local LLM)" hidden>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
-          </button>
-          <button id="pdf-dict-btn" class="ghost-btn" title="Look up a word (copy it from the PDF first, then click here)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h5"/></svg>
-          </button>
-          <button id="bookmark-btn" class="ghost-btn" title="Toggle bookmark (B)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-          </button>
-          <button id="open-original-btn" class="ghost-btn" title="Open original article in your browser" hidden>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>
-          </button>
-          <button id="typography-btn" class="ghost-btn" title="Typography">
-            <span class="aa-label">Aa</span>
-          </button>
-          <button id="theme-btn" class="ghost-btn" title="Cycle theme (T)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
-          </button>
+          <div id="reader-stats" class="reader-stats" title="Reading Stats">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="stats-icon"><path d="M12 3c1 4 5 5.5 5 10a5 5 0 0 1-10 0c0-2.5 1.5-3.5 2-5 1 1 1.5 2 1.5 2S12 7 12 3z"/></svg>
+            <span id="stats-streak">0</span> <span class="dot-sep">·</span> <span id="stats-mins">0m</span>
+          </div>
+          <div class="reader-toolbar">
+            <button id="tts-btn" class="topbar-icon-btn" title="Read aloud (R)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10v4a1 1 0 0 0 1 1h3l5 4V5L7 9H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/></svg>
+            </button>
+            <button id="focus-mode-btn" class="topbar-icon-btn" title="Focus reading mode (F)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <button id="ai-export-btn" class="topbar-icon-btn" title="Copy for Claude — your selection, or the whole chapter / page">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="M12 11l1 2.4 2.4 1-2.4 1L12 18l-1-2.6-2.4-1 2.4-1z"/></svg>
+            </button>
+            <button id="chat-btn" class="topbar-icon-btn" title="Chat about this page (local LLM)" hidden>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12z"/></svg>
+            </button>
+            <button id="pdf-dict-btn" class="topbar-icon-btn" title="Look up a word (copy it from the PDF first, then click here)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h5"/></svg>
+            </button>
+            <button id="mark-read-btn" class="topbar-icon-btn" title="Mark as read">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12.5 3 3 5-6"/></svg>
+            </button>
+            <button id="bookmark-btn" class="topbar-icon-btn" title="Toggle bookmark (B)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+            </button>
+            <button id="open-original-btn" class="topbar-icon-btn" title="Open original article in your browser" hidden>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>
+            </button>
+            <span class="reader-toolbar-sep" aria-hidden="true"></span>
+            <button id="typography-btn" class="topbar-icon-btn" title="Typography">
+              <span class="aa-label">Aa</span>
+            </button>
+            <button id="theme-btn" class="topbar-icon-btn" title="Cycle theme (T)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -151,6 +266,39 @@
           <span id="progress-remaining">—</span>
         </div>
       </footer>
+
+      <!-- Minimal layout: ··· button, hairline progress, command bar -->
+      <button id="min-menu-btn" class="min-dots-btn min-reader-dots" type="button" aria-label="Open controls (press /)">···</button>
+      <div id="min-progress" class="min-progress" role="progressbar" aria-label="Book progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="min-progress-fill" class="min-progress-fill"></div></div>
+      <div id="cmdbar" class="cmdbar-backdrop" hidden>
+        <section class="cmdbar" role="dialog" aria-label="Controls">
+          <div class="cmdbar-head">
+            <span id="cmdbar-title" class="cmdbar-title">—</span>
+            <span id="cmdbar-sub" class="cmdbar-sub">—</span>
+          </div>
+          <label class="cmdbar-input">
+            <span class="cmdbar-slash">/</span>
+            <span class="sr-only">Type a command</span>
+            <input type="text" id="cmdbar-input" placeholder="Type a command" autocomplete="off" spellcheck="false">
+          </label>
+          <nav id="cmdbar-list" class="cmdbar-list" aria-label="Commands"></nav>
+          <div class="cmdbar-foot">
+            <div class="cmdbar-radios" role="radiogroup" aria-label="Typeface">
+              <button type="button" role="radio" data-cmd-font="serif">Serif</button>
+              <button type="button" role="radio" data-cmd-font="sans">Sans</button>
+            </div>
+            <div class="cmdbar-radios" role="radiogroup" aria-label="Text size">
+              <button type="button" role="radio" data-cmd-size="small">Small</button>
+              <button type="button" role="radio" data-cmd-size="large">Large</button>
+            </div>
+            <div class="cmdbar-radios" role="radiogroup" aria-label="Theme">
+              <button type="button" role="radio" data-cmd-appearance="light">Light</button>
+              <button type="button" role="radio" data-cmd-appearance="dark">Dark</button>
+            </div>
+            <a href="#" id="cmdbar-more" class="cmdbar-more">More…</a>
+          </div>
+        </section>
+      </div>
 
       <!-- TOC drawer -->
       <aside class="drawer drawer-left" id="toc-drawer" hidden>
@@ -302,14 +450,14 @@
 
       <!-- Read-aloud (TTS) control panel -->
       <div class="focus-panel tts-panel" id="tts-panel" hidden>
-        <button id="tts-prev" class="focus-btn" title="Previous word">
+        <button id="tts-prev" class="focus-btn" title="Previous sentence (Shift: paragraph)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20 9 12l10-8v16zM5 19V5"/></svg>
         </button>
         <button id="tts-toggle" class="focus-btn focus-toggle" title="Play / Pause (Space)">
           <svg id="tts-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 4 20 12 6 20 6 4"/></svg>
           <svg id="tts-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="none" hidden><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
         </button>
-        <button id="tts-next" class="focus-btn" title="Next word">
+        <button id="tts-next" class="focus-btn" title="Next sentence (Shift: paragraph)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4l10 8-10 8V4zM19 5v14"/></svg>
         </button>
         <div class="focus-sep"></div>
@@ -333,10 +481,49 @@
         <button id="tts-cache-btn" class="focus-btn tts-cache-btn" title="Cache this chapter for instant audiobook-style playback" hidden>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
         </button>
+        <button id="tts-tune-btn" class="focus-btn tts-tune-btn" title="More speaking controls" aria-haspopup="true" aria-expanded="false">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+        </button>
         <div class="focus-sep"></div>
         <button id="tts-close" class="focus-btn" title="Stop reading (Esc)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
+
+        <!-- Extra speaking controls (opened from the read-aloud bar) -->
+        <div id="tts-tune" class="tts-tune" hidden>
+          <label class="tts-tune-row">
+            <span class="tts-tune-name">Volume</span>
+            <input type="range" id="tts-volume" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+            <span id="tts-volume-label" class="tts-tune-value">100%</span>
+          </label>
+          <label class="tts-tune-row" id="tts-pitch-row">
+            <span class="tts-tune-name">Pitch</span>
+            <input type="range" id="tts-pitch" min="0.5" max="1.5" step="0.05" value="1" aria-label="Pitch">
+            <span id="tts-pitch-label" class="tts-tune-value">1.0</span>
+          </label>
+          <label class="tts-tune-row" title="Pause length after headings, paragraphs and sentences. Applies to new audio; already-cached chapters keep their pauses.">
+            <span class="tts-tune-name">Pauses</span>
+            <input type="range" id="tts-pauses" min="0.25" max="2" step="0.25" value="1" aria-label="Pause length">
+            <span id="tts-pauses-label" class="tts-tune-value">Normal</span>
+          </label>
+          <label class="tts-tune-row" id="tts-expr-row" title="How much the voice varies in tone and rhythm (Piper). Lower is steadier, higher is livelier. Applies to new audio; already-cached chapters keep how they were made.">
+            <span class="tts-tune-name">Expression</span>
+            <input type="range" id="tts-expr" min="0.4" max="1.6" step="0.2" value="1" aria-label="Voice expression">
+            <span id="tts-expr-label" class="tts-tune-value">Natural</span>
+          </label>
+          <label class="tts-tune-row">
+            <span class="tts-tune-name">Sleep</span>
+            <select id="tts-sleep" class="tts-voice tts-tune-select" aria-label="Sleep timer">
+              <option value="0">Off</option>
+              <option value="10">10 min</option>
+              <option value="20">20 min</option>
+              <option value="30">30 min</option>
+              <option value="45">45 min</option>
+              <option value="60">60 min</option>
+            </select>
+          </label>
+          <p class="tts-tune-hint">← / → jump by sentence · Shift + ← / → by paragraph</p>
+        </div>
       </div>
 
       <!-- Piper setup modal -->
@@ -427,6 +614,9 @@
         <button data-color="blue" class="hl-swatch hl-blue" title="Blue"></button>
         <button data-color="pink" class="hl-swatch hl-pink" title="Pink"></button>
         <div class="popover-sep"></div>
+        <button id="popover-ai" class="popover-action" title="Copy selection for Claude">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="M12 11l1 2.4 2.4 1-2.4 1L12 18l-1-2.6-2.4-1 2.4-1z"/></svg>
+        </button>
         <button id="popover-remove" class="popover-action" title="Remove">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
         </button>
@@ -447,6 +637,11 @@
           <span id="dict-phonetic" class="dict-phonetic"></span>
         </div>
         <div id="dict-meanings" class="dict-meanings"></div>
+        <button class="dict-vocab-btn" id="dict-vocab-btn" hidden>
+          <svg class="dict-vocab-icon-add" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          <svg class="dict-vocab-icon-saved" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+          <span id="dict-vocab-label">Add to vocabulary</span>
+        </button>
         <button class="dict-ai-btn" id="dict-ai-btn" hidden>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/></svg>
           <span>Explain in context</span>
@@ -474,32 +669,60 @@
 
     <!-- Settings Modal -->
     <div id="settings-modal" class="modal-backdrop" hidden>
-      <div class="modal-container">
-        <div class="modal-header">
-          <div class="modal-header-left">
-            <h3>Settings</h3>
-            <p>Appearance and local AI.</p>
-          </div>
-          <div class="modal-header-right">
-            <div class="custom-select">
-              <select id="appearance-select">
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
+      <div class="modal-container settings-container">
+        <nav class="settings-nav" aria-label="Settings sections">
+          <h2 class="settings-nav-title">Settings</h2>
+          <button class="settings-nav-item active" data-settings-target="settings-appearance">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg>
+            <span>Appearance</span>
+          </button>
+          <button id="settings-reading-style-btn" class="settings-nav-item" data-settings-target="reading">
+            <span class="settings-nav-serif" aria-hidden="true">Aa</span>
+            <span>Reading style</span>
+          </button>
+          <button id="settings-voices-btn" class="settings-nav-item" data-settings-target="voices">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>
+            <span>Voices</span>
+          </button>
+          <button class="settings-nav-item" data-settings-target="settings-ai">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>
+            <span>Local AI</span>
+          </button>
+        </nav>
+        <div class="settings-content">
+          <div class="settings-content-header">
+            <div class="settings-content-heading">
+              <h3 id="settings-section-title">Appearance</h3>
+              <p id="settings-section-subtitle">Colors used across the library and reading view.</p>
             </div>
-            <button id="close-settings-btn" class="ghost-btn" aria-label="Close">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-            </button>
+            <div class="modal-header-right">
+              <div class="custom-select">
+                <select id="appearance-select">
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+              <button id="close-settings-btn" class="ghost-btn" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
           </div>
-        </div>
-        
-        <div class="modal-body">
-          <div class="section-title">
-            <h3>Theme</h3>
-            <p>Choose the colors used in reading view.</p>
-          </div>
-          
-          <div class="theme-grid">
+
+          <div class="settings-content-body">
+            <section id="settings-appearance" class="settings-section">
+              <div class="section-title">
+                <h3>Layout</h3>
+                <p>Standard shows the sidebar and toolbars. Minimal is just your text, with a <kbd>/</kbd> command bar.</p>
+              </div>
+              <div class="layout-switch" role="radiogroup" aria-label="Interface layout">
+                <button type="button" role="radio" class="layout-switch-btn" data-ui-layout="standard">Standard</button>
+                <button type="button" role="radio" class="layout-switch-btn" data-ui-layout="minimal">Minimal</button>
+              </div>
+              <div class="section-title">
+                <h3>Theme</h3>
+                <p>Choose the colors used across the library and reading view.</p>
+              </div>
+              <div class="theme-grid">
             <button class="theme-card" data-theme-val="default">
               <h4>Default</h4>
               <span class="theme-date">July 21, 2026</span>
@@ -581,13 +804,14 @@
               <p>File over app is a philosophy: if you want to create digital artifacts that last, they must</p>
             </button>
           </div>
+            </section>
 
-          <div class="section-title settings-section-divider">
-            <h3>Local AI</h3>
-            <p>On-device model for chat, explanations, and word examples — runs fully offline once installed.</p>
-          </div>
-
-          <div class="llm-setup-steps">
+            <section id="settings-ai" class="settings-section settings-section-divided">
+              <div class="section-title">
+                <h3>Local AI</h3>
+                <p>On-device model for chat, explanations, and word examples — runs fully offline once installed.</p>
+              </div>
+              <div class="llm-setup-steps">
             <div id="llm-error-banner" class="piper-error-banner" hidden>
               <div class="piper-error-title">Install failed</div>
               <pre id="llm-error-body" class="piper-error-body">—</pre>
@@ -635,6 +859,8 @@
                 </div>
               </div>
             </div>
+          </div>
+            </section>
           </div>
         </div>
       </div>

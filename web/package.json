@@ -1,0 +1,29 @@
+{
+  "name": "read-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "start": "node server/server.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mintplex-labs/piper-tts-web": "^1.0.5",
+    "@mlc-ai/web-llm": "^0.2.85",
+    "@mozilla/readability": "^0.6.0",
+    "dompurify": "^3.4.12",
+    "epubjs": "^0.3.93",
+    "highlight.js": "^11.12.0",
+    "marked": "^18.0.7",
+    "pdfjs-dist": "^6.1.200",
+    "turndown": "^7.2.4"
+  },
+  "devDependencies": {
+    "@types/turndown": "^5.0.6",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  }
+}

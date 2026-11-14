@@ -68,6 +68,36 @@ pub struct PiperStatus {
 struct VoiceConfig {
     audio: Option<AudioConfig>,
     language: Option<LanguageConfig>,
+    inference: Option<InferenceConfig>,
+}
+
+#[derive(Deserialize)]
+struct InferenceConfig {
+    noise_scale: Option<f32>,
+    noise_w: Option<f32>,
+}
+
+/// Piper's `--noise-scale` (voice variation) and `--noise-w` (rhythm / phoneme
+/// width variation) make speech more or less expressive. `expressiveness` is a
+/// multiplier on the voice's own defaults (1.0 = untouched), so every voice
+/// keeps its character. Returns no args when nothing needs changing.
+fn expressiveness_args(cfg_path: &Path, expressiveness: Option<f32>) -> Vec<String> {
+    let e = match expressiveness {
+        Some(v) if (v - 1.0).abs() > 0.01 => v.clamp(0.2, 2.0),
+        _ => return Vec::new(),
+    };
+    let inf = fs::read_to_string(cfg_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<VoiceConfig>(&s).ok())
+        .and_then(|c| c.inference);
+    let base_scale = inf.as_ref().and_then(|i| i.noise_scale).unwrap_or(0.667);
+    let base_w = inf.as_ref().and_then(|i| i.noise_w).unwrap_or(0.8);
+    vec![
+        "--noise-scale".to_string(),
+        format!("{}", (base_scale * e).clamp(0.05, 1.5)),
+        "--noise-w".to_string(),
+        format!("{}", (base_w * e).clamp(0.05, 1.5)),
+    ]
 }
 
 #[derive(Deserialize)]
@@ -154,6 +184,7 @@ async fn piper_synthesize(
     text: String,
     voice_path: String,
     length_scale: Option<f32>,
+    expressiveness: Option<f32>,
 ) -> Result<Vec<u8>, String> {
     let root = piper_root(&app)?;
     let binary = piper_binary(&root);
@@ -181,6 +212,7 @@ async fn piper_synthesize(
     let root_for_task = root.clone();
     let binary_for_task = binary.clone();
     let voice_for_task = voice.clone();
+    let expr_args = expressiveness_args(&cfg_path, expressiveness);
 
     let pcm = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let mut cmd = Command::new(&binary_for_task);
@@ -195,6 +227,7 @@ async fn piper_synthesize(
             let clamped = scale.clamp(0.5, 2.0);
             cmd.arg("--length-scale").arg(format!("{clamped}"));
         }
+        cmd.args(&expr_args);
 
         #[cfg(target_os = "windows")]
         {
@@ -446,6 +479,10 @@ async fn piper_batch_synthesize(
     voice_path: String,
     sentences: Vec<String>,
     length_scale: Option<f32>,
+    // Silence (ms) appended after each sentence — lets headings and paragraph
+    // ends breathe instead of running into the next line.
+    pauses_ms: Option<Vec<u32>>,
+    expressiveness: Option<f32>,
 ) -> Result<CachedChapter, String> {
     let root = piper_root(&app)?;
     let binary = piper_binary(&root);
@@ -484,6 +521,8 @@ async fn piper_batch_synthesize(
     let binary_for_task = binary.clone();
     let voice_for_task = voice.clone();
     let sentences_for_task = sentences.clone();
+    let pauses_for_task = pauses_ms.unwrap_or_default();
+    let expr_args = expressiveness_args(&cfg_path, expressiveness);
 
     BATCH_TOTAL.store(sentences_for_task.len(), Ordering::SeqCst);
     BATCH_DONE.store(0, Ordering::SeqCst);
@@ -516,6 +555,7 @@ async fn piper_batch_synthesize(
                     let clamped = scale.clamp(0.5, 2.0);
                     cmd.arg("--length-scale").arg(format!("{clamped}"));
                 }
+                cmd.args(&expr_args);
 
                 #[cfg(target_os = "windows")]
                 {
@@ -552,6 +592,11 @@ async fn piper_batch_synthesize(
                 }
 
                 all_pcm.extend_from_slice(&pcm);
+                if let Some(ms) = pauses_for_task.get(i).copied() {
+                    // 16-bit mono: 2 bytes per sample.
+                    let samples = (sample_rate as u64 * ms.min(5000) as u64 / 1000) as usize;
+                    all_pcm.extend(std::iter::repeat(0u8).take(samples * 2));
+                }
                 BATCH_DONE.fetch_add(1, Ordering::SeqCst);
             }
 

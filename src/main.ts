@@ -10,6 +10,7 @@ import { marked } from 'marked';
 import { Readability } from '@mozilla/readability';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
+import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule } from './codeblocks';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -45,6 +46,7 @@ interface Settings {
   readingRuler: boolean;
   warmth: number;       // 0–100, screen warmth (amber tint) — 0 = off
   brightness: number;   // 40–100, screen brightness — 100 = untouched
+  uiLayout: 'standard' | 'minimal';  // standard = sidebar + toolbars, minimal = text-only + command bar
 }
 
 interface BookRecord {
@@ -61,6 +63,8 @@ interface BookRecord {
   updatedAt: number;
   format?: BookFormat;
   sourceUrl?: string;               // present for web articles saved via "Read mode"
+  lastOpenedAt?: number;            // stamped every time the book is opened (drives "recently opened")
+  finishedAt?: number;              // set when the user marks the book / article as read
 }
 
 interface Bookmark {
@@ -148,6 +152,7 @@ const DEFAULT_SETTINGS: Settings = {
   readingRuler: false,
   warmth: 0,
   brightness: 100,
+  uiLayout: 'standard',
 };
 
 const load = <T>(k: string, fallback: T): T => {
@@ -291,6 +296,49 @@ const el = {
   librarySettingsBtn: $<HTMLButtonElement>('library-settings-btn'),
   libraryVocabReviewBtn: $<HTMLButtonElement>('library-vocab-review-btn'),
   libraryVocabCount: $<HTMLSpanElement>('library-vocab-count'),
+  librarySearch: $<HTMLInputElement>('library-search'),
+  navLibraryCount: $<HTMLSpanElement>('nav-library-count'),
+  sidebarStreakTitle: $<HTMLSpanElement>('sidebar-streak-title'),
+  sidebarStreakToday: $<HTMLSpanElement>('sidebar-streak-today'),
+  sidebarStreakWeek: $<HTMLDivElement>('sidebar-streak-week'),
+  continueReading: $<HTMLElement>('continue-reading'),
+  continueCover: $<HTMLDivElement>('continue-cover'),
+  continueFormat: $<HTMLSpanElement>('continue-format'),
+  continueTitle: $<HTMLSpanElement>('continue-title'),
+  continueAuthor: $<HTMLSpanElement>('continue-author'),
+  continueHeading: $<HTMLHeadingElement>('continue-heading'),
+  continueMeta: $<HTMLParagraphElement>('continue-meta'),
+  continueQuote: $<HTMLParagraphElement>('continue-quote'),
+  continueProgressFill: $<HTMLDivElement>('continue-progress-fill'),
+  continueProgressChapter: $<HTMLSpanElement>('continue-progress-chapter'),
+  continueProgressMeta: $<HTMLSpanElement>('continue-progress-meta'),
+  continueResumeBtn: $<HTMLButtonElement>('continue-resume-btn'),
+  continueListenBtn: $<HTMLButtonElement>('continue-listen-btn'),
+  continueUpNextList: $<HTMLDivElement>('continue-up-next-list'),
+  filterCountAll: $<HTMLSpanElement>('filter-count-all'),
+  filterCountEpub: $<HTMLSpanElement>('filter-count-epub'),
+  filterCountPdf: $<HTMLSpanElement>('filter-count-pdf'),
+  filterCountWeb: $<HTMLSpanElement>('filter-count-web'),
+  filterCountRead: $<HTMLSpanElement>('filter-count-read'),
+  markReadBtn: $<HTMLButtonElement>('mark-read-btn'),
+  librarySortBtn: $<HTMLButtonElement>('library-sort-btn'),
+  librarySortLabel: $<HTMLSpanElement>('library-sort-label'),
+  readerChapterTitle: $<HTMLSpanElement>('reader-chapter-title'),
+  settingsReadingStyleBtn: $<HTMLButtonElement>('settings-reading-style-btn'),
+  settingsVoicesBtn: $<HTMLButtonElement>('settings-voices-btn'),
+  minSettingsBtn: $<HTMLButtonElement>('min-settings-btn'),
+  minVocabLink: $<HTMLAnchorElement>('min-vocab-link'),
+  minAddBook: $<HTMLAnchorElement>('min-add-book'),
+  minSaveArticle: $<HTMLAnchorElement>('min-save-article'),
+  minMenuBtn: $<HTMLButtonElement>('min-menu-btn'),
+  minProgress: $<HTMLDivElement>('min-progress'),
+  minProgressFill: $<HTMLDivElement>('min-progress-fill'),
+  cmdbar: $<HTMLDivElement>('cmdbar'),
+  cmdbarTitle: $<HTMLSpanElement>('cmdbar-title'),
+  cmdbarSub: $<HTMLSpanElement>('cmdbar-sub'),
+  cmdbarInput: $<HTMLInputElement>('cmdbar-input'),
+  cmdbarList: $<HTMLElement>('cmdbar-list'),
+  cmdbarMore: $<HTMLAnchorElement>('cmdbar-more'),
 
   // Save Article (web page → reader mode)
   importUrlBtn: $<HTMLButtonElement>('import-url-btn'),
@@ -345,6 +393,8 @@ const el = {
 
   selectionPopover: $<HTMLDivElement>('selection-popover'),
   popoverRemove: $<HTMLButtonElement>('popover-remove'),
+  popoverAi: $<HTMLButtonElement>('popover-ai'),
+  aiExportBtn: $<HTMLButtonElement>('ai-export-btn'),
 
   toast: $<HTMLDivElement>('toast'),
 
@@ -354,6 +404,8 @@ const el = {
   dictPopover: $<HTMLDivElement>('dict-popover'),
   dictWord: $<HTMLHeadingElement>('dict-word'),
   dictPronounceBtn: $<HTMLButtonElement>('dict-pronounce-btn'),
+  dictVocabBtn: $<HTMLButtonElement>('dict-vocab-btn'),
+  dictVocabLabel: $<HTMLSpanElement>('dict-vocab-label'),
   dictPhonetic: $<HTMLSpanElement>('dict-phonetic'),
   dictMeanings: $<HTMLDivElement>('dict-meanings'),
   dictAiBtn: $<HTMLButtonElement>('dict-ai-btn'),
@@ -450,6 +502,19 @@ const el = {
   ttsNaturalRateLabel: $<HTMLLabelElement>('tts-natural-rate-label'),
   ttsNaturalRate: $<HTMLInputElement>('tts-natural-rate'),
   ttsCacheBtn: $<HTMLButtonElement>('tts-cache-btn'),
+  ttsTuneBtn: $<HTMLButtonElement>('tts-tune-btn'),
+  ttsTune: $<HTMLDivElement>('tts-tune'),
+  ttsVolume: $<HTMLInputElement>('tts-volume'),
+  ttsVolumeLabel: $<HTMLSpanElement>('tts-volume-label'),
+  ttsPitchRow: $<HTMLLabelElement>('tts-pitch-row'),
+  ttsPitch: $<HTMLInputElement>('tts-pitch'),
+  ttsPitchLabel: $<HTMLSpanElement>('tts-pitch-label'),
+  ttsPauses: $<HTMLInputElement>('tts-pauses'),
+  ttsPausesLabel: $<HTMLSpanElement>('tts-pauses-label'),
+  ttsExpr: $<HTMLInputElement>('tts-expr'),
+  ttsExprLabel: $<HTMLSpanElement>('tts-expr-label'),
+  ttsExprRow: $<HTMLElement>('tts-expr-row'),
+  ttsSleep: $<HTMLSelectElement>('tts-sleep'),
 
   piperSetupModal: $<HTMLDivElement>('piper-setup-modal'),
   closePiperSetupBtn: $<HTMLButtonElement>('close-piper-setup-btn'),
@@ -709,6 +774,12 @@ const MEASURE_MAP: Record<MeasureKind, string> = {
 function applyGlobalTheme() {
   el.html.dataset.theme = settings.theme;
   el.html.dataset.appearance = settings.appearance;
+  el.html.dataset.layout = settings.uiLayout;
+  document.querySelectorAll<HTMLButtonElement>('[data-ui-layout]').forEach(b => {
+    const on = b.dataset.uiLayout === settings.uiLayout;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  });
   // Highlight overlays live in each iframe and cache their color from
   // --accent — invalidate + repaint so a theme flip is felt everywhere.
   refreshHighlightColors();
@@ -873,13 +944,30 @@ function cycleTheme() {
    ============================================================ */
 function renderLibrary() {
   const count = library.length;
-  el.libraryCount.textContent = count === 0 ? '' : `${count} book${count === 1 ? '' : 's'}`;
+  el.libraryCount.textContent = `${count} title${count === 1 ? '' : 's'}`;
+  if (el.navLibraryCount) el.navLibraryCount.textContent = String(count);
 
   refreshLibraryVocabButton();
+  renderContinueReading();
+  renderFormatCounts();
 
-  if (count === 0) {
+  const visible = getVisibleLibrary();
+
+  if (count === 0 || visible.length === 0) {
     el.libraryEmpty.hidden = false;
     el.libraryGrid.hidden = true;
+    const heading = el.libraryEmpty.querySelector('h2');
+    const copy = el.libraryEmpty.querySelector('p');
+    const addBtn = el.libraryEmpty.querySelector<HTMLButtonElement>('#import-btn-empty');
+    if (count === 0) {
+      if (heading) heading.textContent = 'Nothing here yet';
+      if (copy) copy.textContent = 'Add a book or document to start reading. Supports EPUB, PDF, TXT, and MD formats.';
+      if (addBtn) addBtn.hidden = false;
+    } else {
+      if (heading) heading.textContent = 'No matches';
+      if (copy) copy.textContent = 'Try a different search, or clear the format filter to see everything.';
+      if (addBtn) addBtn.hidden = true;
+    }
     return;
   }
 
@@ -887,51 +975,194 @@ function renderLibrary() {
   el.libraryGrid.hidden = false;
   el.libraryGrid.innerHTML = '';
 
-  const sorted = [...library].sort((a, b) => b.updatedAt - a.updatedAt);
-  for (const book of sorted) {
+  for (const book of visible) {
     el.libraryGrid.appendChild(renderBookCard(book));
   }
 }
 
-// Update the aggregated due count on the library-header review button. Hides
-// the button when nothing is due so the header stays uncluttered when the
-// user has no pending reviews.
+type LibraryFilter = 'all' | 'epub' | 'pdf' | 'web' | 'read';
+type LibrarySort = 'recent' | 'title' | 'author';
+
+let libraryQuery = '';
+let libraryFilter: LibraryFilter = 'all';
+let librarySort: LibrarySort = 'recent';
+
+function bookFormatOf(book: BookRecord): string {
+  return book.format || getBookFormat(book);
+}
+
+// When a book was last touched: opened, read further, or added. Opening a
+// book without turning a page still counts (lastOpenedAt), and records from
+// before that field existed fall back to updatedAt.
+function recencyOf(b: BookRecord): number {
+  return Math.max(b.lastOpenedAt || 0, b.updatedAt || 0, b.addedAt || 0);
+}
+
+function getVisibleLibrary(): BookRecord[] {
+  const q = libraryQuery.trim().toLowerCase();
+  let list = library.filter(book => {
+    if (libraryFilter === 'read') { if (!book.finishedAt) return false; }
+    else if (libraryFilter === 'web' && !book.sourceUrl) return false;
+    else if (libraryFilter !== 'all' && libraryFilter !== 'web' && (book.sourceUrl || bookFormatOf(book) !== libraryFilter)) return false;
+    if (!q) return true;
+    return `${book.title} ${book.author || ''}`.toLowerCase().includes(q);
+  });
+
+  list = [...list].sort((a, b) => {
+    if (librarySort === 'title') return (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' });
+    if (librarySort === 'author') return (a.author || '').localeCompare(b.author || '', undefined, { sensitivity: 'base' });
+    return recencyOf(b) - recencyOf(a);
+  });
+  return list;
+}
+
+function renderFormatCounts(): void {
+  if (!el.filterCountAll) return;
+  const web = library.filter(b => !!b.sourceUrl).length;
+  const epub = library.filter(b => !b.sourceUrl && bookFormatOf(b) === 'epub').length;
+  const pdf = library.filter(b => !b.sourceUrl && bookFormatOf(b) === 'pdf').length;
+  el.filterCountAll.textContent = String(library.length);
+  el.filterCountEpub.textContent = String(epub);
+  el.filterCountPdf.textContent = String(pdf);
+  el.filterCountWeb.textContent = String(web);
+  el.filterCountRead.textContent = String(library.filter(b => !!b.finishedAt).length);
+}
+
+const BOOK_COVER_PALETTES = [
+  { bg: '#22314F', font: "'Newsreader', Georgia, serif" },
+  { bg: '#24402F', font: "'Newsreader', Georgia, serif" },
+  { bg: '#4A2740', font: "'Newsreader', Georgia, serif" },
+  { bg: '#6B3325', font: "'Newsreader', Georgia, serif" },
+  { bg: '#2F3A45', font: "'Newsreader', Georgia, serif" },
+  { bg: '#6B5320', font: "'Newsreader', Georgia, serif" },
+  { bg: '#1F4444', font: "'Newsreader', Georgia, serif" },
+  { bg: '#2B2E5A', font: "'Newsreader', Georgia, serif" },
+];
+
+function coverPalette(key: string): { bg: string; font: string } {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return BOOK_COVER_PALETTES[h % BOOK_COVER_PALETTES.length];
+}
+
+function renderContinueReading(): void {
+  if (!el.continueReading) return;
+  const started = [...library]
+    .filter(b => b.progress > 0 && !b.finishedAt)
+    .sort((a, b) => recencyOf(b) - recencyOf(a));
+
+  if (started.length === 0) {
+    el.continueReading.hidden = true;
+    return;
+  }
+
+  const book = started[0];
+  const fmt = book.sourceUrl ? 'web' : bookFormatOf(book);
+  const pct = Math.round((book.progress || 0) * 100);
+  const palette = coverPalette(book.id);
+
+  el.continueReading.hidden = false;
+  el.continueCover.style.setProperty('--cover-bg', palette.bg);
+  el.continueFormat.textContent = book.sourceUrl ? 'ARTICLE' : fmt.toUpperCase();
+  el.continueTitle.textContent = book.title;
+  el.continueAuthor.textContent = book.author || 'Unknown';
+  el.continueHeading.textContent = book.title;
+  el.continueMeta.textContent = `${book.author || 'Unknown'} · ${pct}% read${book.lastCfi ? '' : ''}`;
+  el.continueQuote.hidden = true;
+  el.continueProgressFill.style.width = `${Math.max(2, pct)}%`;
+  el.continueProgressChapter.textContent = `${pct}% complete`;
+  el.continueProgressMeta.textContent = `${pct}%`;
+
+  el.continueResumeBtn.onclick = () => openFromLibrary(book);
+  el.continueListenBtn.onclick = async () => {
+    await openFromLibrary(book);
+    window.setTimeout(() => {
+      if (!el.ttsBtn.hidden) el.ttsBtn.click();
+    }, 600);
+  };
+
+  el.continueUpNextList.innerHTML = '';
+  const upNext = [...library]
+    .filter(b => b.id !== book.id && !b.finishedAt)
+    .sort((a, b) => recencyOf(b) - recencyOf(a))
+    .slice(0, 4);
+
+  if (upNext.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'up-next-title';
+    empty.textContent = 'Nothing else in your library yet.';
+    el.continueUpNextList.appendChild(empty);
+    return;
+  }
+
+  upNext.forEach((item, index) => {
+    const btn = document.createElement('button');
+    btn.className = 'up-next-item';
+    btn.type = 'button';
+    const num = document.createElement('span');
+    num.className = 'up-next-num';
+    num.textContent = String(index + 1).padStart(2, '0');
+    const title = document.createElement('span');
+    title.className = 'up-next-title';
+    title.textContent = item.title;
+    btn.appendChild(num);
+    btn.appendChild(title);
+    btn.addEventListener('click', () => openFromLibrary(item));
+    el.continueUpNextList.appendChild(btn);
+  });
+}
+
+// Update the aggregated due count on the library sidebar review item. The nav
+// item stays visible at all times; only the due badge hides when nothing is
+// pending.
 function refreshLibraryVocabButton(): void {
   const dueTotal = loadAllDueVocab().length;
   const capped = applyDailyCap(loadAllDueVocab()).length;
-  el.libraryVocabReviewBtn.hidden = dueTotal === 0;
-  // Show the ACTUAL reviewable count (post-cap) so the reader knows exactly
-  // how many they can do today; the button itself does no work with the
-  // over-cap remainder.
-  el.libraryVocabCount.textContent = `${capped}`;
-  el.libraryVocabReviewBtn.title = dueTotal > capped
-    ? `${capped} of ${dueTotal} due — the rest wait until tomorrow (${NEW_CARDS_PER_DAY_CAP}/day cap)`
-    : `${capped} card${capped === 1 ? '' : 's'} due for review`;
+  el.libraryVocabReviewBtn.hidden = false;
+  el.libraryVocabCount.hidden = capped === 0;
+  el.libraryVocabCount.textContent = `${capped} due`;
+  el.libraryVocabReviewBtn.title = capped === 0
+    ? 'No vocabulary due right now'
+    : dueTotal > capped
+      ? `${capped} of ${dueTotal} due — the rest wait until tomorrow (${NEW_CARDS_PER_DAY_CAP}/day cap)`
+      : `${capped} card${capped === 1 ? '' : 's'} due for review`;
+  el.minVocabLink.hidden = capped === 0;
+  el.minVocabLink.textContent = `${capped} word${capped === 1 ? '' : 's'} to review`;
 }
 
 function renderBookCard(book: BookRecord): HTMLElement {
   const card = document.createElement('div');
-  card.className = 'book-card' + (book.progress > 0 ? ' has-progress' : '');
+  card.className = 'book-card' + (book.progress > 0 ? ' has-progress' : '') + (book.finishedAt ? ' is-finished' : '');
+
+  const fmt = bookFormatOf(book);
+  const palette = coverPalette(book.id);
 
   const cover = document.createElement('div');
-  cover.className = 'book-cover' + (book.coverDataUrl ? '' : ' placeholder');
+  cover.className = 'book-cover' + (book.coverDataUrl ? ' has-image' : '');
+  cover.style.setProperty('--cover-bg', palette.bg);
+
   if (book.coverDataUrl) {
     const img = document.createElement('img');
     img.src = book.coverDataUrl;
     img.alt = book.title;
     cover.appendChild(img);
   } else {
-    const t = document.createElement('div');
-    t.className = 'placeholder-title';
+    const format = document.createElement('span');
+    format.className = 'book-cover-format';
+    format.textContent = book.sourceUrl ? 'ARTICLE' : fmt.toUpperCase();
+    cover.appendChild(format);
+
+    const t = document.createElement('span');
+    t.className = 'book-cover-title';
+    t.style.fontFamily = palette.font;
     t.textContent = book.title;
     cover.appendChild(t);
-  }
 
-  const fmt = book.format || getBookFormat(book);
-  const badge = document.createElement('span');
-  badge.className = book.sourceUrl ? 'book-format-badge format-web' : `book-format-badge format-${fmt}`;
-  badge.textContent = book.sourceUrl ? 'WEB' : fmt.toUpperCase();
-  cover.appendChild(badge);
+    const by = document.createElement('span');
+    by.className = 'book-cover-author';
+    by.textContent = book.author || 'Unknown';
+    cover.appendChild(by);
+  }
 
   if (book.progress > 0) {
     const ring = document.createElement('div');
@@ -950,6 +1181,24 @@ function renderBookCard(book: BookRecord): HTMLElement {
   });
   cover.appendChild(remove);
 
+  const readBtn = document.createElement('button');
+  readBtn.className = 'book-read-toggle' + (book.finishedAt ? ' on' : '');
+  readBtn.title = book.finishedAt ? 'Mark as unread' : 'Mark as read';
+  readBtn.setAttribute('aria-label', readBtn.title);
+  readBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  readBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleBookFinished(book);
+  });
+  cover.appendChild(readBtn);
+
+  if (book.finishedAt) {
+    const badge = document.createElement('div');
+    badge.className = 'book-read-badge';
+    badge.textContent = 'Read';
+    cover.appendChild(badge);
+  }
+
   const meta = document.createElement('div');
   meta.className = 'book-meta';
   const title = document.createElement('div');
@@ -960,22 +1209,45 @@ function renderBookCard(book: BookRecord): HTMLElement {
   author.textContent = book.author || 'Unknown';
   meta.appendChild(title);
   meta.appendChild(author);
+  const minMeta = document.createElement('span');
+  minMeta.className = 'book-min-meta';
+  minMeta.textContent = `${book.sourceUrl ? 'Article' : fmt.toUpperCase()} · ${book.finishedAt ? 'Read' : book.progress > 0 ? Math.round(book.progress * 100) + '%' : 'New'}`;
+  card.appendChild(minMeta);
 
-  if (book.progress > 0) {
-    const bar = document.createElement('div');
-    bar.className = 'book-progress-bar';
-    const fill = document.createElement('span');
-    fill.style.width = `${Math.round(book.progress * 100)}%`;
-    bar.appendChild(fill);
-    meta.appendChild(bar);
-  }
+  const bar = document.createElement('div');
+  bar.className = 'book-progress-bar';
+  const fill = document.createElement('span');
+  fill.style.width = `${Math.round((book.progress || 0) * 100)}%`;
+  bar.appendChild(fill);
 
   card.appendChild(cover);
   card.appendChild(meta);
+  card.appendChild(bar);
 
   card.addEventListener('click', () => openFromLibrary(book));
 
   return card;
+}
+
+// Mark a book / article as read (or back to unread). Works from the library
+// card and from the reader toolbar.
+function toggleBookFinished(book: BookRecord): void {
+  if (book.finishedAt) {
+    book.finishedAt = undefined;
+    toast('Marked "' + book.title + '" as unread');
+  } else {
+    book.finishedAt = Date.now();
+    toast('Marked "' + book.title + '" as read');
+  }
+  persistLibrary();
+  renderLibrary();
+  refreshReadButton();
+}
+
+function refreshReadButton(): void {
+  const done = !!currentBookRecord?.finishedAt;
+  el.markReadBtn.classList.toggle('active', done);
+  el.markReadBtn.title = done ? 'Marked as read — click to mark unread' : 'Mark as read';
 }
 
 function removeBook(id: string) {
@@ -1273,6 +1545,8 @@ async function saveArticleFromUrl(rawUrl: string) {
     }
     base.setAttribute('href', url);
 
+    // Capture code languages / flatten code text before Readability strips classes.
+    prepareCodeForImport(doc);
     const article = new Readability(doc).parse();
     if (!article || !article.content || (article.textContent || '').trim().length < 200) {
       showUrlImportStatus(
@@ -1292,6 +1566,7 @@ async function saveArticleFromUrl(rawUrl: string) {
     });
 
     const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+    addCodeFenceRule(turndown);
     const markdownBody = turndown.turndown(cleanHtml);
 
     const title = (article.title || hostname).trim();
@@ -1656,6 +1931,7 @@ function updatePdfProgressUi(record: BookRecord, persist = false) {
   const pct = pdfTotalPages > 1 ? (currentPdfPage - 1) / (pdfTotalPages - 1) : 0;
   currentChapterLabel = pdfHasOutline ? pdfChapterLabelForPage(currentPdfPage) : record.title;
   el.progressChapter.textContent = currentChapterLabel;
+  syncReaderChapterTitle();
   el.progressRemaining.textContent = pdfTotalPages ? `Page ${currentPdfPage}/${pdfTotalPages}` : '';
   el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
   el.progressFill.style.width = `${pct * 100}%`;
@@ -1703,6 +1979,8 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
   const rawText = new TextDecoder('utf-8').decode(buffer);
   const fmt = record.format || getBookFormat(record);
 
+  currentTextRaw = rawText;
+
   let renderedHtml = '';
   if (fmt === 'md') {
     renderedHtml = marked.parse(rawText) as string;
@@ -1714,6 +1992,8 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
   }
 
   container.innerHTML = renderedHtml;
+  // Frame + syntax-colour code blocks (async; never changes the text itself).
+  void enhanceCodeBlocks(container);
 
   flatToc = [];
   const tocTree: TocTreeNode[] = [];
@@ -1921,6 +2201,9 @@ async function openReader(record: BookRecord, buffer: ArrayBuffer) {
   cleanupCurrentReader();
 
   currentBookRecord = record;
+  record.lastOpenedAt = Date.now();     // "recently opened" ordering on the library screen
+  persistLibrary();
+  refreshReadButton();
   activeFormat = record.format || getBookFormat(record);
   currentMarks = load<BookMarks>(KEY_MARKS(record.id), { bookmarks: [], highlights: [] });
   currentVocab = loadVocab(record.id);
@@ -1936,6 +2219,7 @@ async function openReader(record: BookRecord, buffer: ArrayBuffer) {
   // real dims — which is exactly the flicker on every book open. Doing it
   // in this order means .viewer is measurable before display() runs.
   el.bookTitle.textContent = record.title;
+  if (el.readerChapterTitle) el.readerChapterTitle.textContent = '';
   el.openOriginalBtn.hidden = !record.sourceUrl;
   goToScreen('reader');
   resetReflowTracking();
@@ -1971,11 +2255,20 @@ function flatTocFromNav(items: NavItem[]) {
   }
 }
 
+function syncReaderChapterTitle() {
+  if (!el.readerChapterTitle) return;
+  const title = currentBookRecord?.title || '';
+  el.readerChapterTitle.textContent = currentChapterLabel && currentChapterLabel !== title
+    ? currentChapterLabel
+    : '';
+}
+
 function updateChapterFromCfi(href: string) {
   const clean = href.split('#')[0];
   const match = flatToc.find(t => t.href.split('#')[0] === clean) || flatToc[0];
   currentChapterLabel = match?.label || '';
   el.progressChapter.textContent = currentChapterLabel;
+  syncReaderChapterTitle();
 
   document.querySelectorAll<HTMLAnchorElement>('#toc-list .toc-item').forEach(a => {
     a.classList.toggle('current', a.dataset.href?.split('#')[0] === clean);
@@ -2432,6 +2725,136 @@ function extractSentenceContext(range: Range): string {
 // selection time, not at network-response time.
 let pendingSelectionContext = '';
 
+/* ==========================================================================
+   Copy for AI — put the passage you're reading on the clipboard, ready to
+   paste into Claude (or any chat). Scope, most specific first:
+     1. the text you've selected
+     2. PDF  -> the current page
+     3. Markdown / text / saved article -> the whole document
+     4. EPUB -> the whole current chapter
+   Output is Markdown (headings, lists and code blocks kept), wrapped in
+   <passage> tags under a one-line description of where it came from, with a
+   "My question:" line left open to type after pasting.
+   ========================================================================== */
+let currentTextRaw = '';
+let exportTurndown: TurndownService | null = null;
+
+function getExportTurndown(): TurndownService {
+  if (!exportTurndown) {
+    const td = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '-' });
+    addCodeFenceRule(td);
+    // Images can't travel through a text paste — keep their alt text as a marker.
+    td.addRule('exportImages', {
+      filter: 'img',
+      replacement: (_content, node) => {
+        const alt = ((node as HTMLElement).getAttribute('alt') || '').trim();
+        return alt ? '[Image: ' + alt + ']' : '';
+      },
+    });
+    exportTurndown = td;
+  }
+  return exportTurndown;
+}
+
+const EXPORT_STRIP_SELECTOR =
+  'script, style, svg, .code-block-head, [data-focus-word], [data-focus-sentence], [data-focus-overlay], [data-vocab-highlights]';
+
+function nodeToMarkdown(root: HTMLElement): string {
+  root.querySelectorAll(EXPORT_STRIP_SELECTOR).forEach(n => n.remove());
+  try {
+    return getExportTurndown().turndown(root.innerHTML).replace(/\n{3,}/g, '\n\n').trim();
+  } catch (err) {
+    console.warn('markdown export failed, falling back to plain text', err);
+    return (root.textContent || '').trim();
+  }
+}
+
+// The user's current selection as Markdown ('' when there isn't one).
+function exportSelectionMarkdown(): string {
+  let range: Range | null = null;
+  if (currentTextElement) {
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount && currentTextElement.contains(sel.anchorNode)) {
+      range = sel.getRangeAt(0);
+    }
+  } else {
+    const sel = getVisibleIframe()?.contentWindow?.getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount) range = sel.getRangeAt(0);
+    // The selection can be gone by the time a toolbar button is clicked, but
+    // the popover remembers what it was.
+    if (!range && !el.selectionPopover.hidden && pendingSelectionCfi && currentRendition) {
+      try { range = (currentRendition as any).getRange(pendingSelectionCfi) as Range; } catch { /* ignore */ }
+    }
+  }
+  if (!range || range.collapsed) return '';
+  const holder = document.createElement('div');
+  holder.appendChild(range.cloneContents());
+  return nodeToMarkdown(holder) || range.toString().trim();
+}
+
+// The whole section (chapter) the EPUB viewer is showing.
+function exportChapterMarkdown(): string {
+  const body = getVisibleIframe()?.contentDocument?.body;
+  return body ? nodeToMarkdown(body.cloneNode(true) as HTMLElement) : '';
+}
+
+async function writeClipboardText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function copyForAi(): Promise<void> {
+  const rec = currentBookRecord;
+  if (!rec || (!currentRendition && !currentTextElement && activeFormat !== 'pdf')) {
+    toast('Open a book first');
+    return;
+  }
+
+  let scope = '';
+  let body = '';
+  const selected = activeFormat === 'pdf' ? '' : exportSelectionMarkdown();
+  if (selected) {
+    scope = 'selected passage';
+    body = selected;
+  } else if (activeFormat === 'pdf') {
+    scope = 'text of page ' + currentPdfPage;
+    body = (await getPdfPageText(currentPdfPage)).trim();
+  } else if (currentTextElement) {
+    scope = rec.sourceUrl ? 'full article' : 'full document';
+    body = currentTextRaw.trim();
+  } else {
+    scope = 'current chapter';
+    body = exportChapterMarkdown();
+  }
+  if (!body) { toast('Nothing to copy here'); return; }
+
+  let from = '"' + rec.title + '"' + (rec.author ? ' by ' + rec.author : '');
+  if (currentChapterLabel && activeFormat === 'epub') from += ' (chapter: ' + currentChapterLabel + ')';
+  if (rec.sourceUrl) from += ' — ' + rec.sourceUrl;
+  const text = "I'm reading " + from + '. Here is the ' + scope + ':\n\n<passage>\n' + body + '\n</passage>\n\nMy question: ';
+
+  const words = body.split(/\s+/).filter(Boolean).length;
+  if (await writeClipboardText(text)) {
+    toast('Copied ' + scope + ' (' + words.toLocaleString() + ' words) — paste it into Claude');
+  } else {
+    toast("Couldn't access the clipboard");
+  }
+}
+
 function onSelected(cfiRange: string, contents: any) {
   pendingSelectionCfi = cfiRange;
   try {
@@ -2547,7 +2970,7 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
       showDictPopover(x, y);
       dictAi.prepare(wikiData.title, pendingSelectionContext);
       preparePronounceBtn(el.dictPronounceBtn, wikiData.title);
-      saveVocabEntry({ display: wikiData.title, definitionHtml: wikiHtml, phonetic: 'Wikipedia' });
+      offerVocabEntry({ display: wikiData.title, definitionHtml: wikiHtml, phonetic: 'Wikipedia' });
       return;
     }
 
@@ -2572,7 +2995,7 @@ async function lookupWord(word: string, x: number, y: number, lookupId: number) 
     showDictPopover(x, y);
     dictAi.prepare(entry.word, pendingSelectionContext);
     preparePronounceBtn(el.dictPronounceBtn, entry.word);
-    saveVocabEntry({ display: entry.word, definitionHtml: el.dictMeanings.innerHTML, phonetic });
+    offerVocabEntry({ display: entry.word, definitionHtml: el.dictMeanings.innerHTML, phonetic });
   } catch (err) {
     if ((err as any)?.name === 'AbortError') return;
     if (isStale()) return;
@@ -2709,6 +3132,8 @@ function hideDictPopover() {
   dictAbortController = null;
   dictAi.reset();
   el.dictPronounceBtn.hidden = true;
+  el.dictVocabBtn.hidden = true;
+  pendingVocabCandidate = null;
   stopPronounce();
 }
 
@@ -3396,6 +3821,45 @@ function tickReadingStats() {
 function updateStatsUI() {
   el.statsMins.textContent = `${stats.todayMins}m`;
   el.statsStreak.textContent = `${stats.streakDays}d`;
+  if (el.sidebarStreakTitle) {
+    el.sidebarStreakTitle.textContent = `${stats.streakDays}-day streak`;
+  }
+  if (el.sidebarStreakToday) {
+    el.sidebarStreakToday.textContent = `${stats.todayMins} min today`;
+  }
+  renderStreakWeek();
+}
+
+// The persisted stats only store a running day-count, not a history. Render a
+// seven-day glance where the trailing `streakDays` columns are filled and
+// today is emphasised when any reading happened.
+function renderStreakWeek(): void {
+  if (!el.sidebarStreakWeek) return;
+  const labels = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  const today = new Date();
+  const streak = Math.max(0, Math.min(stats.streakDays, 7));
+  el.sidebarStreakWeek.innerHTML = '';
+
+  for (let offset = 6; offset >= 0; offset--) {
+    const date = new Date(today);
+    date.setDate(today.getDate() - offset);
+    const isToday = offset === 0;
+    const filled = isToday ? stats.todayMins > 0 : offset < streak;
+
+    const day = document.createElement('div');
+    day.className = 'streak-day' + (filled ? ' is-filled' : '') + (isToday ? ' is-today' : '');
+
+    const bar = document.createElement('span');
+    bar.className = 'streak-bar';
+
+    const label = document.createElement('span');
+    label.className = 'streak-day-label';
+    label.textContent = labels[date.getDay()];
+
+    day.appendChild(bar);
+    day.appendChild(label);
+    el.sidebarStreakWeek.appendChild(day);
+  }
 }
 
 /* ============================================================
@@ -3421,7 +3885,47 @@ function persistVocab() {
   save(KEY_VOCAB(currentBookRecord.id), currentVocab);
 }
 
-function saveVocabEntry(entry: { display: string; definitionHtml: string; phonetic?: string }) {
+type VocabCandidate = { display: string; definitionHtml: string; phonetic?: string; context?: string };
+
+// The word currently shown in the meaning popover. Looking a word up no
+// longer saves it — the user opts in with the popover's "Add to vocabulary"
+// button, which saves this candidate.
+let pendingVocabCandidate: VocabCandidate | null = null;
+
+function offerVocabEntry(entry: { display: string; definitionHtml: string; phonetic?: string }) {
+  // Capture the sentence now: the module-level context can change before the click.
+  pendingVocabCandidate = { ...entry, context: pendingSelectionContext };
+  el.dictVocabBtn.hidden = !currentBookRecord;
+  syncVocabBtn();
+}
+
+function isWordInVocab(display: string): boolean {
+  const canonical = display.trim().toLowerCase();
+  return currentVocab.words.some(w => w.word === canonical);
+}
+
+function syncVocabBtn() {
+  const cand = pendingVocabCandidate;
+  const saved = !!cand && isWordInVocab(cand.display);
+  el.dictVocabBtn.classList.toggle('is-saved', saved);
+  el.dictVocabBtn.title = saved ? 'In your vocabulary — click to remove' : 'Save this word for review';
+  el.dictVocabLabel.textContent = saved ? 'In vocabulary' : 'Add to vocabulary';
+  repositionDictPopover();
+}
+
+function toggleVocabCandidate() {
+  const cand = pendingVocabCandidate;
+  if (!cand) return;
+  if (isWordInVocab(cand.display)) {
+    removeVocabEntry(cand.display.trim().toLowerCase());
+    toast(`Removed "${cand.display}" from vocabulary`);
+  } else {
+    saveVocabEntry(cand);
+  }
+  syncVocabBtn();
+}
+
+function saveVocabEntry(entry: VocabCandidate) {
   if (!currentBookRecord) return;
   const canonical = entry.display.trim().toLowerCase();
   if (!canonical) return;
@@ -3429,7 +3933,7 @@ function saveVocabEntry(entry: { display: string; definitionHtml: string; phonet
   // The sentence containing the word — grabbed by onSelected before the
   // async dictionary lookup fired. May be empty if the user triggered the
   // save through some other path (long-press without selection etc.).
-  const context = pendingSelectionContext;
+  const context = entry.context ?? pendingSelectionContext;
 
   const existing = currentVocab.words.find(w => w.word === canonical);
   if (existing) {
@@ -3650,7 +4154,7 @@ function renderVocabList() {
 
   el.vocabList.innerHTML = '';
   if (total === 0) {
-    el.vocabList.innerHTML = '<div class="mark-empty">No vocabulary yet.<br>Tap a word while reading to add it.</div>';
+    el.vocabList.innerHTML = '<div class="mark-empty">No vocabulary yet.<br>Look up a word while reading, then tap “Add to vocabulary”.</div>';
     return;
   }
 
@@ -4203,6 +4707,18 @@ async function vimGoToEnd(): Promise<void> {
 // Shared by both content sources RSVP/TTS can read from: an epub section's
 // iframe body, or (for text/md) the live .text-reader-container in the main
 // document. `root` is the tree-walk root; `doc` owns range/style creation.
+// Footnote / endnote reference marks ("1", "*", "†" in a <sup> or a noteref
+// link) are navigation, not prose.
+function isNoteRefNode(el: Element): boolean {
+  let n: Element | null = el;
+  for (let i = 0; n && i < 3; i++, n = n.parentElement) {
+    const t = (n.getAttribute('epub:type') || '') + ' ' + (n.getAttribute('role') || '');
+    if (/noteref/.test(t)) return true;
+    if (n.tagName === 'SUP' && /^[\s\d*†‡\[\]()]+$/.test(n.textContent || '')) return true;
+  }
+  return false;
+}
+
 function walkFocusWords(doc: Document, root: Node): FocusWord[] {
   const win = doc.defaultView;
   const words: FocusWord[] = [];
@@ -4213,6 +4729,9 @@ function walkFocusWords(doc: Document, root: Node): FocusWord[] {
       if (!parent) return NodeFilter.FILTER_REJECT;
       const tag = parent.tagName.toLowerCase();
       if (tag === 'script' || tag === 'style' || tag === 'noscript') return NodeFilter.FILTER_REJECT;
+      // Code isn't read aloud / flashed in focus mode, and highlight spans would shred it into thousands of tokens.
+      if (parent.closest('pre')) return NodeFilter.FILTER_REJECT;
+      if (isNoteRefNode(parent)) return NodeFilter.FILTER_REJECT;
       const style = win?.getComputedStyle(parent);
       if (style && (style.display === 'none' || style.visibility === 'hidden')) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
@@ -4552,13 +5071,13 @@ function sentenceRangeAround(wordIdx: number): [number, number] {
 
   let start = wordIdx;
   while (start > 0) {
-    if (endsSentence(wordText(focusWords[start - 1]))) break;
+    if (endsSentence(wordText(focusWords[start - 1]), wordText(focusWords[start]))) break;
     if (sentenceBlockAncestor(focusWords[start - 1].node) !== sentenceBlockAncestor(focusWords[start].node)) break;
     start--;
   }
   let end = wordIdx;
   while (end < focusWords.length - 1) {
-    if (endsSentence(wordText(focusWords[end]))) break;
+    if (endsSentence(wordText(focusWords[end]), wordText(focusWords[end + 1]))) break;
     if (sentenceBlockAncestor(focusWords[end].node) !== sentenceBlockAncestor(focusWords[end + 1].node)) break;
     end++;
   }
@@ -4948,6 +5467,10 @@ interface TtsSettings {
   // HTMLAudioElement.playbackRate (instant, but pitch-shifted — chipmunk
   // when fast, unnaturally deep when slow).
   piperNaturalRate: boolean;
+  volume: number;           // 0 – 1
+  pitch: number;            // 0.5 – 1.5 (system voices only; Piper has no pitch control)
+  pauseScale: number;       // multiplier for heading / paragraph / sentence pauses
+  expressiveness: number;   // Piper only: multiplier on the voice's noise-scale / noise-w (1 = voice default)
 }
 
 const DEFAULT_TTS: TtsSettings = {
@@ -4956,6 +5479,10 @@ const DEFAULT_TTS: TtsSettings = {
   voiceUri: '',
   piperVoicePath: '',
   piperNaturalRate: false,
+  volume: 1,
+  pitch: 1,
+  pauseScale: 1,
+  expressiveness: 1,
 };
 let ttsSettings: TtsSettings = { ...DEFAULT_TTS, ...load<Partial<TtsSettings>>(KEY_TTS, {}) };
 const persistTts = () => save(KEY_TTS, ttsSettings);
@@ -5088,9 +5615,30 @@ const TTS_MAX_CHUNK_WORDS = 30;
 // check the last character of the word after stripping closing quotes /
 // brackets. Matches things like `"yes."`, `world!)`, `truly?›`.
 const SENTENCE_END_RE = /[.!?…]$/;
-const TRAILING_CLOSING_RE = /["'\)\]\}»›"]+$/;
-function endsSentence(text: string): boolean {
-  return SENTENCE_END_RE.test(text.replace(TRAILING_CLOSING_RE, ''));
+const TRAILING_CLOSING_RE = /["'”’)\]}»›]+$/;
+// Titles/abbreviations that are (almost) never the last word of a sentence.
+const NON_TERMINAL_ABBREVS = new Set([
+  'mr', 'mrs', 'ms', 'mx', 'dr', 'prof', 'sr', 'jr', 'st', 'mt', 'vs', 'fig', 'figs', 'eq',
+  'gen', 'col', 'capt', 'lt', 'sgt', 'rev', 'hon', 'gov', 'sen', 'rep', 'cf', 'pp', 'vol',
+  'ave', 'blvd', 'rd', 'viz',
+]);
+const NEXT_STARTS_LOWER_RE = /^[("'“‘[]*[a-z]/;
+
+// `next` is the following word, when known. A terminator followed by a
+// lowercase word isn't a sentence end ("Dr. smith", "approx. five", and the
+// dialogue tag in `"Why?" she asked`). Abbreviations ("Mr.", "e.g.", "J.")
+// and mid-sentence ellipses don't end sentences either.
+function endsSentence(text: string, next?: string): boolean {
+  const t = text.replace(TRAILING_CLOSING_RE, '');
+  if (!SENTENCE_END_RE.test(t)) return false;
+  if (next && NEXT_STARTS_LOWER_RE.test(next)) return false;
+  if (/[.]{2,}$|…$/.test(t) || !t.endsWith('.')) return true;   // ellipsis, ?, !
+  const base = t.replace(/^[("'“‘[]+/, '').slice(0, -1);
+  if (/^[A-Z]$/.test(base) && base !== 'I') return false;        // initials: "J. Smith"
+  if (/^(?:[A-Za-z]{1,2}[.])+[A-Za-z]{1,2}$/.test(base)) {       // dotted acronyms
+    return !/^(?:e[.]g|i[.]e|a[.]k[.]a|p[.]s)$/i.test(base);
+  }
+  return !NON_TERMINAL_ABBREVS.has(base.toLowerCase());
 }
 
 function isTtsOn(): boolean { return ttsOn; }
@@ -5187,6 +5735,7 @@ function updateEngineUi() {
   el.ttsSetupBtn.hidden = ttsSettings.engine !== 'piper';
   el.ttsNaturalRateLabel.hidden = ttsSettings.engine !== 'piper';
   el.ttsNaturalRate.checked = ttsSettings.piperNaturalRate;
+  el.ttsPitchRow.hidden = ttsSettings.engine === 'piper';
   renderVoiceList();
   // Cache button visibility depends on both engine and piper readiness —
   // fire-and-forget the async check.
@@ -5242,6 +5791,8 @@ function startTts(): void {
 }
 
 function stopTts(): void {
+  clearTtsSleep();
+  closeTtsTune();
   ttsOn = false;
   ttsPaused = false;
   clearTtsResumeKeepAlive();
@@ -5253,6 +5804,7 @@ function stopTts(): void {
   el.html.dataset.ttsMode = 'off';
   el.ttsPanel.hidden = true;
   el.ttsBtn.classList.remove('active');
+  updateTtsPlayIcon();
   hideAllHighlights();
 }
 
@@ -5276,6 +5828,13 @@ function pauseTts(): void {
 function resumeTts(): void {
   if (!ttsOn || !ttsPaused) return;
   ttsPaused = false;
+  if (ttsGapHeld) {
+    const held = ttsGapHeld;
+    ttsGapHeld = null;
+    updateTtsPlayIcon();
+    held();
+    return;
+  }
   if (cachedPlayback) {
     cachedPlayback.audio.play()
       .then(() => startCachedPaintLoop())
@@ -5297,8 +5856,10 @@ function toggleTtsPause(): void {
 }
 
 function updateTtsPlayIcon(): void {
-  (el.ttsIconPlay as any).hidden = !ttsPaused;
-  (el.ttsIconPause as any).hidden = ttsPaused;
+  // SVG elements have no .hidden property — toggle the attribute instead.
+  const showPlay = !ttsOn || ttsPaused;
+  el.ttsIconPlay.toggleAttribute("hidden", !showPlay);
+  el.ttsIconPause.toggleAttribute("hidden", showPlay);
 }
 
 // Chromium's speech synthesis has a well-documented ~15s bug where the
@@ -5320,9 +5881,33 @@ function clearTtsResumeKeepAlive(): void {
   }
 }
 
-function stepTts(delta: number): void {
+// [start, end] word indexes of the paragraph (block) containing idx.
+function ttsParagraphRange(idx: number): [number, number] {
+  const block = ttsBlockOf(focusWords[idx]);
+  let s = idx;
+  let e = idx;
+  while (s > 0 && ttsBlockOf(focusWords[s - 1]) === block) s--;
+  while (e < focusWords.length - 1 && ttsBlockOf(focusWords[e + 1]) === block) e++;
+  return [s, e];
+}
+
+// Where a prev/next step lands. "Previous" first returns to the start of the
+// current sentence/paragraph, like a media player's rewind-to-start.
+function ttsStepTarget(delta: number, unit: 'sentence' | 'paragraph'): number {
+  const last = focusWords.length - 1;
+  const cur = Math.max(0, Math.min(last, focusIndex));
+  const range = (i: number): [number, number] => unit === 'paragraph' ? ttsParagraphRange(i) : sentenceRangeAround(i);
+  const [s, e] = range(cur);
+  if (s < 0) return cur;
+  if (delta > 0) return Math.min(last, e + 1);
+  if (cur > s) return s;
+  return s > 0 ? Math.max(0, range(s - 1)[0]) : 0;
+}
+
+function stepTts(delta: number, unit: 'word' | 'sentence' | 'paragraph' = 'sentence'): void {
   if (!ttsOn) return;
-  focusIndex = Math.max(0, Math.min(focusWords.length - 1, focusIndex + delta));
+  const target = unit === 'word' ? focusIndex + delta : ttsStepTarget(delta, unit);
+  focusIndex = Math.max(0, Math.min(focusWords.length - 1, target));
   cancelCurrentUtterance();
   ttsPaused = false;
   updateTtsPlayIcon();
@@ -5373,9 +5958,117 @@ function jumpTtsToWordIdx(idx: number): void {
 }
 
 function cancelCurrentUtterance(): void {
+  clearTtsGap();
   try { speechSynthesis.cancel(); } catch {}
   stopPiperPlayback();
   stopCachedPlayback();
+}
+
+/* --- Extra speaking controls: volume, pitch, pauses, sleep timer ------- */
+function describePauseScale(v: number): string {
+  if (v <= 0.5) return 'Short';
+  if (v < 1) return 'Brisk';
+  if (v === 1) return 'Normal';
+  if (v <= 1.5) return 'Relaxed';
+  return 'Long';
+}
+
+const EXPRESSION_LABELS: [number, string][] = [[0.4, 'Flat'], [0.6, 'Steady'], [0.8, 'Calm'], [1, 'Natural'], [1.2, 'Lively'], [1.4, 'Expressive'], [1.6, 'Dramatic']];
+function describeExpression(v: number): string {
+  let best = EXPRESSION_LABELS[0];
+  for (const e of EXPRESSION_LABELS) if (Math.abs(e[0] - v) < Math.abs(best[0] - v)) best = e;
+  return best[1];
+}
+
+// Sent to Piper; null (= leave the voice alone) when at the default.
+function currentExpressiveness(): number | null {
+  const v = ttsSettings.expressiveness;
+  return typeof v === 'number' && Math.abs(v - 1) > 0.01 ? v : null;
+}
+
+function syncTtsTuneUi(): void {
+  el.ttsVolume.value = String(ttsSettings.volume);
+  el.ttsVolumeLabel.textContent = `${Math.round(ttsSettings.volume * 100)}%`;
+  el.ttsPitch.value = String(ttsSettings.pitch);
+  el.ttsPitchLabel.textContent = ttsSettings.pitch.toFixed(2).replace(/0$/, '');
+  el.ttsPauses.value = String(ttsSettings.pauseScale);
+  el.ttsPausesLabel.textContent = describePauseScale(ttsSettings.pauseScale);
+  el.ttsPitchRow.hidden = ttsSettings.engine === 'piper';
+  el.ttsExpr.value = String(ttsSettings.expressiveness ?? 1);
+  el.ttsExprLabel.textContent = describeExpression(ttsSettings.expressiveness ?? 1);
+  el.ttsExprRow.hidden = ttsSettings.engine !== 'piper';
+}
+
+function setTtsVolume(v: number, commit: boolean): void {
+  ttsSettings.volume = Math.max(0, Math.min(1, v));
+  persistTts();
+  syncTtsTuneUi();
+  // Piper audio elements take the new volume immediately.
+  if (piperAudio) piperAudio.volume = ttsSettings.volume;
+  if (piperPrefetched) piperPrefetched.audio.volume = ttsSettings.volume;
+  if (cachedPlayback) cachedPlayback.audio.volume = ttsSettings.volume;
+  // A system utterance bakes its volume in at speak() time: restart the
+  // current chunk once the slider is released.
+  if (commit && ttsOn && ttsSettings.engine === 'system' && !ttsPaused) {
+    cancelCurrentUtterance();
+    speakNextChunk();
+  }
+}
+
+function setTtsPitch(v: number, commit: boolean): void {
+  ttsSettings.pitch = Math.max(0.5, Math.min(1.5, v));
+  persistTts();
+  syncTtsTuneUi();
+  if (commit && ttsOn && ttsSettings.engine === 'system' && !ttsPaused) {
+    cancelCurrentUtterance();
+    speakNextChunk();
+  }
+}
+
+function setTtsPauseScale(v: number): void {
+  ttsSettings.pauseScale = Math.max(0.25, Math.min(2, v));
+  persistTts();
+  syncTtsTuneUi();
+  // Pauses are read when each chunk ends, so new values apply from the next
+  // chunk on. Audio cached earlier keeps the pauses it was made with.
+}
+
+function setTtsExpressiveness(v: number): void {
+  ttsSettings.expressiveness = Math.max(0.4, Math.min(1.6, v));
+  persistTts();
+  syncTtsTuneUi();
+  // Applies to audio synthesized from now on (the chunk already prefetched,
+  // and chapters cached earlier, keep the expression they were made with).
+}
+
+let ttsSleepTimer = 0;
+function clearTtsSleep(): void {
+  if (ttsSleepTimer) { clearTimeout(ttsSleepTimer); ttsSleepTimer = 0; }
+  el.ttsSleep.value = '0';
+  el.ttsTuneBtn.classList.remove('active');
+}
+function setTtsSleep(minutes: number): void {
+  if (ttsSleepTimer) { clearTimeout(ttsSleepTimer); ttsSleepTimer = 0; }
+  el.ttsTuneBtn.classList.toggle('active', minutes > 0);
+  if (minutes <= 0) return;
+  ttsSleepTimer = window.setTimeout(() => {
+    ttsSleepTimer = 0;
+    if (!ttsOn) return;
+    stopTts();
+    toast('Sleep timer: read aloud stopped');
+  }, minutes * 60_000);
+  toast(`Read aloud will stop in ${minutes} min`);
+}
+
+function closeTtsTune(): void {
+  el.ttsTune.hidden = true;
+  el.ttsTuneBtn.setAttribute('aria-expanded', 'false');
+}
+function toggleTtsTune(): void {
+  const open = el.ttsTune.hidden;
+  if (open) syncTtsTuneUi();
+  el.ttsTune.hidden = !open;
+  el.ttsTuneBtn.setAttribute('aria-expanded', String(open));
 }
 
 function setTtsRate(rate: number): void {
@@ -5502,14 +6195,24 @@ interface CatalogVoice {
 // Small, opinionated set. Full catalog is at
 // https://huggingface.co/rhasspy/piper-voices/tree/main
 const PIPER_CATALOG: CatalogVoice[] = [
-  { id: 'en_US-lessac-medium',   label: 'Lessac (US, female)',       desc: 'Clear, neutral',           lang: 'en_US', langGroup: 'en', speaker: 'lessac',   quality: 'medium', sizeMb: 63 },
-  { id: 'en_US-libritts_r-medium', label: 'LibriTTS-R (US, female)', desc: 'Warm, expressive',        lang: 'en_US', langGroup: 'en', speaker: 'libritts_r', quality: 'medium', sizeMb: 63 },
-  { id: 'en_US-ryan-medium',     label: 'Ryan (US, male)',            desc: 'Conversational',           lang: 'en_US', langGroup: 'en', speaker: 'ryan',     quality: 'medium', sizeMb: 63 },
-  { id: 'en_US-amy-medium',      label: 'Amy (US, female)',           desc: 'Friendly, animated',       lang: 'en_US', langGroup: 'en', speaker: 'amy',      quality: 'medium', sizeMb: 63 },
-  { id: 'en_GB-alan-medium',     label: 'Alan (UK, male)',            desc: 'British, calm',            lang: 'en_GB', langGroup: 'en', speaker: 'alan',     quality: 'medium', sizeMb: 63 },
-  { id: 'en_GB-northern_english_male-medium', label: 'Northern English male', desc: 'UK regional',      lang: 'en_GB', langGroup: 'en', speaker: 'northern_english_male', quality: 'medium', sizeMb: 63 },
-  { id: 'en_US-hfc_female-medium', label: 'HFC (US, female)',         desc: 'Natural, HuggingFace',     lang: 'en_US', langGroup: 'en', speaker: 'hfc_female', quality: 'medium', sizeMb: 63 },
-  { id: 'en_US-lessac-high',     label: 'Lessac (US, female, high)',  desc: 'Higher quality, larger',   lang: 'en_US', langGroup: 'en', speaker: 'lessac',   quality: 'high',   sizeMb: 114 },
+  // High-quality voices first: slower to generate but noticeably smoother over long reading. Best with "cache chapter".
+  { id: 'en_US-ryan-high', label: 'Ryan (US, male, high)', desc: 'Best for long reading · natural pacing', lang: 'en_US', langGroup: 'en', speaker: 'ryan', quality: 'high', sizeMb: 121 },
+  { id: 'en_US-ljspeech-high', label: 'LJSpeech (US, female, high)', desc: 'Audiobook-style, very smooth', lang: 'en_US', langGroup: 'en', speaker: 'ljspeech', quality: 'high', sizeMb: 114 },
+  { id: 'en_US-lessac-high', label: 'Lessac (US, female, high)', desc: 'Clear, neutral, high quality', lang: 'en_US', langGroup: 'en', speaker: 'lessac', quality: 'high', sizeMb: 114 },
+  { id: 'en_GB-cori-high', label: 'Cori (UK, female, high)', desc: 'British, warm narrator', lang: 'en_GB', langGroup: 'en', speaker: 'cori', quality: 'high', sizeMb: 114 },
+  // Medium voices: fast enough for live reading.
+  { id: 'en_US-lessac-medium', label: 'Lessac (US, female)', desc: 'Clear, neutral', lang: 'en_US', langGroup: 'en', speaker: 'lessac', quality: 'medium', sizeMb: 63 },
+  { id: 'en_US-libritts_r-medium', label: 'LibriTTS-R (US, female)', desc: 'Warm, expressive', lang: 'en_US', langGroup: 'en', speaker: 'libritts_r', quality: 'medium', sizeMb: 63 },
+  { id: 'en_US-ryan-medium', label: 'Ryan (US, male)', desc: 'Conversational', lang: 'en_US', langGroup: 'en', speaker: 'ryan', quality: 'medium', sizeMb: 63 },
+  { id: 'en_US-amy-medium', label: 'Amy (US, female)', desc: 'Friendly, animated', lang: 'en_US', langGroup: 'en', speaker: 'amy', quality: 'medium', sizeMb: 63 },
+  { id: 'en_US-kristin-medium', label: 'Kristin (US, female)', desc: 'Calm, even', lang: 'en_US', langGroup: 'en', speaker: 'kristin', quality: 'medium', sizeMb: 63 },
+  { id: 'en_US-norman-medium', label: 'Norman (US, male)', desc: 'Steady, mature', lang: 'en_US', langGroup: 'en', speaker: 'norman', quality: 'medium', sizeMb: 63 },
+  { id: 'en_US-hfc_male-medium', label: 'HFC (US, male)', desc: 'Natural, HuggingFace', lang: 'en_US', langGroup: 'en', speaker: 'hfc_male', quality: 'medium', sizeMb: 63 },
+  { id: 'en_US-hfc_female-medium', label: 'HFC (US, female)', desc: 'Natural, HuggingFace', lang: 'en_US', langGroup: 'en', speaker: 'hfc_female', quality: 'medium', sizeMb: 63 },
+  { id: 'en_GB-alan-medium', label: 'Alan (UK, male)', desc: 'British, calm', lang: 'en_GB', langGroup: 'en', speaker: 'alan', quality: 'medium', sizeMb: 63 },
+  { id: 'en_GB-jenny_dioco-medium', label: 'Jenny (UK, female)', desc: 'British, friendly', lang: 'en_GB', langGroup: 'en', speaker: 'jenny_dioco', quality: 'medium', sizeMb: 63 },
+  { id: 'en_GB-alba-medium', label: 'Alba (Scottish, female)', desc: 'Scottish, clear', lang: 'en_GB', langGroup: 'en', speaker: 'alba', quality: 'medium', sizeMb: 63 },
+  { id: 'en_GB-northern_english_male-medium', label: 'Northern English male', desc: 'UK regional', lang: 'en_GB', langGroup: 'en', speaker: 'northern_english_male', quality: 'medium', sizeMb: 63 },
 ];
 
 function voiceOnnxUrl(v: CatalogVoice): string {
@@ -6156,42 +6859,298 @@ async function setTtsEngine(engine: TtsEngine): Promise<void> {
   }
 }
 
-type ChunkWord = { wordIdx: number; text: string };
+type ChunkWord = { wordIdx: number; text: string; glue?: boolean };
+// A chunk is the words handed to the synth engine in one go, plus how the
+// reader should pace the gap that follows it.
+type Chunk = ChunkWord[] & { pauseAfterMs?: number; sentenceEnd?: boolean; aside?: boolean; softEnd?: boolean };
 
-// Collect a chunk of visible words starting at `startIdx` in focusWords.
-// Prefers to cut on a sentence boundary — periods/question marks/exclamations
-// give the synth engine (Piper or Web Speech) a natural pause to render, and
-// chunk seams that land on those pauses sound natural instead of clipped.
+/* --- Structure-aware pacing --------------------------------------------
+   Words are flat tokens, so on their own a heading ("Chapter 1") runs
+   straight into the paragraph below it. These helpers recover the block
+   (heading / paragraph / list item) each word lives in, so chunks never
+   straddle blocks and headings, paragraphs and list items get a real pause.
+   ----------------------------------------------------------------------- */
+const TTS_BLOCK_SELECTOR =
+  'h1,h2,h3,h4,h5,h6,p,li,dt,dd,blockquote,figcaption,pre,tr,td,th,caption,div,section,article,header,footer,aside,summary';
+const TTS_HEADING_SELECTOR = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
+const TTS_HEADING_CLASS_RE = /(^|[-_ ])(title|subtitle|heading|subhead|chapter-?title|chap-?title|ch-?title)([-_ ]|$)/i;
+
+const TTS_PAUSE_HEADING_MS = 750;
+const TTS_PAUSE_PARAGRAPH_MS = 450;
+const TTS_PAUSE_ITEM_MS = 320;
+const TTS_PAUSE_SENTENCE_MS = 160;   // piper only: breath between sentences
+
+const ttsScaledPause = (ms: number) => Math.round(ms * (ttsSettings.pauseScale || 1));
+
+const ttsBlockCache = new WeakMap<Node, Element | null>();
+const ttsHeadingCache = new WeakMap<Element, boolean>();
+
+function ttsBlockOf(fw: FocusWord): Element | null {
+  const cached = ttsBlockCache.get(fw.node);
+  if (cached !== undefined) return cached;
+  const block = fw.node.parentElement?.closest(TTS_BLOCK_SELECTOR) ?? null;
+  ttsBlockCache.set(fw.node, block);
+  return block;
+}
+
+// Calibre-style books give titles opaque classes (class="calibre12"), so fall
+// back to how the block is styled: clearly larger than the body text.
+function ttsLooksLikeHeading(block: Element): boolean {
+  const tag = block.tagName;
+  if (tag === 'LI' || tag === 'TD' || tag === 'TH' || tag === 'DD' || tag === 'DT' || tag === 'PRE' || tag === 'BLOCKQUOTE') return false;
+  const doc = block.ownerDocument;
+  const view = doc.defaultView;
+  if (!view || !doc.body) return false;
+  const size = parseFloat(view.getComputedStyle(block).fontSize);
+  const base = parseFloat(view.getComputedStyle(doc.body).fontSize);
+  return size > 0 && base > 0 && size >= base * 1.3;
+}
+
+function ttsIsHeading(fw: FocusWord): boolean {
+  const parent = fw.node.parentElement;
+  if (!parent) return false;
+  if (parent.closest(TTS_HEADING_SELECTOR)) return true;
+  // Many ebooks mark titles with a class on a plain <p>/<div> instead of <hN>.
+  const block = ttsBlockOf(fw);
+  if (!block) return false;
+  let isHeading = ttsHeadingCache.get(block);
+  if (isHeading === undefined) {
+    const cls = typeof block.className === 'string' ? block.className : '';
+    const short = (block.textContent || '').trim().length < 140;
+    isHeading = short && (TTS_HEADING_CLASS_RE.test(cls) || ttsLooksLikeHeading(block));
+    ttsHeadingCache.set(block, isHeading);
+  }
+  return isHeading;
+}
+
+function ttsWordText(idx: number): string {
+  const fw = focusWords[idx];
+  return fw ? (fw.node.textContent || '').slice(fw.start, fw.end).trim() : '';
+}
+
+/* --- Parentheticals ---------------------------------------------------
+   Text in (parentheses) or [brackets] is an aside. Read in the same flow as
+   the sentence around it, it sounds like part of the main clause. So an aside
+   becomes its own chunk: a short pause before and after, no spoken brackets,
+   and a comma on the text before it so the voice hands over naturally.
+   ----------------------------------------------------------------------- */
+const TTS_PAUSE_ASIDE_MS = 220;
+const TTS_PAUSE_LINE_MS = 260;          // <br> line breaks (verse, addresses)
+const TTS_PAGE_SPILL_WORDS = 28;        // finish a sentence that runs off the page, up to this many words
+const TTS_ASIDE_MAX_WORDS = 60;       // an opener with no closer this close is just a stray "("
+const TTS_PAREN_OPEN_RE = /^["'“‘]*[([]/;
+
+let ttsParenWordsRef: FocusWord[] | null = null;
+let ttsParenMap: Uint8Array = new Uint8Array(0);
+
+function ttsComputeParenMap(): void {
+  const n = focusWords.length;
+  const map = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!TTS_PAREN_OPEN_RE.test(ttsWordText(i))) continue;
+    const block = ttsBlockOf(focusWords[i]);
+    let depth = 0;
+    let end = -1;
+    for (let j = i; j < n && j < i + TTS_ASIDE_MAX_WORDS; j++) {
+      if (ttsBlockOf(focusWords[j]) !== block) break;
+      for (const ch of ttsWordText(j)) {
+        if (ch === '(' || ch === '[') depth++;
+        else if ((ch === ')' || ch === ']') && depth > 0) depth--;
+      }
+      if (depth === 0) { end = j; break; }
+    }
+    if (end >= 0) {
+      for (let k = i; k <= end; k++) map[k] = 1;
+      i = end;
+    }
+  }
+  ttsParenWordsRef = focusWords;
+  ttsParenMap = map;
+}
+
+// True when the word at idx is inside a parenthetical (including its brackets).
+function ttsInParen(idx: number): boolean {
+  if (ttsParenWordsRef !== focusWords || ttsParenMap.length !== focusWords.length) ttsComputeParenMap();
+  return ttsParenMap[idx] === 1;
+}
+
+function ttsBlockEndsAfter(idx: number): boolean {
+  const cur = focusWords[idx];
+  const nxt = focusWords[idx + 1];
+  return !!cur && !!nxt && ttsBlockOf(cur) !== ttsBlockOf(nxt);
+}
+
+// Silence to leave after the word at idx: 0 inside a block, a longer one
+// when the block (heading > paragraph > list item) ends there.
+function ttsPauseAfter(idx: number): number {
+  const cur = focusWords[idx];
+  const nxt = focusWords[idx + 1];
+  if (!cur || !nxt) return 0;
+  const block = ttsBlockOf(cur);
+  if (block === ttsBlockOf(nxt)) {
+    // Same block: a <br> line break or a parenthetical opening / closing earns a pause.
+    if (ttsNodeGap(idx + 1) === 'br') return ttsScaledPause(TTS_PAUSE_LINE_MS);
+    return ttsInParen(idx) !== ttsInParen(idx + 1) ? ttsScaledPause(TTS_PAUSE_ASIDE_MS) : 0;
+  }
+  if (ttsIsHeading(cur)) return ttsScaledPause(TTS_PAUSE_HEADING_MS);
+  const tag = block?.tagName;
+  if (tag === 'LI' || tag === 'DT' || tag === 'DD' || tag === 'TD' || tag === 'TH' || tag === 'TR') return ttsScaledPause(TTS_PAUSE_ITEM_MS);
+  return ttsScaledPause(TTS_PAUSE_PARAGRAPH_MS);
+}
+
+// Tokens come from text nodes, so punctuation that sits outside an inline tag
+// ("</a>, <em>" or "<em>.1</em>") arrives as its own token. Joined with plain
+// spaces that becomes "Figure 8 .1" / "Chapter 1 ," — attach it to the word
+// before it, and keep opening marks attached to the word after them.
+const TTS_ATTACH_LEFT_RE = /^[,.;:!?)\]}…%]/;
+const TTS_CLOSING_ONLY_RE = /^[”’»]+$/;
+const TTS_OPENERS_ONLY_RE = /^[(\[{“‘«]+$/;
+function ttsJoinTokens(words: ChunkWord[]): string {
+  let out = '';
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (i > 0) {
+      const glued = w.glue || TTS_ATTACH_LEFT_RE.test(w.text) || TTS_CLOSING_ONLY_RE.test(w.text) || TTS_OPENERS_ONLY_RE.test(words[i - 1].text);
+      if (!glued) out += ' ';
+    }
+    out += w.text;
+  }
+  return out;
+}
+
+// Text actually sent to the engine. Headings, list items and other fragments
+// usually lack closing punctuation; without it engines run them into the
+// next line with no falling intonation, so close them with a full stop.
+function ttsSpokenText(words: ChunkWord[]): string {
+  const chunk = words as Chunk;
+  let text = ttsJoinTokens(words);
+  // Brackets aren't spoken; the pause and tone around the chunk carry the aside.
+  if (chunk.aside) text = text.replace(/[()[\]]/g, '');
+  const bare = text.replace(TRAILING_CLOSING_RE, '');
+  if (/[.!?…:;,]$/.test(bare)) return text;
+  // A chunk that stops mid-sentence (before/after an aside, or a long-sentence
+  // cut) should sound unfinished, so it gets a comma instead of a full stop.
+  return text + (chunk.softEnd ? ',' : '.');
+}
+
+const TTS_SOFT_BREAK_RE = /[,;:–—]$/;
+
+// Collect a chunk of visible words starting at startIdx in focusWords.
 //
 // Rules:
-//   - Stop at first sentence terminator after we have >= MIN words.
-//   - Hard cap at MAX words if no terminator shows up (very long sentence,
-//     bullet list without periods, etc.).
-//   - Stop early if we hit an off-page word ('after' → page turn needed).
+//   - A chunk never crosses a block boundary (heading, paragraph, list item):
+//     the pause after it is recorded in pauseAfterMs.
+//   - Otherwise stop at the first real sentence end after MIN words (see
+//     endsSentence — abbreviations, initials and dialogue tags don't count).
+//   - Hard cap at MAX words; when a long sentence forces a cut, back up to the
+//     last comma / semicolon / colon / dash so the break lands on a clause.
+//   - Stop early if we hit an off-page word ('after' -> page turn needed).
 //
 // Doesn't mutate focusIndex — callers advance it when the chunk is committed.
-function collectVisibleChunkFrom(startIdx: number): { words: ChunkWord[]; hitAfter: boolean } {
-  const words: ChunkWord[] = [];
+// How the word at idx connects to the one before it when they live in
+// different text nodes:
+//   'glue'  – no whitespace between them (drop caps, "<em>8</em>.1", split words)
+//   'br'    – a <br>/<hr> separates them (a line break even without whitespace)
+//   'space' – ordinary word gap
+function ttsNodeGap(idx: number): 'space' | 'glue' | 'br' {
+  const cur = focusWords[idx];
+  const prev = focusWords[idx - 1];
+  if (!cur || !prev || prev.node === cur.node) return 'space';
+  try {
+    const r = cur.node.ownerDocument.createRange();
+    r.setStart(prev.node, prev.end);
+    r.setEnd(cur.node, cur.start);
+    if (r.cloneContents().querySelector('br, hr')) return 'br';
+    if (r.toString() === '' && ttsBlockOf(prev) === ttsBlockOf(cur)) return 'glue';
+  } catch { /* detached nodes — treat as a normal gap */ }
+  return 'space';
+}
+
+// When read-aloud is mid-sentence at the end of an EPUB page the chunk spills
+// onto the next page; turn the page once the audio reaches those words.
+let ttsSpillTurnPending = false;
+function ttsTurnForSpill(): void {
+  if (ttsSpillTurnPending || !currentRendition) return;
+  ttsSpillTurnPending = true;
+  Promise.resolve(currentRendition.next())
+    .catch(() => {})
+    .finally(() => { window.setTimeout(() => { ttsSpillTurnPending = false; }, 400); });
+}
+
+const TTS_URL_RE = /(?:https?:[/][/]|www[.])\S+/i;
+const TTS_WORD_CHAR_RE = /[\p{L}\p{N}]/u;
+
+function collectVisibleChunkFrom(startIdx: number): { words: Chunk; hitAfter: boolean } {
+  let r = collectVisibleChunkRaw(startIdx);
+  // A chunk of only brackets / punctuation (what's left of "(see https://…)")
+  // has nothing to say — skip it and take the next one.
+  while (r.words.length > 0 && !TTS_WORD_CHAR_RE.test(r.words.map(w => w.text).join(''))) {
+    r = collectVisibleChunkRaw(r.words[r.words.length - 1].wordIdx + 1);
+  }
+  return r;
+}
+
+function collectVisibleChunkRaw(startIdx: number): { words: Chunk; hitAfter: boolean } {
+  const words: Chunk = [];
+  let spillWords = 0;
   let idx = startIdx;
   let hitAfter = false;
-  while (idx < focusWords.length && words.length < TTS_MAX_CHUNK_WORDS) {
+  let chunkBlock: Element | null | undefined;
+  let heading = false;
+  let chunkInParen = false;
+
+  const finish = (): { words: Chunk; hitAfter: boolean } => {
+    const last = words[words.length - 1];
+    if (last) {
+      const pause = ttsPauseAfter(last.wordIdx);
+      const sentenceEnd = endsSentence(last.text, ttsWordText(last.wordIdx + 1));
+      if (pause > 0) words.pauseAfterMs = pause;
+      words.sentenceEnd = sentenceEnd;
+      words.aside = ttsInParen(words[0].wordIdx);
+      words.softEnd = !sentenceEnd && !ttsBlockEndsAfter(last.wordIdx);
+    }
+    return { words, hitAfter };
+  };
+
+  while (idx < focusWords.length) {
     const fw = focusWords[idx];
     const { pos } = classifyWord(fw);
-    if (pos === 'visible') {
+    // EPUB pages: finish a sentence that runs off the bottom of the page instead
+    // of stopping mid-sentence and paying a page-turn gap in the middle of it.
+    const spill = pos === 'after' && !currentTextElement && words.length > 0 && spillWords < TTS_PAGE_SPILL_WORDS
+      && !endsSentence(words[words.length - 1].text, ttsWordText(idx));
+    if (pos === 'visible' || spill) {
       const text = (fw.node.textContent || '').slice(fw.start, fw.end);
       const trimmed = text.trim();
-      if (trimmed) {
-        words.push({ wordIdx: idx, text });
-        idx++;
-        // Ending the chunk here means the utterance passed to the synth
-        // engine finishes with `.` / `?` / `!`, and the engine's own
-        // trailing-silence at sentence end lands at the chunk boundary.
-        // This is what makes back-to-back chunks sound like natural speech.
-        if (words.length >= TTS_MIN_CHUNK_WORDS && endsSentence(trimmed)) {
-          return { words, hitAfter };
+      if (!trimmed) { idx++; continue; }
+      if (TTS_URL_RE.test(trimmed)) { idx++; continue; }   // never spell a URL out
+
+      const block = ttsBlockOf(fw);
+      if (words.length === 0) {
+        chunkBlock = block;
+        heading = ttsIsHeading(fw);
+        chunkInParen = ttsInParen(idx);
+      } else if (block !== chunkBlock || ttsInParen(idx) !== chunkInParen || ttsNodeGap(idx) === 'br') {
+        return finish();               // next block (or aside) starts here — end the chunk
+      }
+
+      if (words.length >= TTS_MAX_CHUNK_WORDS) {
+        // Long sentence: cut at a clause break if there is one nearby.
+        for (let k = words.length - 1; k >= Math.max(TTS_MIN_CHUNK_WORDS, words.length - 14); k--) {
+          if (TTS_SOFT_BREAK_RE.test(words[k].text.replace(TRAILING_CLOSING_RE, ''))) {
+            words.length = k + 1;
+            break;
+          }
         }
-      } else {
-        idx++;
+        return finish();
+      }
+
+      if (pos === 'after') spillWords++;
+      words.push({ wordIdx: idx, text, glue: ttsNodeGap(idx) === 'glue' });
+      idx++;
+      // Headings are read whole (up to the cap); prose ends on a sentence.
+      if (!heading && words.length >= TTS_MIN_CHUNK_WORDS && endsSentence(trimmed, ttsWordText(idx))) {
+        return finish();
       }
     } else if (pos === 'before' || pos === 'gone') {
       idx++;
@@ -6200,7 +7159,7 @@ function collectVisibleChunkFrom(startIdx: number): { words: ChunkWord[]; hitAft
       break;
     }
   }
-  return { words, hitAfter };
+  return finish();
 }
 
 // Speak the next chunk starting at (or after) focusIndex. Handles page
@@ -6277,7 +7236,7 @@ function speakNextChunkPipelined(): void {
 // token so a cancelled utterance's late-arriving onend can't advance
 // focusIndex behind the user's back.
 
-function buildSystemUtterance(chunkWords: ChunkWord[], token: number): SpeechSynthesisUtterance {
+function buildSystemUtterance(chunkWords: Chunk, token: number): SpeechSynthesisUtterance {
   let text = '';
   const map: Array<{ wordIdx: number; charStart: number; charEnd: number }> = [];
   for (let i = 0; i < chunkWords.length; i++) {
@@ -6286,9 +7245,14 @@ function buildSystemUtterance(chunkWords: ChunkWord[], token: number): SpeechSyn
     text += chunkWords[i].text;
     map.push({ wordIdx: chunkWords[i].wordIdx, charStart: start, charEnd: text.length });
   }
+  // Close fragments (headings, list items) so the voice falls and pauses.
+  const spoken = ttsSpokenText(chunkWords);
+  if (spoken.length > text.length) text = spoken;
 
   const u = new SpeechSynthesisUtterance(text);
   u.rate = ttsSettings.rate;
+  u.volume = ttsSettings.volume;
+  u.pitch = Math.min(2, ttsSettings.pitch * (chunkWords.aside ? 0.9 : 1));
   const voice = getSelectedVoice();
   if (voice) { u.voice = voice; u.lang = voice.lang; }
 
@@ -6298,6 +7262,9 @@ function buildSystemUtterance(chunkWords: ChunkWord[], token: number): SpeechSyn
     // Only if there are more visible words on this page — page turns must
     // happen after playback ends, in onend/speakNextChunk.
     if (systemQueuedAhead) return;   // already have one queued
+    // A heading / paragraph end needs a real pause, which natively queued
+    // utterances can't give — onend schedules the next chunk after the gap.
+    if (chunkWords.pauseAfterMs) return;
     const lastWordIdx = chunkWords[chunkWords.length - 1].wordIdx;
     const next = collectVisibleChunkFrom(lastWordIdx + 1);
     if (next.words.length === 0) return;
@@ -6316,6 +7283,7 @@ function buildSystemUtterance(chunkWords: ChunkWord[], token: number): SpeechSyn
         if (!fw) return;
         const { pos, range, rect } = classifyWord(fw);
         if (pos === 'visible' && range && rect) paintRange(range, rect, w.wordIdx);
+        else if (pos === 'after') ttsTurnForSpill();
         focusIndex = w.wordIdx;
         return;
       }
@@ -6329,7 +7297,9 @@ function buildSystemUtterance(chunkWords: ChunkWord[], token: number): SpeechSyn
     // rest — don't kick off another speakNextChunk or we'd double-speak.
     systemQueuedAhead = false;
     if (speechSynthesis.speaking || speechSynthesis.pending) return;
-    speakNextChunk();
+    const gap = chunkWords.pauseAfterMs || 0;
+    if (gap > 0) scheduleTtsGap(gap, () => { if (token === piperGenToken) speakNextChunk(); });
+    else speakNextChunk();
   };
 
   u.onerror = (e: SpeechSynthesisErrorEvent) => {
@@ -6348,7 +7318,7 @@ function buildSystemUtterance(chunkWords: ChunkWord[], token: number): SpeechSyn
 // sitting in speechSynthesis.speak's internal queue.
 let systemQueuedAhead = false;
 
-function speakSystemChunk(chunkWords: ChunkWord[]): void {
+function speakSystemChunk(chunkWords: Chunk): void {
   const token = ++piperGenToken;
   systemQueuedAhead = false;
   const u = buildSystemUtterance(chunkWords, token);
@@ -6395,7 +7365,7 @@ function syllableWeight(word: string): number {
 // currently-playing chunk and the prefetched next-up chunk.
 interface PreparedPiperChunk {
   token: number;
-  words: ChunkWord[];
+  words: Chunk;
   audio: HTMLAudioElement;
   url: string;
 }
@@ -6439,7 +7409,28 @@ let cachedRafId = 0;
 // we don't have cached (in which case we fall back to pipelined).
 let currentSectionKey: string | null = null;
 
+// Pending "pause before the next chunk" timer. If the user pauses during the
+// gap, the continuation is held and runs on resume instead.
+let ttsGapTimer = 0;
+let ttsGapHeld: (() => void) | null = null;
+
+function scheduleTtsGap(ms: number, fn: () => void): void {
+  clearTtsGap();
+  ttsGapTimer = window.setTimeout(() => {
+    ttsGapTimer = 0;
+    if (!ttsOn) return;
+    if (ttsPaused) { ttsGapHeld = fn; return; }
+    fn();
+  }, ms);
+}
+
+function clearTtsGap(): void {
+  if (ttsGapTimer) { clearTimeout(ttsGapTimer); ttsGapTimer = 0; }
+  ttsGapHeld = null;
+}
+
 function stopPiperPlayback(): void {
+  clearTtsGap();
   piperGenToken++;
   stopPiperPaintLoop();
   if (piperAudio) {
@@ -6497,6 +7488,7 @@ function startPiperPaintLoop(): void {
       if (fw) {
         const { pos, range, rect } = classifyWord(fw);
         if (pos === 'visible' && range && rect) paintRange(range, rect, wordIdx);
+        else if (pos === 'after') ttsTurnForSpill();
         focusIndex = wordIdx;
       }
     }
@@ -6522,18 +7514,19 @@ function currentPiperPlaybackRate(): number {
 }
 
 async function synthesizePiperChunk(
-  chunkWords: ChunkWord[],
+  chunkWords: Chunk,
   token: number,
 ): Promise<PreparedPiperChunk | null> {
   const voice = ttsSettings.piperVoicePath;
   if (!voice) return null;
-  const text = chunkWords.map(w => w.text).join(' ');
+  const text = ttsSpokenText(chunkWords);
   let wavBytes: Uint8Array;
   try {
     const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
       text,
       voicePath: voice,
       lengthScale: currentPiperLengthScale(),
+      expressiveness: currentExpressiveness(),
     });
     wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
   } catch (err) {
@@ -6546,6 +7539,7 @@ async function synthesizePiperChunk(
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
   audio.playbackRate = currentPiperPlaybackRate();
+  audio.volume = ttsSettings.volume;
   audio.preload = 'auto';   // start loading metadata immediately
   return { token, words: chunkWords, audio, url };
 }
@@ -6622,22 +7616,30 @@ function playPreparedPiperChunk(prepared: PreparedPiperChunk): void {
     if (!ttsOn || prepared.token !== piperGenToken) return;
     focusIndex = prepared.words[prepared.words.length - 1].wordIdx + 1;
 
-    // If we have a prefetched next chunk ready, play it directly with no
-    // gap. Otherwise fall back to the standard flow (which handles page
-    // turns and re-collecting words on the new page).
-    const next = piperPrefetched;
-    piperPrefetched = null;
-    if (next && next.token === piperGenToken) {
-      // Don't revoke the current URL yet — playPreparedPiperChunk swaps
-      // pointers and handles cleanup of the old audio/url atomically.
-      playPreparedPiperChunk(next);
-      return;
-    }
+    const advance = () => {
+      if (!ttsOn || prepared.token !== piperGenToken) return;
+      // If we have a prefetched next chunk ready, play it directly. Otherwise
+      // fall back to the standard flow (which handles page turns and
+      // re-collecting words on the new page).
+      const next = piperPrefetched;
+      piperPrefetched = null;
+      if (next && next.token === piperGenToken) {
+        // Don't revoke the current URL yet — playPreparedPiperChunk swaps
+        // pointers and handles cleanup of the old audio/url atomically.
+        playPreparedPiperChunk(next);
+        return;
+      }
 
-    // No prefetch — free current blob and take the slow path.
-    if (piperAudioUrl) { URL.revokeObjectURL(piperAudioUrl); piperAudioUrl = null; }
-    piperAudio = null;
-    speakNextChunk();
+      // No prefetch — free current blob and take the slow path.
+      if (piperAudioUrl) { URL.revokeObjectURL(piperAudioUrl); piperAudioUrl = null; }
+      piperAudio = null;
+      speakNextChunk();
+    };
+
+    // Heading / paragraph / sentence pause before the next chunk.
+    const gap = prepared.words.pauseAfterMs ?? (prepared.words.sentenceEnd ? ttsScaledPause(TTS_PAUSE_SENTENCE_MS) : 0);
+    if (gap > 0) scheduleTtsGap(gap, advance);
+    else advance();
   };
 
   piperAudio.onerror = () => {
@@ -6670,7 +7672,7 @@ async function prefetchNextPiperChunk(afterWordIdx: number, token: number): Prom
   piperPrefetched = prepared;
 }
 
-async function speakPiperChunk(chunkWords: ChunkWord[]): Promise<void> {
+async function speakPiperChunk(chunkWords: Chunk): Promise<void> {
   const voice = ttsSettings.piperVoicePath;
   if (!voice) { toast('Pick a Piper voice first'); stopTts(); return; }
 
@@ -6717,30 +7719,45 @@ function currentSectionHref(): string | null {
 // Walk focusWords and group them into sentences, matching the same
 // endsSentence rule we use for chunking. Each sentence gets its text
 // (as spoken) plus its wordIdx range so we can highlight later.
-function collectSectionSentences(): { texts: string[]; ranges: Array<{ startWordIdx: number; endWordIdx: number }> } {
+function collectSectionSentences(): {
+  texts: string[];
+  ranges: Array<{ startWordIdx: number; endWordIdx: number }>;
+  pausesMs: number[];
+} {
   const texts: string[] = [];
   const ranges: Array<{ startWordIdx: number; endWordIdx: number }> = [];
-  let curText: string[] = [];
+  const pausesMs: number[] = [];
+  let curWords: ChunkWord[] = [];
   let curStart = -1;
+  let lastIdx = -1;
+  const flush = (pauseMs: number, soft = false) => {
+    if (curWords.length === 0 || curStart < 0) return;
+    (curWords as Chunk).aside = ttsInParen(curWords[0].wordIdx);
+    (curWords as Chunk).softEnd = soft;
+    texts.push(ttsSpokenText(curWords));
+    ranges.push({ startWordIdx: curStart, endWordIdx: curWords[curWords.length - 1].wordIdx });
+    pausesMs.push(pauseMs);
+    curWords = [];
+    curStart = -1;
+  };
   for (let i = 0; i < focusWords.length; i++) {
-    const fw = focusWords[i];
-    const text = (fw.node.textContent || '').slice(fw.start, fw.end).trim();
+    const text = ttsWordText(i);
     if (!text) continue;
     if (curStart === -1) curStart = i;
-    curText.push(text);
-    if (curText.length >= TTS_MIN_CHUNK_WORDS && endsSentence(text)) {
-      texts.push(curText.join(' '));
-      ranges.push({ startWordIdx: curStart, endWordIdx: i });
-      curText = [];
-      curStart = -1;
+    curWords.push({ wordIdx: i, text });
+    lastIdx = i;
+    // Block ends (heading, paragraph, list item) always close the sentence
+    // and carry a longer pause; ordinary sentence ends get a short breath.
+    const blockPause = ttsPauseAfter(i);
+    if (blockPause > 0) {
+      flush(blockPause, !ttsBlockEndsAfter(i) && !endsSentence(text, ttsWordText(i + 1)));
+    } else if (curWords.length >= TTS_MIN_CHUNK_WORDS && endsSentence(text, ttsWordText(i + 1))) {
+      flush(ttsScaledPause(TTS_PAUSE_SENTENCE_MS));
     }
   }
   // Flush trailing partial sentence (paragraph with no terminator, etc.).
-  if (curText.length > 0 && curStart >= 0) {
-    texts.push(curText.join(' '));
-    ranges.push({ startWordIdx: curStart, endWordIdx: focusWords.length - 1 });
-  }
-  return { texts, ranges };
+  if (lastIdx >= 0) flush(0);
+  return { texts, ranges, pausesMs };
 }
 
 function stopCachedPlayback(): void {
@@ -6854,6 +7871,7 @@ async function tryStartCachedPlayback(): Promise<boolean> {
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
   audio.playbackRate = currentPiperPlaybackRate();
+  audio.volume = ttsSettings.volume;
   audio.preload = 'auto';
 
   cachedPlayback = {
@@ -6952,7 +7970,7 @@ async function cacheCurrentChapter(): Promise<void> {
   // Ensure focusWords is populated for the current section, then extract
   // its sentences.
   collectFocusWords();
-  const { texts } = collectSectionSentences();
+  const { texts, pausesMs } = collectSectionSentences();
   if (texts.length === 0) {
     toast('Nothing to cache in this section');
     return;
@@ -6984,7 +8002,9 @@ async function cacheCurrentChapter(): Promise<void> {
       sectionKey: key,
       voicePath: ttsSettings.piperVoicePath,
       sentences: texts,
+      pausesMs,
       lengthScale: currentPiperLengthScale(),
+      expressiveness: currentExpressiveness(),
     });
     toast('Chapter cached — hit play for instant audio');
   } catch (err: any) {
@@ -7001,7 +8021,101 @@ function wire() {
   el.importBtn.addEventListener('click', importBook);
   el.importBtnEmpty.addEventListener('click', importBook);
   el.libraryThemeBtn.addEventListener('click', cycleTheme);
+  el.markReadBtn.addEventListener('click', () => { if (currentBookRecord) toggleBookFinished(currentBookRecord); });
+  el.aiExportBtn.addEventListener('click', () => { void copyForAi(); });
+  el.popoverAi.addEventListener('click', async () => {
+    await copyForAi();
+    hideAllPopovers();
+  });
   el.libraryVocabReviewBtn.addEventListener('click', () => openVocabReview('all'));
+
+  // --- Library redesign: search, format filter, sort -----------------------
+  el.librarySearch?.addEventListener('input', () => {
+    libraryQuery = el.librarySearch.value;
+    renderLibrary();
+  });
+  el.librarySearch?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      el.librarySearch.value = '';
+      libraryQuery = '';
+      renderLibrary();
+      el.librarySearch.blur();
+    }
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('.format-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      libraryFilter = (tab.dataset.filter as LibraryFilter) || 'all';
+      document.querySelectorAll<HTMLButtonElement>('.format-tab').forEach(t => {
+        const on = t === tab;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      renderLibrary();
+    });
+  });
+
+  el.librarySortBtn?.addEventListener('click', () => {
+    const order: LibrarySort[] = ['recent', 'title', 'author'];
+    librarySort = order[(order.indexOf(librarySort) + 1) % order.length];
+    el.librarySortLabel.textContent = librarySort === 'recent'
+      ? 'Recently opened'
+      : librarySort === 'title' ? 'Title A–Z' : 'Author A–Z';
+    renderLibrary();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('.sidebar-nav-item[data-library-nav]').forEach(item => {
+    item.addEventListener('click', () => {
+      const nav = item.dataset.libraryNav;
+      if (nav === 'library') {
+        el.librarySearch.value = '';
+        libraryQuery = '';
+        libraryFilter = 'all';
+        document.querySelectorAll<HTMLButtonElement>('.format-tab').forEach(t => {
+          const on = t.dataset.filter === 'all';
+          t.classList.toggle('active', on);
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        renderLibrary();
+        document.querySelector('.library-main')?.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        toast(nav === 'highlights'
+          ? 'Open a book to browse its highlights'
+          : 'Open a book to browse its bookmarks');
+      }
+    });
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k'
+      && document.documentElement.dataset.screen === 'library') {
+      e.preventDefault();
+      el.librarySearch?.focus();
+      el.librarySearch?.select();
+    }
+  });
+
+  setupMinimalLayout();
+
+  // --- Settings section navigation ----------------------------------------
+  const settingsNavItems = document.querySelectorAll<HTMLButtonElement>('.settings-nav-item');
+  const setSettingsSection = (target: string) => {
+    settingsNavItems.forEach(n => n.classList.toggle('active', n.dataset.settingsTarget === target));
+    const section = document.getElementById(target);
+    section?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  settingsNavItems.forEach(item => {
+    item.addEventListener('click', () => {
+      const target = item.dataset.settingsTarget || '';
+      if (target === 'reading' || target === 'voices') {
+        if (!currentBookRecord) { toast('Open a book to adjust reading style and voices'); return; }
+        el.settingsModal.hidden = true;
+        openDrawer('typography');
+        return;
+      }
+      setSettingsSection(target);
+    });
+  });
 
   // Save Article (web page → reader mode)
   el.importUrlBtn.addEventListener('click', openUrlImportModal);
@@ -7070,8 +8184,8 @@ function wire() {
     if (isTtsOn()) stopTts(); else startTts();
   });
   el.ttsToggleBtn.addEventListener('click', toggleTtsPause);
-  el.ttsPrevBtn.addEventListener('click', () => stepTts(-1));
-  el.ttsNextBtn.addEventListener('click', () => stepTts(+1));
+  el.ttsPrevBtn.addEventListener('click', (e) => stepTts(-1, e.shiftKey ? 'paragraph' : 'sentence'));
+  el.ttsNextBtn.addEventListener('click', (e) => stepTts(+1, e.shiftKey ? 'paragraph' : 'sentence'));
   el.ttsCloseBtn.addEventListener('click', stopTts);
   el.ttsRateSlider.value = String(ttsSettings.rate);
   el.ttsRateLabel.textContent = `${ttsSettings.rate.toFixed(1)}×`;
@@ -7090,6 +8204,22 @@ function wire() {
     setTtsPiperNaturalRate(el.ttsNaturalRate.checked);
   });
   el.ttsCacheBtn.addEventListener('click', cacheCurrentChapter);
+
+  // Extra speaking controls
+  syncTtsTuneUi();
+  el.ttsTuneBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleTtsTune(); });
+  el.ttsTune.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', (e) => {
+    if (el.ttsTune.hidden) return;
+    if (!el.ttsTune.contains(e.target as Node) && !el.ttsTuneBtn.contains(e.target as Node)) closeTtsTune();
+  });
+  el.ttsVolume.addEventListener('input', () => setTtsVolume(parseFloat(el.ttsVolume.value), false));
+  el.ttsVolume.addEventListener('change', () => setTtsVolume(parseFloat(el.ttsVolume.value), true));
+  el.ttsPitch.addEventListener('input', () => setTtsPitch(parseFloat(el.ttsPitch.value), false));
+  el.ttsPitch.addEventListener('change', () => setTtsPitch(parseFloat(el.ttsPitch.value), true));
+  el.ttsPauses.addEventListener('input', () => setTtsPauseScale(parseFloat(el.ttsPauses.value)));
+  el.ttsExpr.addEventListener('input', () => setTtsExpressiveness(parseFloat(el.ttsExpr.value)));
+  el.ttsSleep.addEventListener('change', () => setTtsSleep(parseInt(el.ttsSleep.value, 10) || 0));
 
   // Piper setup modal
   el.closePiperSetupBtn.addEventListener('click', closePiperSetup);
@@ -7312,6 +8442,10 @@ function wire() {
     e.stopPropagation();
     vocabAi.examples();
   });
+  el.dictVocabBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleVocabCandidate();
+  });
   el.dictPronounceBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     pronounceWord(el.dictPronounceBtn.dataset.word || '', el.dictPronounceBtn);
@@ -7403,8 +8537,8 @@ function wire() {
     }
     if (isTtsOn()) {
       if (e.key === ' ') { e.preventDefault(); toggleTtsPause(); return; }
-      if (e.key === 'ArrowLeft')  { stepTts(-1); return; }
-      if (e.key === 'ArrowRight') { stepTts(+1); return; }
+      if (e.key === 'ArrowLeft')  { stepTts(-1, e.shiftKey ? 'paragraph' : 'sentence'); return; }
+      if (e.key === 'ArrowRight') { stepTts(+1, e.shiftKey ? 'paragraph' : 'sentence'); return; }
     }
 
     if (e.key === 'ArrowLeft' || e.key === 'PageUp')  navGo('prev');
@@ -7481,6 +8615,190 @@ function wire() {
 }
 
 /* ============================================================
+   Minimal layout — text-only reader driven by a "/" command bar
+   ============================================================ */
+interface CmdItem { label: string; key: string; run: () => void; show?: () => boolean; }
+
+let cmdbarIndex = 0;
+
+function isMinimalLayout(): boolean { return settings.uiLayout === 'minimal'; }
+
+function setUiLayout(layout: 'standard' | 'minimal') {
+  settings.uiLayout = layout;
+  persistSettings();
+  applyGlobalTheme();
+  closeCmdbar();
+  requestReflow();
+}
+
+function cmdbarItems(): CmdItem[] {
+  const items: CmdItem[] = [
+    { label: 'Listen', key: 'L', run: () => el.ttsBtn.click() },
+    { label: 'Contents', key: 'C', run: () => openDrawer('toc', 'toc') },
+    { label: 'Bookmark this page', key: 'B', run: () => toggleBookmark() },
+    { label: 'Highlights and notes', key: 'H', run: () => openDrawer('toc', 'highlights') },
+    { label: 'Focus reading', key: 'F', run: () => el.focusModeBtn.click() },
+    { label: 'Ask about this book', key: 'Q', run: () => el.chatBtn.click(), show: () => !el.chatBtn.hidden },
+    { label: 'Review vocabulary', key: 'V', run: () => el.libraryVocabReviewBtn.click() },
+    { label: 'Back to library', key: 'Esc', run: () => el.backBtn.click() },
+  ];
+  return items.filter(i => !i.show || i.show());
+}
+
+function filteredCmdItems(): CmdItem[] {
+  const q = el.cmdbarInput.value.trim().toLowerCase();
+  const all = cmdbarItems();
+  return q ? all.filter(i => i.label.toLowerCase().includes(q)) : all;
+}
+
+function renderCmdbar() {
+  const items = filteredCmdItems();
+  cmdbarIndex = Math.max(0, Math.min(cmdbarIndex, items.length - 1));
+  el.cmdbarList.innerHTML = '';
+  items.forEach((item, i) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'cmdbar-item' + (i === cmdbarIndex ? ' active' : '');
+    const label = document.createElement('span');
+    label.textContent = item.label;
+    const key = document.createElement('kbd');
+    key.textContent = item.key;
+    row.append(label, key);
+    row.addEventListener('mousemove', () => {
+      if (cmdbarIndex === i) return;
+      cmdbarIndex = i;
+      el.cmdbarList.querySelectorAll('.cmdbar-item').forEach((n, j) => n.classList.toggle('active', j === i));
+    });
+    row.addEventListener('click', () => runCmd(item));
+    el.cmdbarList.appendChild(row);
+  });
+  // Typeface / size / theme radios mirror the live settings.
+  const mark = (attr: string, value: string, on: boolean) => {
+    const b = el.cmdbar.querySelector<HTMLButtonElement>(`[data-cmd-${attr}="${value}"]`);
+    if (!b) return;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', on ? 'true' : 'false');
+  };
+  mark('font', 'serif', settings.font !== 'sans');
+  mark('font', 'sans', settings.font === 'sans');
+  mark('size', 'small', settings.sizePct < 100);
+  mark('size', 'large', settings.sizePct >= 100);
+  mark('appearance', 'light', settings.appearance === 'light');
+  mark('appearance', 'dark', settings.appearance === 'dark');
+}
+
+function openCmdbar() {
+  if (!isMinimalLayout() || el.html.dataset.screen !== 'reader') return;
+  const rec = currentBookRecord;
+  el.cmdbarTitle.textContent = rec?.title || 'Untitled';
+  const pct = Math.round((rec?.progress || 0) * 100);
+  const parts = [el.progressChapter.textContent?.trim(), `${el.progressPercent.textContent?.trim() || pct + '%'}`, el.progressRemaining.textContent?.trim()]
+    .filter(s => s && s !== '—');
+  el.cmdbarSub.textContent = parts.join(' · ');
+  el.cmdbarInput.value = '';
+  cmdbarIndex = 0;
+  el.cmdbar.hidden = false;
+  renderCmdbar();
+  el.cmdbarInput.focus();
+}
+
+function closeCmdbar() {
+  if (el.cmdbar.hidden) return;
+  el.cmdbar.hidden = true;
+  el.cmdbarInput.blur();
+}
+
+function runCmd(item: CmdItem) {
+  closeCmdbar();
+  item.run();
+}
+
+function setupMinimalLayout() {
+  // Settings toggle
+  document.querySelectorAll<HTMLButtonElement>('[data-ui-layout]').forEach(b => {
+    b.addEventListener('click', () => setUiLayout(b.dataset.uiLayout === 'minimal' ? 'minimal' : 'standard'));
+  });
+
+  // Library chrome
+  el.minSettingsBtn.addEventListener('click', openSettings);
+  el.minVocabLink.addEventListener('click', (e) => { e.preventDefault(); el.libraryVocabReviewBtn.click(); });
+  el.minAddBook.addEventListener('click', (e) => { e.preventDefault(); el.importBtn.click(); });
+  el.minSaveArticle.addEventListener('click', (e) => { e.preventDefault(); openUrlImportModal(); });
+  // The "Reading" block resumes the current book when its title is clicked.
+  el.continueHeading.parentElement?.addEventListener('click', () => el.continueResumeBtn.click());
+  // Pasting a link into the minimal search field and pressing Enter saves it as an article.
+  el.librarySearch.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !isMinimalLayout()) return;
+    const v = el.librarySearch.value.trim();
+    if (/^https?:\/\/\S+$/i.test(v)) {
+      e.preventDefault();
+      el.librarySearch.value = '';
+      libraryQuery = '';
+      renderLibrary();
+      void saveArticleFromUrl(v);
+    }
+  });
+
+  // Reader: hairline progress mirrors the regular progress fill.
+  const syncProgress = () => {
+    const w = el.progressFill.style.width || '0%';
+    el.minProgressFill.style.width = w;
+    el.minProgress.setAttribute('aria-valuenow', String(Math.round(parseFloat(w) || 0)));
+  };
+  new MutationObserver(syncProgress).observe(el.progressFill, { attributes: true, attributeFilter: ['style'] });
+  syncProgress();
+
+  // Command bar
+  el.minMenuBtn.addEventListener('click', openCmdbar);
+  el.cmdbar.addEventListener('mousedown', (e) => { if (e.target === el.cmdbar) closeCmdbar(); });
+  el.cmdbarInput.addEventListener('input', () => { cmdbarIndex = 0; renderCmdbar(); });
+  el.cmdbarMore.addEventListener('click', (e) => { e.preventDefault(); closeCmdbar(); openDrawer('typography'); });
+  el.cmdbar.querySelectorAll<HTMLButtonElement>('[data-cmd-font]').forEach(b => b.addEventListener('click', () => {
+    settings.font = b.dataset.cmdFont === 'sans' ? 'sans' : 'serif';
+    persistSettings(); applyReaderSettings(); renderCmdbar();
+  }));
+  el.cmdbar.querySelectorAll<HTMLButtonElement>('[data-cmd-size]').forEach(b => b.addEventListener('click', () => {
+    settings.sizePct = b.dataset.cmdSize === 'small' ? 90 : 115;
+    persistSettings(); applyReaderSettings(); renderCmdbar();
+  }));
+  el.cmdbar.querySelectorAll<HTMLButtonElement>('[data-cmd-appearance]').forEach(b => b.addEventListener('click', () => {
+    settings.appearance = b.dataset.cmdAppearance === 'dark' ? 'dark' : 'light';
+    persistSettings(); applyGlobalTheme(); applyReaderSettings(); renderCmdbar();
+  }));
+
+  el.cmdbarInput.addEventListener('keydown', (e) => {
+    const items = filteredCmdItems();
+    if (e.key === 'ArrowDown') { e.preventDefault(); cmdbarIndex = (cmdbarIndex + 1) % Math.max(1, items.length); renderCmdbar(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); cmdbarIndex = (cmdbarIndex - 1 + items.length) % Math.max(1, items.length); renderCmdbar(); }
+    else if (e.key === 'Enter') { e.preventDefault(); const it = items[cmdbarIndex]; if (it) runCmd(it); }
+    else if (!el.cmdbarInput.value && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Single-letter shortcuts work while the bar is open and the field is empty.
+      const hit = items.find(i => i.key.toLowerCase() === e.key.toLowerCase());
+      if (hit) {
+        e.preventDefault();
+        // The reader also listens for this letter on keyup — swallow it so F/B/R don't fire twice.
+        window.addEventListener('keyup', (ke) => ke.stopPropagation(), { capture: true, once: true });
+        runCmd(hit);
+      }
+    }
+  });
+
+  // "/" opens the bar from the reader; Esc closes it (capture so it beats the reader's own handlers).
+  document.addEventListener('keydown', (e) => {
+    if (!isMinimalLayout()) return;
+    if (e.key === 'Escape' && !el.cmdbar.hidden) {
+      e.preventDefault(); e.stopPropagation(); closeCmdbar(); return;
+    }
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && el.cmdbar.hidden
+        && el.html.dataset.screen === 'reader') {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      e.preventDefault(); openCmdbar();
+    }
+  }, true);
+}
+
+/* ============================================================
    Boot
    ============================================================ */
 function boot() {
@@ -7494,6 +8812,10 @@ function boot() {
   // whenever no text/md book is open (see installFocusTracker's isMainDoc gate).
   installFocusTracker(document, null);
   goToScreen('library');
+  updateStatsUI();
+  document.querySelectorAll<HTMLElement>('.theme-card').forEach(c => {
+    c.classList.toggle('active', c.dataset.themeVal === settings.theme);
+  });
   // Probe for a local LLM in the background — never block startup on it.
   // If nothing's installed, isLlmReady() stays false and the AI button
   // simply never appears. The chat toolbar button (unlike the per-lookup
