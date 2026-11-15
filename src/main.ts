@@ -11,6 +11,7 @@ import { Readability } from '@mozilla/readability';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule } from './codeblocks';
+import { VOCA_VOICES, VocaVoice, isVocaReady, startVoca, vocaSynthesize, vocaSynthesizeSamples, wavFromFloat32, setVocaProgressListener, setVocaReadyListener } from './voca';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -29,6 +30,19 @@ type MeasureKind = 'full' | 'ch60' | 'ch70' | 'ch80';
 type LayoutKind = 'paginated' | 'spread' | 'scroll';
 type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
 type FocusTracker = 'off' | 'word' | 'sentence';
+type ParagraphKind = 'original' | 'indent' | 'spaced';
+// Each kind of reading keeps its own typography: a novel wants a serif with
+// indented, justified paragraphs; a Markdown spec wants a sans with spaced
+// paragraphs. Changing type while reading one format only touches that
+// format's profile.
+type ReadingProfile = 'book' | 'document' | 'article';
+interface ProfileValues {
+  font: FontKind;
+  line: LineKind;
+  measure: MeasureKind;
+  paragraph: ParagraphKind;
+  justify: boolean;
+}
 export type BookFormat = 'epub' | 'pdf' | 'txt' | 'md';
 
 interface Settings {
@@ -47,6 +61,9 @@ interface Settings {
   warmth: number;       // 0–100, screen warmth (amber tint) — 0 = off
   brightness: number;   // 40–100, screen brightness — 100 = untouched
   uiLayout: 'standard' | 'minimal';  // standard = sidebar + toolbars, minimal = text-only + command bar
+  paragraph: ParagraphKind;
+  justify: boolean;
+  profiles: Record<ReadingProfile, ProfileValues>;
 }
 
 interface BookRecord {
@@ -137,14 +154,22 @@ interface VocabDailyStats {
   newCardsIntroduced: number;
 }
 
+// Starting points for each kind of reading. The typography panel's "Style"
+// buttons apply one of these to the profile of whatever is open.
+const READING_PRESETS: Record<ReadingProfile, ProfileValues> = {
+  book:     { font: 'literata', line: 'normal', measure: 'ch70', paragraph: 'indent', justify: true },
+  document: { font: 'sans',     line: 'normal', measure: 'ch70', paragraph: 'spaced', justify: false },
+  article:  { font: 'serif',    line: 'normal', measure: 'ch70', paragraph: 'spaced', justify: false },
+};
+
 const DEFAULT_SETTINGS: Settings = {
   theme: 'default',
   appearance: 'light',
-  font: 'serif',
+  font: 'literata',
   sizePct: 100,
   line: 'normal',
   margin: 'medium',
-  measure: 'full',
+  measure: 'ch70',
   layout: 'paginated',
   focusTracker: 'off',
   lastHighlightColor: 'yellow',
@@ -153,6 +178,13 @@ const DEFAULT_SETTINGS: Settings = {
   warmth: 0,
   brightness: 100,
   uiLayout: 'standard',
+  paragraph: 'indent',
+  justify: true,
+  profiles: {
+    book: { ...READING_PRESETS.book },
+    document: { ...READING_PRESETS.document },
+    article: { ...READING_PRESETS.article },
+  },
 };
 
 const load = <T>(k: string, fallback: T): T => {
@@ -161,7 +193,26 @@ const load = <T>(k: string, fallback: T): T => {
 };
 const save = (k: string, v: unknown) => localStorage.setItem(k, JSON.stringify(v));
 
-let settings: Settings = { ...DEFAULT_SETTINGS, ...load<Partial<Settings>>(KEY_SETTINGS, {}) };
+const storedSettings = load<Partial<Settings>>(KEY_SETTINGS, {});
+let settings: Settings = { ...DEFAULT_SETTINGS, ...storedSettings };
+if (!storedSettings.profiles) {
+  // Upgrading from a version without profiles: keep the reader's own font,
+  // spacing and line width, and only bring in the new paragraph handling.
+  const keep = (p: ProfileValues): ProfileValues => storedSettings.font
+    ? { ...p, font: storedSettings.font, line: storedSettings.line ?? p.line, measure: storedSettings.measure ?? p.measure }
+    : { ...p };
+  settings.profiles = {
+    book: keep(READING_PRESETS.book),
+    document: keep(READING_PRESETS.document),
+    article: keep(READING_PRESETS.article),
+  };
+} else {
+  settings.profiles = {
+    book: { ...READING_PRESETS.book, ...storedSettings.profiles.book },
+    document: { ...READING_PRESETS.document, ...storedSettings.profiles.document },
+    article: { ...READING_PRESETS.article, ...storedSettings.profiles.article },
+  };
+}
 
 // Migrate legacy theme settings
 if (['light', 'sepia', 'dark'].includes(settings.theme as any)) {
@@ -172,7 +223,43 @@ if (['light', 'sepia', 'dark'].includes(settings.theme as any)) {
 
 let library: BookRecord[] = load<BookRecord[]>(KEY_LIBRARY, []);
 
-const persistSettings = () => save(KEY_SETTINGS, settings);
+// Which profile the open reader is using; null on the library screen.
+let activeProfile: ReadingProfile | null = null;
+const persistSettings = () => {
+  if (activeProfile) captureProfile(activeProfile);
+  save(KEY_SETTINGS, settings);
+};
+
+function profileForRecord(record: BookRecord): ReadingProfile {
+  if (record.sourceUrl) return 'article';
+  const fmt = record.format || getBookFormat(record);
+  return fmt === 'md' || fmt === 'txt' ? 'document' : 'book';
+}
+
+function captureProfile(p: ReadingProfile) {
+  settings.profiles[p] = {
+    font: settings.font, line: settings.line, measure: settings.measure,
+    paragraph: settings.paragraph, justify: settings.justify,
+  };
+}
+
+function loadProfile(p: ReadingProfile) {
+  const v = settings.profiles[p];
+  settings.font = v.font;
+  settings.line = v.line;
+  settings.measure = v.measure;
+  settings.paragraph = v.paragraph;
+  settings.justify = v.justify;
+}
+
+function matchingPreset(): ReadingProfile | null {
+  for (const key of Object.keys(READING_PRESETS) as ReadingProfile[]) {
+    const p = READING_PRESETS[key];
+    if (p.font === settings.font && p.line === settings.line && p.measure === settings.measure
+      && p.paragraph === settings.paragraph && p.justify === settings.justify) return key;
+  }
+  return null;
+}
 const persistLibrary = () => save(KEY_LIBRARY, library);
 
 const KEY_STATS = 'read.stats';
@@ -355,6 +442,14 @@ const el = {
   readerTopbar: $<HTMLElement>('reader-topbar'),
   readerBottombar: $<HTMLElement>('reader-bottombar'),
   bookTitle: $<HTMLSpanElement>('reader-book-title'),
+  formatBadge: $<HTMLSpanElement>('reader-format-badge'),
+  pageOutline: $<HTMLElement>('page-outline'),
+  resumeNote: $<HTMLElement>('resume-note'),
+  resumeNoteSub: $<HTMLElement>('resume-note-sub'),
+  pageStrip: $<HTMLElement>('page-strip'),
+  presetScope: $<HTMLParagraphElement>('preset-scope'),
+  returnPill: $<HTMLButtonElement>('return-pill'),
+  progressSegments: $<HTMLDivElement>('progress-segments'),
   backBtn: $<HTMLButtonElement>('back-to-library-btn'),
   tocBtn: $<HTMLButtonElement>('toc-btn'),
   pdfZoomOutBtn: $<HTMLButtonElement>('pdf-zoom-out-btn'),
@@ -394,6 +489,8 @@ const el = {
   selectionPopover: $<HTMLDivElement>('selection-popover'),
   popoverRemove: $<HTMLButtonElement>('popover-remove'),
   popoverAi: $<HTMLButtonElement>('popover-ai'),
+  popoverLookup: $<HTMLButtonElement>('popover-lookup'),
+  popoverSay: $<HTMLButtonElement>('popover-say'),
   aiExportBtn: $<HTMLButtonElement>('ai-export-btn'),
 
   toast: $<HTMLDivElement>('toast'),
@@ -496,6 +593,9 @@ const el = {
   ttsIconPause: document.getElementById('tts-icon-pause') as unknown as SVGSVGElement,
   ttsRateSlider: $<HTMLInputElement>('tts-rate-slider'),
   ttsRateLabel: $<HTMLSpanElement>('tts-rate-label'),
+  ttsHeardFill: $<HTMLElement>('tts-heard-fill'),
+  ttsTimeLeft: $<HTMLSpanElement>('tts-time-left'),
+  ttsLoading: $<HTMLSpanElement>('tts-loading'),
   ttsVoiceSelect: $<HTMLSelectElement>('tts-voice'),
   ttsEngineSelect: $<HTMLSelectElement>('tts-engine'),
   ttsSetupBtn: $<HTMLButtonElement>('tts-setup'),
@@ -818,6 +918,9 @@ function applyReaderSettings() {
   el.html.style.setProperty('--reader-line', String(LINE_MAP[settings.line]));
   el.html.style.setProperty('--reader-margin', MARGIN_MAP[settings.margin]);
   el.html.style.setProperty('--reader-size', `${(1.0625 * settings.sizePct / 100).toFixed(3)}rem`);
+  el.html.dataset.paragraph = settings.paragraph;
+  el.html.dataset.justify = settings.justify ? 'on' : 'off';
+  if (activeProfile) el.html.dataset.profile = activeProfile;
 
   if (currentTextElement) {
     currentTextElement.style.fontFamily = FONT_MAP[settings.font];
@@ -841,6 +944,25 @@ function applyReaderSettings() {
   currentRendition.themes.override('color', colors.text, true);
   currentRendition.themes.override('background', colors.bg, true);
 
+  // Book typography. Paragraph handling and justification only override the
+  // publisher's CSS when the reader asks for it ('original' leaves it alone).
+  const paragraphRules: Record<string, Record<string, string>> = {};
+  const headingFollowers = 'h1 + p, h2 + p, h3 + p, h4 + p, h5 + p, h6 + p, hr + p, blockquote + p, figure + p, div + p, p:first-child';
+  if (settings.paragraph === 'indent') {
+    paragraphRules['p'] = { 'margin-top': '0 !important', 'margin-bottom': '0 !important' };
+    paragraphRules['p + p'] = { 'text-indent': '1.5em !important' };
+    paragraphRules[headingFollowers] = { 'text-indent': '0 !important' };
+  } else if (settings.paragraph === 'spaced') {
+    paragraphRules['p'] = { 'margin-top': '0 !important', 'margin-bottom': '0.9em !important', 'text-indent': '0 !important' };
+  }
+  if (settings.justify) {
+    paragraphRules['p, li'] = {
+      'text-align': 'justify !important',
+      'hyphens': 'auto !important',
+      '-webkit-hyphens': 'auto !important',
+    };
+  }
+
   currentRendition.themes.register('reader', {
     'body': {
       'background': `${colors.bg} !important`,
@@ -848,27 +970,78 @@ function applyReaderSettings() {
       'font-family': `${fontStack} !important`,
       'line-height': `${lineHeight} !important`,
       'padding': '0 !important',
+      'font-variant-numeric': 'oldstyle-nums proportional-nums',
+      'font-kerning': 'normal',
+      'text-rendering': 'optimizeLegibility',
     },
     'p, li, blockquote, td': {
       'font-family': `${fontStack} !important`,
       'line-height': `${lineHeight} !important`,
       'color': `${colors.text} !important`,
+      'text-wrap': 'pretty',
+      'orphans': '2',
+      'widows': '2',
     },
     'h1, h2, h3, h4, h5, h6': {
       'font-family': `${fontStack} !important`,
       'color': `${colors.text} !important`,
       'font-weight': '500',
-      'letter-spacing': '-0.015em',
+      'letter-spacing': '-0.01em',
+      'line-height': '1.2 !important',
+      'text-wrap': 'balance',
+      'text-indent': '0 !important',
+      'hyphens': 'manual',
     },
+    // Chapter openers: a clear break before the text starts.
+    'h1, h2': { 'margin-top': '1.6em', 'margin-bottom': '1.1em', 'font-weight': '400' },
+    'h1': { 'font-size': '1.9em' },
+    'h2': { 'font-size': '1.5em' },
+    'h3': { 'font-size': '1.2em', 'margin-top': '1.4em', 'margin-bottom': '0.6em' },
     'a': { 'color': `${colors.accent} !important`, 'text-decoration': 'none' },
+    // Note references: a small, easy-to-hit target that opens the note
+    // beside the text instead of jumping away.
+    'a[epub\\:type~="noteref"], a[role="doc-noteref"], sup a': {
+      'font-family': "'Geist', 'Inter', system-ui, sans-serif !important",
+      'font-weight': '600',
+      'font-size': '0.7em',
+      'padding': '0.1em 0.35em',
+      'border-radius': '4px',
+      'background': `${colors.accent}1f`,
+      'line-height': '1',
+    },
     'blockquote': {
-      'border-left': `3px solid ${colors.accent}`,
-      'padding-left': '1rem',
-      'color': `${colors.muted} !important`,
+      'margin': '1.4em 1.5em',
+      'padding': '0',
+      'border': 'none',
+      'color': `${colors.text} !important`,
       'font-style': 'italic',
     },
+    // Scene breaks: a short centred rule instead of a full-width line.
+    'hr': {
+      'border': 'none',
+      'border-top': `1px solid ${colors.muted}`,
+      'width': '3em',
+      'margin': '1.8em auto',
+      'opacity': '0.6',
+    },
+    // EPUB 3 footnotes are read in the popover beside their reference, so
+    // the note bodies don't also interrupt the running text.
+    'aside[epub\\:type~="footnote"], aside[epub\\:type~="rearnote"], aside[role="doc-footnote"]': { 'display': 'none' },
+    'figure': { 'margin': '1.6em 0' },
+    'figcaption, .caption': {
+      'font-family': "'Geist', 'Inter', system-ui, sans-serif !important",
+      'font-size': '0.8em',
+      'line-height': '1.45 !important',
+      'color': `${colors.muted} !important`,
+      'text-align': 'left',
+      'margin-top': '0.6em',
+    },
     'img': { 'max-width': '100% !important', 'height': 'auto !important' },
-    'code, pre': { 'font-family': "'JetBrains Mono', monospace !important" },
+    'code, pre': { 'font-family': "'JetBrains Mono', monospace !important", 'font-size': '0.88em', 'hyphens': 'manual' },
+    'pre': { 'white-space': 'pre-wrap', 'text-align': 'left !important' },
+    'table': { 'border-collapse': 'collapse', 'font-variant-numeric': 'lining-nums tabular-nums' },
+    'td, th': { 'text-align': 'left !important', 'hyphens': 'manual !important', 'padding': '0.3em 0.6em 0.3em 0' },
+    ...paragraphRules,
     '::selection': { 'background': `${colors.accent}33` },
   });
   currentRendition.themes.select('reader');
@@ -891,13 +1064,39 @@ function refreshTypographyUI() {
     if (control === 'layout') match = btn.dataset.value === settings.layout;
     if (control === 'focusTracker') match = btn.dataset.value === settings.focusTracker;
     if (control === 'ruler')  match = btn.dataset.value === (settings.readingRuler ? 'on' : 'off');
+    if (control === 'paragraph') match = btn.dataset.value === settings.paragraph;
+    if (control === 'justify') match = btn.dataset.value === (settings.justify ? 'on' : 'off');
+    if (control === 'preset') match = btn.dataset.value === matchingPreset();
+    if (control === 'quicktheme') match = quickThemeFor(btn.dataset.value) === true;
     btn.classList.toggle('active', match);
+    btn.setAttribute('aria-pressed', match ? 'true' : 'false');
   });
   el.sizeValue.textContent = `${settings.sizePct}%`;
+  if (el.presetScope) {
+    el.presetScope.textContent = activeProfile ? PROFILE_SCOPE_TEXT[activeProfile] : '';
+  }
   el.warmthSlider.value = String(settings.warmth);
   el.warmthValue.textContent = settings.warmth === 0 ? 'Off' : `${settings.warmth}%`;
   el.brightnessSlider.value = String(settings.brightness);
   el.brightnessValue.textContent = `${settings.brightness}%`;
+}
+
+const PROFILE_SCOPE_TEXT: Record<ReadingProfile, string> = {
+  book: 'Changes here apply to all EPUB books.',
+  document: 'Changes here apply to all Markdown and text files.',
+  article: 'Changes here apply to all saved web articles.',
+};
+
+// The four quick themes in the typography panel map onto the full theme set.
+const QUICK_THEMES: Record<string, { theme: Theme; appearance: Appearance }> = {
+  paper: { theme: 'default', appearance: 'light' },
+  sepia: { theme: 'parchment', appearance: 'light' },
+  eink: { theme: 'eink', appearance: 'light' },
+  night: { theme: 'default', appearance: 'dark' },
+};
+function quickThemeFor(key: string | undefined): boolean {
+  const q = key ? QUICK_THEMES[key] : undefined;
+  return !!q && q.theme === settings.theme && q.appearance === settings.appearance;
 }
 
 const MARGIN_ORDER: MarginKind[] = ['narrow', 'medium', 'wide'];
@@ -1712,6 +1911,10 @@ function cleanupCurrentReader() {
   // new book's first `relocated` repopulates this; until then requestReflow's
   // `if (currentLocationCfi)` guard skips display() and only resizes.
   currentLocationCfi = null;
+  hideReturnPill();
+  spineStats = [];
+  el.progressSegments.innerHTML = '';
+  el.progressTrack.classList.remove('is-segmented');
 }
 
 interface TocTreeNode {
@@ -1732,7 +1935,10 @@ function renderTocTree(nodes: TocTreeNode[] | NavItem[]) {
       const li = document.createElement('li');
       const a = document.createElement('a');
       a.className = 'toc-item';
-      a.textContent = item.label.trim();
+      const label = document.createElement('span');
+      label.className = 'toc-label';
+      label.textContent = item.label.trim();
+      a.appendChild(label);
       a.href = '#';
       a.dataset.href = item.href;
       a.addEventListener('click', (e) => {
@@ -1745,7 +1951,8 @@ function renderTocTree(nodes: TocTreeNode[] | NavItem[]) {
           const targetEl = document.getElementById(item.href);
           if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth' });
         }
-        closeDrawers();
+        // Docked beside the text on wide windows, the panel can stay open.
+        if (!isDockedLayout()) closeDrawers();
       });
       li.appendChild(a);
       if (item.subitems && item.subitems.length) {
@@ -1969,6 +2176,21 @@ async function getPdfPageText(pageNum: number): Promise<string> {
 
 
 
+// Markdown/text footer: the section being read and the time left, the same
+// two facts the EPUB footer gives.
+const WORDS_PER_MIN = 230;
+function updateTextProgressMeta(container: HTMLElement, pct: number) {
+  const words = Number(container.dataset.words || 0);
+  const left = Math.max(1, Math.round((words * (1 - pct)) / WORDS_PER_MIN));
+  el.progressRemaining.textContent = pct >= 0.995 ? 'Finished' : `${minutesLabel(left)} left`;
+  const top = container.scrollTop + 120;
+  let label = currentBookRecord?.title || '';
+  container.querySelectorAll<HTMLElement>('h1, h2, h3').forEach(h => {
+    if (h.offsetTop <= top) label = h.textContent?.trim() || label;
+  });
+  el.progressChapter.textContent = label;
+}
+
 async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
   const container = document.createElement('div');
   container.className = 'text-reader-container';
@@ -1992,6 +2214,7 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
   }
 
   container.innerHTML = renderedHtml;
+  container.dataset.words = String((container.textContent || '').split(/\s+/).filter(Boolean).length);
   // Frame + syntax-colour code blocks (async; never changes the text itself).
   void enhanceCodeBlocks(container);
 
@@ -2021,6 +2244,7 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
     openAncestors.push({ level, node });
   });
   renderTocTree(tocTree);
+  renderPageOutline(tocTree, container);
 
   // Seed the bookmark-tracking location from the saved position immediately
   // — otherwise the bookmark button/state stay unset until the first scroll
@@ -2051,8 +2275,225 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
 
     el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
     el.progressFill.style.width = `${pct * 100}%`;
+    updateTextProgressMeta(container, pct);
     persistLibrary();
+    scheduleTextSpy(container);
+    // A scroll the reader made themselves (not our own follow-scroll) means they
+    // are browsing: read-aloud must stay where it is, not chase or fight the view.
+    if (ttsOn && performance.now() > ttsAutoScrollUntil) ttsUserScrolled = true;
   });
+  updateTextProgressMeta(container, record.progress);
+  scheduleTextSpy(container);
+}
+
+// "On this page": a small outline beside the text of Markdown / text / saved
+// articles, shown only when there is room beside the column.
+function renderPageOutline(tree: TocTreeNode[], container: HTMLElement): void {
+  el.pageOutline.innerHTML = '';
+  const entries: { node: TocTreeNode; depth: number }[] = [];
+  for (const n of tree) {
+    entries.push({ node: n, depth: 0 });
+    for (const s of n.subitems ?? []) entries.push({ node: s, depth: 1 });
+  }
+  // A lone top-level title (the document's own H1) is not an outline.
+  if (entries.length < 3) { el.pageOutline.hidden = true; return; }
+
+  const title = document.createElement('div');
+  title.className = 'po-title';
+  title.textContent = 'On this page';
+  el.pageOutline.appendChild(title);
+  for (const { node, depth } of entries) {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.className = 'po-link' + (depth ? ' po-sub' : '');
+    a.dataset.href = node.href;
+    a.innerHTML = '<span class="po-dot" aria-hidden="true"></span>' + escapeHtml(node.label.trim());
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      container.querySelector<HTMLElement>('#' + CSS.escape(node.href))?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    el.pageOutline.appendChild(a);
+  }
+  el.pageOutline.hidden = false;
+}
+
+let textSpyQueued = false;
+function scheduleTextSpy(container: HTMLElement): void {
+  if (textSpyQueued) return;
+  textSpyQueued = true;
+  requestAnimationFrame(() => {
+    textSpyQueued = false;
+    const top = container.getBoundingClientRect().top + 90;
+    let current = '';
+    container.querySelectorAll<HTMLElement>('h1[id], h2[id], h3[id], h4[id]').forEach(h => {
+      if (h.getBoundingClientRect().top <= top) current = h.id;
+    });
+    document.querySelectorAll<HTMLElement>('#page-outline .po-link, #toc-list .toc-item').forEach(a => {
+      a.classList.toggle('current', !!current && a.dataset.href === current);
+    });
+  });
+}
+
+// "You stopped here": a quiet note in the left margin when a book is reopened.
+// It fades after a few seconds or on the first page turn, whichever is first.
+let resumeShownAt = 0;
+let resumeTimer = 0;
+let resumePending = false;
+
+function describeWhen(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const h = d.getHours();
+  const part = h < 5 ? 'night' : h < 12 ? 'morning' : h < 17 ? 'afternoon' : h < 21 ? 'evening' : 'night';
+  const day = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((day(now) - day(d)) / 86400000);
+  if (days <= 0) return 'This ' + part;
+  if (days === 1) return 'Yesterday ' + part;
+  if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' }) + ' ' + part;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function showResumeNote(prevSeen: number): void {
+  el.resumeNoteSub.textContent = describeWhen(prevSeen) + '.';
+  el.resumeNote.hidden = true;
+  resumePending = true;   // shown by placeResumeNote() once the text column is measurable
+}
+
+function placeResumeNote(): void {
+  if (!resumePending) return;
+  const col = readingColumnRect();
+  if (!col || col.width === 0) return;
+  resumePending = false;
+  if (col.left < 220) return;   // no room in the margin
+  el.resumeNote.style.left = `${Math.round(col.left - 206)}px`;
+  el.resumeNote.hidden = false;
+  el.resumeNote.classList.remove('is-leaving');
+  resumeShownAt = Date.now();
+  window.clearTimeout(resumeTimer);
+  resumeTimer = window.setTimeout(() => dismissResumeNote(true), 12000);
+}
+
+function dismissResumeNote(force: boolean): void {
+  if (el.resumeNote.hidden) return;
+  // The first relocation right after opening is the restore itself, not a page turn.
+  if (!force && Date.now() - resumeShownAt < 3000) return;
+  window.clearTimeout(resumeTimer);
+  el.resumeNote.classList.add('is-leaving');
+  window.setTimeout(() => { el.resumeNote.hidden = true; el.resumeNote.classList.remove('is-leaving'); }, 400);
+}
+
+// Where each spine section starts, as a fraction of the book, read straight from
+// the generated locations.
+let secStartMap: Map<string, number> | null = null;
+
+function sectionStartPct(cfiBase: string): number {
+  const locs: any = (currentBook as any)?.locations;
+  const list: string[] = locs?._locations ?? [];
+  if (list.length < 2 || !cfiBase) return NaN;
+  if (!secStartMap || (secStartMap as any).__n !== list.length) {
+    const m = new Map<string, number>();
+    list.forEach((c, i) => {
+      const bang = c.indexOf('!');
+      if (bang < 0) return;
+      const b = c.slice(8, bang);
+      if (!m.has(b)) m.set(b, i);
+    });
+    (m as any).__n = list.length;
+    secStartMap = m;
+  }
+  const i = secStartMap.get(cfiBase);
+  return i === undefined ? NaN : i / (list.length - 1);
+}
+
+// The text column the EPUB is laid out in. The iframe itself is not it: epub.js
+// scrolls a strip of page-wide iframes inside this container.
+function readingColumnRect(): DOMRect | null {
+  return document.querySelector('#viewer .epub-container')?.getBoundingClientRect() ?? null;
+}
+
+// Re-draw the strip for the current page (marks changed).
+function refreshPageStrip(): void {
+  if (!currentRendition || activeFormat !== 'epub') return;
+  try { updatePageStrip(currentRendition.currentLocation()); } catch { /* not displayed yet */ }
+}
+
+// One tick per page of the current chapter (the current page longer and in the
+// accent colour), with a dot for highlights and a flag for bookmarks. Page
+// numbers come from epub.js; where a mark falls is estimated from the book's
+// location data, so it can be a page off.
+function updatePageStrip(loc: any): void {
+  const strip = el.pageStrip;
+  const disp = loc?.start?.displayed;
+  if (!currentRendition || !currentBook || settings.layout !== 'paginated' || !disp || !(disp.total > 1)) {
+    strip.hidden = true;
+    return;
+  }
+  placeResumeNote();
+  const col = readingColumnRect();
+  if (!col || window.innerWidth - col.right < 48) { strip.hidden = true; return; }
+  strip.style.left = `${Math.round(col.right + 16)}px`;
+  const total: number = disp.total;
+  const page: number = Math.max(1, Math.min(total, disp.page));
+
+  const book: any = currentBook;
+  const locs: any = book.locations;
+  let secStart = NaN;
+  let secEnd = 1;
+  let base = '';
+  try {
+    const cfi: string = loc.start.cfi;
+    base = cfi.slice(8, cfi.indexOf('!'));
+    if (((locs?.length?.() ?? 0) > 0) && base) {
+      secStart = sectionStartPct(base);
+      const next = book.spine.get((loc.start.index ?? -1) + 1);
+      if (next?.cfiBase) {
+        const e = sectionStartPct(next.cfiBase);
+        if (Number.isFinite(e)) secEnd = e;
+      }
+    }
+  } catch { /* marks are optional */ }
+
+  // Ignore id assertions ("[chapter1]") when comparing, and read a range CFI by its start.
+  const bare = (c: string) => c.replace(/\[[^\]]*\]/g, '');
+  const pageOf = (cfi: string): number => {
+    if (!Number.isFinite(secStart) || !(secEnd > secStart) || !base || !bare(cfi).includes(bare(base) + '!')) return -1;
+    let point = cfi;
+    const inner = cfi.slice(8, -1).split(',');
+    if (inner.length === 3) point = 'epubcfi(' + inner[0] + inner[1] + ')';
+    const pct = locs.percentageFromCfi(point);
+    if (!Number.isFinite(pct)) return -1;
+    return Math.max(0, Math.min(total - 1, Math.floor(((pct - secStart) / (secEnd - secStart)) * total)));
+  };
+  const hl = new Set<number>();
+  const bm = new Set<number>();
+  for (const h of currentMarks.highlights) { const p = pageOf(h.cfi); if (p >= 0) hl.add(p); }
+  for (const b of currentMarks.bookmarks) { const p = pageOf(b.cfi); if (p >= 0) bm.add(p); }
+
+  // Long chapters share ticks so the strip stays short.
+  const ticks = Math.min(total, 36);
+  const per = total / ticks;
+  const cur = Math.min(ticks - 1, Math.floor((page - 1) / per));
+  const inTick = (set: Set<number>, t: number) => {
+    for (const p of set) if (Math.min(ticks - 1, Math.floor(p / per)) === t) return true;
+    return false;
+  };
+
+  strip.textContent = '';
+  for (let t = 0; t < ticks; t++) {
+    const row = document.createElement('div');
+    row.className = 'ps-row' + (t < cur ? ' is-past' : t === cur ? ' is-current' : '');
+    const mark = document.createElement('span');
+    mark.className = 'ps-mark';
+    if (inTick(bm, t)) mark.classList.add('is-bookmark');
+    else if (inTick(hl, t)) mark.classList.add('is-highlight');
+    const bar = document.createElement('span');
+    bar.className = 'ps-bar';
+    row.append(mark, bar);
+    strip.appendChild(row);
+  }
+  strip.setAttribute('role', 'img');
+  strip.setAttribute('aria-label', 'Page ' + page + ' of ' + total + ' in this chapter, ' + hl.size + ' highlights and ' + bm.size + ' bookmarks');
+  strip.hidden = false;
 }
 
 async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
@@ -2073,6 +2514,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
   });
 
   currentRendition.on('relocated', (loc: Location) => {
+    if (ttsOn && performance.now() > ttsAutoScrollUntil) ttsUserScrolled = true;
     currentLocationCfi = loc.start.cfi;
     updateChapterFromCfi(loc.start.href);
     updateProgress();
@@ -2095,7 +2537,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
 
   currentRendition.on('selected', onSelected);
   currentRendition.on('click', () => hideSelectionPopover());
-  currentRendition.on('relocated', () => hideSelectionPopover());
+  currentRendition.on('relocated', () => { hideSelectionPopover(); decorateTocProgress(); });
   currentRendition.hooks.content.register((contents: any) => {
     const doc: Document = contents.document;
     injectReaderFonts(doc);
@@ -2147,10 +2589,22 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
       const a = (e.target as Element).closest('a');
       if (a && a.getAttribute('href')) {
         const href = a.getAttribute('href');
-        if (href && (href.startsWith('#') || a.getAttribute('epub:type') === 'noteref' || a.textContent?.match(/^[\d\*\[\]]+$/))) {
+        if (href && isExternalLink(href)) {
+          // Web / mail links go to the default browser, never into the page frame.
           e.preventDefault();
           e.stopPropagation();
-          showFootnote(href, e.clientX, e.clientY);
+          openExternalLink(href);
+        } else if (href && (href.startsWith('#') || a.getAttribute('epub:type') === 'noteref' || a.textContent?.match(/^[\d\*\[\]]+$/))) {
+          e.preventDefault();
+          e.stopPropagation();
+          // Event coordinates are relative to the page's iframe; the popover
+          // lives in the main window.
+          const frameRect = (contents.window?.frameElement as HTMLElement | null)?.getBoundingClientRect();
+          showFootnote(href, e.clientX + (frameRect?.left ?? 0), e.clientY + (frameRect?.top ?? 0), doc);
+        } else if (href && !/^[a-z]+:/i.test(href) && currentLocationCfi) {
+          // A link to another part of the book: remember where the reader
+          // was so they can come straight back.
+          showReturnPill(currentLocationCfi);
         }
       }
     }, true);
@@ -2169,6 +2623,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
     flatToc = [];
     flatTocFromNav(nav.toc);
     renderTocTree(nav.toc);
+    decorateTocProgress();
   });
 
   currentBook.ready.then(async () => {
@@ -2178,6 +2633,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
     if (cached) {
       try {
         (book.locations as any).load(cached);
+        buildSpineStats();
         updateProgress();
         return;
       } catch (err) {
@@ -2193,7 +2649,20 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
     } catch (err) {
       console.warn('locations.generate failed:', err);
     }
+    buildSpineStats();
     updateProgress();
+  });
+}
+
+// Links that leave the book (web pages, mail, phone) open in the system's
+// default browser instead of navigating the reading surface.
+function isExternalLink(href: string): boolean {
+  return /^(https?:|mailto:|tel:)/i.test(href.trim());
+}
+function openExternalLink(href: string): void {
+  openUrl(href.trim()).catch(err => {
+    console.warn('openUrl failed:', err);
+    toast("Couldn't open the link");
   });
 }
 
@@ -2201,10 +2670,17 @@ async function openReader(record: BookRecord, buffer: ArrayBuffer) {
   cleanupCurrentReader();
 
   currentBookRecord = record;
+  const prevSeen = record.lastOpenedAt || 0;
   record.lastOpenedAt = Date.now();     // "recently opened" ordering on the library screen
   persistLibrary();
   refreshReadButton();
   activeFormat = record.format || getBookFormat(record);
+  activeProfile = profileForRecord(record);
+  loadProfile(activeProfile);
+  el.formatBadge.textContent = record.sourceUrl ? 'WEB' : activeFormat.toUpperCase();
+  el.formatBadge.title = record.sourceUrl
+    ? 'Saved web article'
+    : ({ epub: 'EPUB book', pdf: 'PDF document', md: 'Markdown file', txt: 'Text file' } as Record<string, string>)[activeFormat] || '';
   currentMarks = load<BookMarks>(KEY_MARKS(record.id), { bookmarks: [], highlights: [] });
   currentVocab = loadVocab(record.id);
 
@@ -2220,6 +2696,16 @@ async function openReader(record: BookRecord, buffer: ArrayBuffer) {
   // in this order means .viewer is measurable before display() runs.
   el.bookTitle.textContent = record.title;
   if (el.readerChapterTitle) el.readerChapterTitle.textContent = '';
+  secStartMap = null;
+  el.pageOutline.hidden = true;
+  el.pageOutline.innerHTML = '';
+  el.resumeNote.hidden = true;
+  resumePending = false;
+  el.pageStrip.hidden = true;
+  el.pageStrip.innerHTML = '';
+  if (activeFormat === 'epub' && (record.progress || 0) > 0.01 && prevSeen && Date.now() - prevSeen > 10 * 60 * 1000) {
+    showResumeNote(prevSeen);
+  }
   el.openOriginalBtn.hidden = !record.sourceUrl;
   goToScreen('reader');
   resetReflowTracking();
@@ -2275,6 +2761,71 @@ function updateChapterFromCfi(href: string) {
   });
 }
 
+// Per-chapter location counts, so the progress bar can show the book as a
+// row of chapters and "time left" can be given for the current chapter.
+// Built from epub.js locations (one entry per ~1600 characters): each
+// location CFI starts with the spine step of the section it falls in.
+interface SpineStat { spineIndex: number; start: number; count: number; }
+let spineStats: SpineStat[] = [];
+const MIN_PER_LOCATION = 0.35;
+
+function spineIndexFromCfi(cfi: string): number {
+  const m = /^epubcfi\(\/6\/(\d+)/.exec(cfi);
+  return m ? parseInt(m[1], 10) / 2 - 1 : -1;
+}
+
+function buildSpineStats() {
+  spineStats = [];
+  const locs: string[] = (currentBook?.locations as any)?._locations ?? [];
+  locs.forEach((cfi, i) => {
+    const idx = spineIndexFromCfi(cfi);
+    const last = spineStats[spineStats.length - 1];
+    if (last && last.spineIndex === idx) last.count++;
+    else spineStats.push({ spineIndex: idx, start: i, count: 1 });
+  });
+  renderProgressSegments();
+  decorateTocProgress();
+}
+
+function renderProgressSegments() {
+  const host = el.progressSegments;
+  host.innerHTML = '';
+  const segmented = activeFormat === 'epub' && spineStats.length > 1 && spineStats.length <= 120;
+  el.progressTrack.classList.toggle('is-segmented', segmented);
+  if (!segmented) return;
+  host.style.setProperty('--seg-gap', spineStats.length > 40 ? '1px' : '3px');
+  for (const st of spineStats) {
+    const seg = document.createElement('span');
+    seg.className = 'progress-seg';
+    seg.style.flexGrow = String(st.count);
+    const fill = document.createElement('span');
+    fill.className = 'progress-seg-fill';
+    seg.appendChild(fill);
+    host.appendChild(seg);
+  }
+}
+
+function paintProgressSegments(locIndex: number) {
+  const segs = el.progressSegments.children;
+  spineStats.forEach((st, i) => {
+    const seg = segs[i] as HTMLElement | undefined;
+    if (!seg) return;
+    const done = locIndex >= st.start + st.count;
+    const current = !done && locIndex >= st.start;
+    seg.classList.toggle('is-done', done);
+    seg.classList.toggle('is-current', current);
+    const fill = seg.firstElementChild as HTMLElement | null;
+    if (fill) fill.style.width = current ? `${((locIndex - st.start + 1) / st.count) * 100}%` : '';
+  });
+}
+
+function minutesLabel(min: number): string {
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
 function updateProgress() {
   if (!currentRendition || !currentBook) return;
   const loc = currentRendition.currentLocation() as any;
@@ -2284,16 +2835,49 @@ function updateProgress() {
   el.progressFill.style.width = `${pct * 100}%`;
   el.progressThumb.style.left = `${pct * 100}%`;
   el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
+  dismissResumeNote(false);
+  updatePageStrip(loc);
 
   const total = (currentBook.locations as any).length?.() ?? 0;
   const current = (currentBook.locations as any).locationFromCfi(loc.start.cfi) ?? 0;
   if (total > 0) {
-    const remainingLocations = total - current;
-    const remainingMin = Math.max(1, Math.round(remainingLocations * 0.35));
-    el.progressRemaining.textContent = `${remainingMin} min left`;
+    const section = spineStats.find(st => current >= st.start && current < st.start + st.count);
+    if (section) {
+      const left = Math.max(1, Math.round((section.start + section.count - current) * MIN_PER_LOCATION));
+      el.progressRemaining.textContent = `${minutesLabel(left)} left in chapter`;
+    } else {
+      const remainingMin = Math.max(1, Math.round((total - current) * MIN_PER_LOCATION));
+      el.progressRemaining.textContent = `${minutesLabel(remainingMin)} left`;
+    }
+    paintProgressSegments(current);
   } else {
     el.progressRemaining.textContent = '';
   }
+}
+
+// Contents panel: tick chapters already read, and give the reading time of
+// the ones still ahead.
+function decorateTocProgress() {
+  if (!currentBook || activeFormat !== 'epub') return;
+  const book = currentBook;
+  const currentIdx = currentLocationCfi ? spineIndexFromCfi(currentLocationCfi) : -1;
+  const counts = new Map(spineStats.map(st => [st.spineIndex, st.count]));
+  document.querySelectorAll<HTMLAnchorElement>('#toc-list .toc-item').forEach(a => {
+    const href = a.dataset.href?.split('#')[0];
+    const item = href ? (book.spine as any).get(href) : null;
+    const idx: number = item ? item.index : -1;
+    a.classList.toggle('is-read', idx >= 0 && currentIdx >= 0 && idx < currentIdx);
+    let meta = a.querySelector<HTMLSpanElement>('.toc-meta');
+    const count = counts.get(idx);
+    const showTime = idx > currentIdx && count != null && a.closest('ul ul') == null;
+    if (!showTime) { meta?.remove(); return; }
+    if (!meta) {
+      meta = document.createElement('span');
+      meta.className = 'toc-meta';
+      a.appendChild(meta);
+    }
+    meta.textContent = minutesLabel(Math.max(1, Math.round(count * MIN_PER_LOCATION)));
+  });
 }
 
 /* ============================================================
@@ -2321,6 +2905,7 @@ function navigateToCfi(cfi: string) {
 }
 
 function renderBookmarksList() {
+  refreshPageStrip();
   el.bookmarksList.innerHTML = '';
   if (currentMarks.bookmarks.length === 0) {
     el.bookmarksList.innerHTML = '<div class="mark-empty">No bookmarks yet.<br>Tap the ribbon icon while reading.</div>';
@@ -2339,6 +2924,7 @@ function renderBookmarksList() {
 }
 
 function renderHighlightsList() {
+  refreshPageStrip();
   el.highlightsList.innerHTML = '';
   if (currentMarks.highlights.length === 0) {
     el.highlightsList.innerHTML = '<div class="mark-empty">No highlights yet.<br>Select text while reading.</div>';
@@ -2400,6 +2986,10 @@ function openDrawer(which: 'toc' | 'typography', tab?: DrawerTab) {
   // in the DOM yet still translated off-screen.
   void target.offsetHeight;
   target.classList.add('open');
+  // On wide windows the panel docks beside the text instead of covering it;
+  // the reader stage makes room (CSS keyed off data-drawer) and EPUB
+  // re-paginates through the viewer's ResizeObserver.
+  el.html.dataset.drawer = which;
   if (which === 'toc') {
     switchTab(tab || 'toc');
   } else {
@@ -2409,7 +2999,13 @@ function openDrawer(which: 'toc' | 'typography', tab?: DrawerTab) {
 
 type DrawerTab = 'toc' | 'bookmarks' | 'highlights' | 'vocab';
 
+const DOCK_MIN_WIDTH = 1180;
+function isDockedLayout(): boolean {
+  return window.innerWidth >= DOCK_MIN_WIDTH && settings.uiLayout !== 'minimal';
+}
+
 function closeDrawers() {
+  delete el.html.dataset.drawer;
   [el.tocDrawer, el.typographyDrawer].forEach(d => {
     if (!d.classList.contains('open')) return;
     d.classList.remove('open');
@@ -2451,7 +3047,7 @@ function toggleBookmark() {
     });
     toast('Bookmarked');
   }
-  save(KEY_MARKS(currentBookRecord.id), currentMarks);
+  save(KEY_MARKS(currentBookRecord.id), currentMarks); refreshPageStrip();
   refreshBookmarkButton();
 }
 
@@ -2855,6 +3451,26 @@ async function copyForAi(): Promise<void> {
   }
 }
 
+let selAnchorX = 0;
+let selAnchorY = 0;
+
+function isSingleWord(t: string): boolean {
+  return t.length > 1 && !/\s/.test(t);
+}
+
+// Speak one word: the Piper voice when it is installed, otherwise the system voice.
+function sayWord(word: string, btn: HTMLButtonElement): void {
+  const w = word.replace(/[^\p{L}'’-]/gu, '').trim();
+  if (!w) return;
+  if (canPronounceNeural()) { void pronounceWord(w, btn); return; }
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(w);
+    u.lang = 'en-US';
+    window.speechSynthesis.speak(u);
+  } catch { /* no system voice available */ }
+}
+
 function onSelected(cfiRange: string, contents: any) {
   pendingSelectionCfi = cfiRange;
   try {
@@ -2881,12 +3497,14 @@ function onSelected(cfiRange: string, contents: any) {
     // then take a fresh id for this lookup.
     hideDictPopover();
     hideFootnotePopover();
-    const currentId = ++dictionaryLookupId;
 
-    if (!pendingSelectionText.includes(' ') && pendingSelectionText.length > 1) {
-      lookupWord(pendingSelectionText, pageX, pageY, currentId);
-    }
-
+    // One popover: highlight colours, plus Look up / Pronounce for a single
+    // word. The dictionary no longer opens on its own beside it.
+    selAnchorX = pageX;
+    selAnchorY = pageY;
+    const single = isSingleWord(pendingSelectionText);
+    el.popoverLookup.hidden = !single;
+    el.popoverSay.hidden = !single;
     showSelectionPopover(pageX, pageY);
   } catch (e) { console.error(e); }
 }
@@ -3567,7 +4185,7 @@ function stopPronounce(): void {
 // previous word.
 function preparePronounceBtn(btn: HTMLButtonElement, word: string): void {
   stopPronounce();
-  const offer = isPiperReady() && !!ttsSettings.piperVoicePath && !!word && word.trim().length > 0;
+  const offer = canPronounceNeural() && !!word && word.trim().length > 0;
   btn.hidden = !offer;
   btn.disabled = false;
   btn.classList.remove('is-busy');
@@ -3576,7 +4194,8 @@ function preparePronounceBtn(btn: HTMLButtonElement, word: string): void {
 
 async function pronounceWord(word: string, btn: HTMLButtonElement): Promise<void> {
   const text = word.trim();
-  if (!text || pronounceInFlight || !ttsSettings.piperVoicePath) return;
+  const useVoca = ttsSettings.engine === 'voca';
+  if (!text || pronounceInFlight || (!useVoca && !ttsSettings.piperVoicePath)) return;
 
   stopPronounce();
   pronounceInFlight = true;
@@ -3584,12 +4203,17 @@ async function pronounceWord(word: string, btn: HTMLButtonElement): Promise<void
   btn.classList.add('is-busy');
 
   try {
-    const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
-      text,
-      voicePath: ttsSettings.piperVoicePath,
-      lengthScale: 1.0,
-    });
-    const wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+    let wavBytes: Uint8Array;
+    if (useVoca) {
+      wavBytes = await vocaSynthesize(text, ttsSettings.vocaVoice, 1);
+    } else {
+      const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
+        text,
+        voicePath: ttsSettings.piperVoicePath,
+        lengthScale: 1.0,
+      });
+      wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+    }
     const blob = new Blob([wavBytes.buffer as ArrayBuffer], { type: 'audio/wav' });
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
@@ -3652,7 +4276,7 @@ function addHighlight(color: HighlightColor) {
   else currentMarks.highlights.push({
     cfi, color, text, chapter: currentChapterLabel, createdAt: Date.now(),
   });
-  save(KEY_MARKS(currentBookRecord.id), currentMarks);
+  save(KEY_MARKS(currentBookRecord.id), currentMarks); refreshPageStrip();
   hideSelectionPopover();
   toast('Highlighted');
 }
@@ -3661,7 +4285,7 @@ function removePendingHighlight() {
   if (!currentRendition || !currentBookRecord || !pendingSelectionCfi) return;
   try { currentRendition.annotations.remove(pendingSelectionCfi, 'highlight'); } catch {}
   currentMarks.highlights = currentMarks.highlights.filter(h => h.cfi !== pendingSelectionCfi);
-  save(KEY_MARKS(currentBookRecord.id), currentMarks);
+  save(KEY_MARKS(currentBookRecord.id), currentMarks); refreshPageStrip();
   hideSelectionPopover();
   toast('Highlight removed');
 }
@@ -3714,20 +4338,49 @@ function onReaderMouseMove(e: MouseEvent) {
 /* ============================================================
    Footnote Popovers
    ============================================================ */
-async function showFootnote(href: string, clientX: number, clientY: number) {
+let returnCfi: string | null = null;
+let returnPillTimer: number | undefined;
+
+function showReturnPill(cfi: string) {
+  returnCfi = cfi;
+  el.returnPill.hidden = false;
+  clearTimeout(returnPillTimer);
+  // Long enough to read the linked passage; it goes once it's no longer useful.
+  returnPillTimer = window.setTimeout(hideReturnPill, 90_000);
+}
+
+function hideReturnPill() {
+  returnCfi = null;
+  el.returnPill.hidden = true;
+  clearTimeout(returnPillTimer);
+}
+
+async function showFootnote(href: string, clientX: number, clientY: number, sourceDoc?: Document) {
   if (!currentBook) return;
   try {
     const [path, id] = href.split('#');
-    const doc = await currentBook.load(path) as Document;
+    // "#n1" points into the chapter being read; anything else names a file.
+    const doc = !path && sourceDoc ? sourceDoc : await currentBook.load(path) as Document;
     const target = id ? doc.getElementById(id) : doc.body;
     if (target) {
       el.footnoteContent.innerHTML = target.innerHTML;
       const p = el.footnotePopover;
       p.hidden = false;
-      const w = 320;
+      // With room to the right of the text column, the note sits in the margin
+      // beside the line it belongs to instead of covering the page.
+      const col = readingColumnRect();
+      const roomRight = col ? window.innerWidth - col.right : 0;
+      const docked = !!col && settings.layout !== 'spread' && roomRight >= 300;
+      p.classList.toggle('is-margin', docked);
+      const w = docked ? 268 : 320;
       const h = p.offsetHeight || 200;
-      p.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, clientX - w / 2))}px`;
-      p.style.top  = `${Math.max(8, clientY - h - 20)}px`;
+      if (docked && col) {
+        p.style.left = `${Math.min(window.innerWidth - w - 16, col.right + 16)}px`;
+        p.style.top  = `${Math.max(8, Math.min(window.innerHeight - h - 8, clientY - 24))}px`;
+      } else {
+        p.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, clientX - w / 2))}px`;
+        p.style.top  = `${Math.max(8, clientY - h - 20)}px`;
+      }
     }
   } catch (err) {
     console.error('Failed to load footnote:', err);
@@ -5006,7 +5659,7 @@ function classifyWord(fw: FocusWord): { pos: WordPos; range: Range | null; rect:
     return { pos: 'visible', range, rect };
   }
 
-  const iframe = getVisibleIframe();
+  const iframe = (focusIframeDoc.defaultView?.frameElement as HTMLIFrameElement | null) ?? getVisibleIframe();
   if (!iframe) return { pos: 'gone', range, rect };
 
   // We compare the word's position against the on-screen viewer bounds in
@@ -5455,13 +6108,14 @@ function setFocusWpm(wpm: number): void {
    record each word's char-offset range, and paint the word whose
    range brackets the current boundary charIndex.
    ============================================================ */
-type TtsEngine = 'system' | 'piper';
+type TtsEngine = 'system' | 'piper' | 'voca';
 
 interface TtsSettings {
   engine: TtsEngine;
   rate: number;             // 0.5 – 2.0
   voiceUri: string;         // system engine: SpeechSynthesisVoice.voiceURI; '' = system default
   piperVoicePath: string;   // piper engine: absolute path to .onnx model
+  vocaVoice: VocaVoice;     // Tiny Voca engine: F2 (female) or M2 (male)
   // Piper-only: when true, rate is achieved by piper's `--length-scale` at
   // synth time (natural pitch, requires re-synth on rate change) instead of
   // HTMLAudioElement.playbackRate (instant, but pitch-shifted — chipmunk
@@ -5478,6 +6132,7 @@ const DEFAULT_TTS: TtsSettings = {
   rate: 1.0,
   voiceUri: '',
   piperVoicePath: '',
+  vocaVoice: 'F2',
   piperNaturalRate: false,
   volume: 1,
   pitch: 1,
@@ -5646,6 +6301,28 @@ function isTtsSupported(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
 }
 
+// Engines that produce audio files we play through <audio> (Piper, Tiny Voca),
+// as opposed to the browser's own speechSynthesis.
+function isAudioEngine(): boolean {
+  return ttsSettings.engine === 'piper' || ttsSettings.engine === 'voca';
+}
+
+// Tiny Voca loads Python + the model on first use (a few seconds, once per
+// launch). Show where it is in the listening bar, and say so once as a toast.
+let vocaToldLoading = false;
+setVocaProgressListener((stage, step, steps) => {
+  el.ttsLoading.textContent = `Loading Tiny Voca · ${step}/${steps} · ${stage}…`;
+  el.ttsLoading.hidden = false;
+  if (!vocaToldLoading) { vocaToldLoading = true; toast('Preparing Tiny Voca — first start takes a few seconds'); }
+});
+// Called once the model is up (or failed): clears the indicator.
+function vocaLoadFinished(): void { el.ttsLoading.hidden = true; el.ttsLoading.textContent = ''; }
+setVocaReadyListener(vocaLoadFinished);   // covers every load path (play, pronounce, cache)
+// True when the neural word-pronouncer should be used (Tiny Voca is chosen, or Piper is installed).
+function canPronounceNeural(): boolean {
+  return ttsSettings.engine === 'voca' || (isPiperReady() && !!ttsSettings.piperVoicePath);
+}
+
 function isPiperReady(): boolean {
   return !!piperStatus && piperStatus.binary_exists && piperStatus.voices.length > 0;
 }
@@ -5670,6 +6347,17 @@ function loadVoices() {
 function renderVoiceList() {
   if (!el.ttsVoiceSelect) return;
   el.ttsVoiceSelect.innerHTML = '';
+
+  if (ttsSettings.engine === 'voca') {
+    for (const v of VOCA_VOICES) {
+      const opt = document.createElement('option');
+      opt.value = v.id;
+      opt.textContent = v.label;
+      if (v.id === ttsSettings.vocaVoice) opt.selected = true;
+      el.ttsVoiceSelect.appendChild(opt);
+    }
+    return;
+  }
 
   if (ttsSettings.engine === 'piper') {
     if (!piperStatus || !piperStatus.binary_exists) {
@@ -5729,13 +6417,20 @@ function renderVoiceList() {
   }
 }
 
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 function updateEngineUi() {
+  // iOS can't run the Piper helper process; offer System and Tiny Voca only.
+  if (IS_IOS) {
+    el.ttsEngineSelect.querySelector('option[value="piper"]')?.remove();
+    if (ttsSettings.engine === 'piper') ttsSettings.engine = 'voca';
+  }
   el.ttsEngineSelect.value = ttsSettings.engine;
   // Setup button and natural-rate toggle only make sense for Piper.
   el.ttsSetupBtn.hidden = ttsSettings.engine !== 'piper';
-  el.ttsNaturalRateLabel.hidden = ttsSettings.engine !== 'piper';
+  el.ttsNaturalRateLabel.hidden = !isAudioEngine();
   el.ttsNaturalRate.checked = ttsSettings.piperNaturalRate;
-  el.ttsPitchRow.hidden = ttsSettings.engine === 'piper';
+  el.ttsPitchRow.hidden = isAudioEngine();
   renderVoiceList();
   // Cache button visibility depends on both engine and piper readiness —
   // fire-and-forget the async check.
@@ -5757,10 +6452,15 @@ function startTts(): void {
     toast('Piper needs setup — see the panel');
     return;
   }
+  if (ttsSettings.engine === 'voca' && !isVocaReady()) {
+    // warm up while the first chunk queues
+    void startVoca().then(vocaLoadFinished, (err) => { vocaLoadFinished(); toast(`Tiny Voca failed to load: ${err?.message || err}`); });
+  }
   if (isFocusModeOn()) stopFocusMode();     // mutually exclusive
 
   ttsOn = true;
   ttsPaused = false;
+  ttsUserScrolled = false;
   el.html.dataset.ttsMode = 'on';
   el.ttsPanel.hidden = false;
   el.ttsBtn.classList.add('active');
@@ -5786,7 +6486,7 @@ function startTts(): void {
   }
 
   speakNextChunk();
-  const engineLabel = ttsSettings.engine === 'piper' ? 'Piper' : 'System';
+  const engineLabel = ttsSettings.engine === 'piper' ? 'Piper' : ttsSettings.engine === 'voca' ? 'Tiny Voca' : 'System';
   toast(`Read aloud · ${engineLabel} · ${ttsSettings.rate.toFixed(1)}×`);
 }
 
@@ -5813,7 +6513,7 @@ function pauseTts(): void {
   ttsPaused = true;
   if (cachedPlayback) {
     cachedPlayback.audio.pause();
-  } else if (ttsSettings.engine === 'piper') {
+  } else if (isAudioEngine()) {
     piperAudio?.pause();
     // The paint loop self-terminates on the next tick because audio.paused
     // is now true, but calling explicitly saves one wasted animation frame.
@@ -5839,7 +6539,7 @@ function resumeTts(): void {
     cachedPlayback.audio.play()
       .then(() => startCachedPaintLoop())
       .catch(err => console.warn('resume cached:', err));
-  } else if (ttsSettings.engine === 'piper') {
+  } else if (isAudioEngine()) {
     piperAudio?.play()
       .then(() => startPiperPaintLoop())
       .catch(err => console.warn('resume piper:', err));
@@ -5951,6 +6651,7 @@ function jumpTtsToWordIdx(idx: number): void {
   if (!ttsOn) return;
   if (idx < 0 || idx >= focusWords.length) return;
   focusIndex = idx;
+  ttsUserScrolled = false;           // they just pointed at it: they are looking at it
   cancelCurrentUtterance();
   ttsPaused = false;
   updateTtsPlayIcon();
@@ -5993,7 +6694,7 @@ function syncTtsTuneUi(): void {
   el.ttsPitchLabel.textContent = ttsSettings.pitch.toFixed(2).replace(/0$/, '');
   el.ttsPauses.value = String(ttsSettings.pauseScale);
   el.ttsPausesLabel.textContent = describePauseScale(ttsSettings.pauseScale);
-  el.ttsPitchRow.hidden = ttsSettings.engine === 'piper';
+  el.ttsPitchRow.hidden = isAudioEngine();
   el.ttsExpr.value = String(ttsSettings.expressiveness ?? 1);
   el.ttsExprLabel.textContent = describeExpression(ttsSettings.expressiveness ?? 1);
   el.ttsExprRow.hidden = ttsSettings.engine !== 'piper';
@@ -6075,9 +6776,10 @@ function setTtsRate(rate: number): void {
   ttsSettings.rate = Math.max(0.5, Math.min(2, rate));
   persistTts();
   el.ttsRateLabel.textContent = `${ttsSettings.rate.toFixed(1)}×`;
+  updateTtsHeard();
   if (!ttsOn) return;
 
-  if (ttsSettings.engine === 'piper') {
+  if (isAudioEngine()) {
     if (ttsSettings.piperNaturalRate) {
       // Natural-rate mode: rate is baked into the audio at synth time
       // (length_scale). Old audio has the wrong duration — re-synth from
@@ -6104,14 +6806,16 @@ function setTtsRate(rate: number): void {
 function setTtsPiperNaturalRate(on: boolean): void {
   ttsSettings.piperNaturalRate = on;
   persistTts();
-  if (ttsOn && ttsSettings.engine === 'piper') {
+  if (ttsOn && isAudioEngine()) {
     cancelCurrentUtterance();
     speakNextChunk();
   }
 }
 
 function setTtsVoice(value: string): void {
-  if (ttsSettings.engine === 'piper') {
+  if (ttsSettings.engine === 'voca') {
+    ttsSettings.vocaVoice = value === 'M2' ? 'M2' : 'F2';
+  } else if (ttsSettings.engine === 'piper') {
     ttsSettings.piperVoicePath = value;
   } else {
     ttsSettings.voiceUri = value;
@@ -7068,10 +7772,78 @@ function ttsNodeGap(idx: number): 'space' | 'glue' | 'br' {
 
 // When read-aloud is mid-sentence at the end of an EPUB page the chunk spills
 // onto the next page; turn the page once the audio reaches those words.
+// Scrolling documents (web articles, Markdown, text): speech keeps its own
+// place whatever the view does. The view follows the spoken word only while the
+// reader hasn't scrolled away; once they scroll, we leave it alone until the
+// spoken word is on screen again.
+let ttsUserScrolled = false;
+let ttsAutoScrollUntil = 0;
+// For choosing what to speak, every laid-out word counts as readable; only detached / zero-size ones are skipped.
+function ttsSpeakable<T extends { pos: WordPos }>(c: T): { pos: WordPos } & Omit<T, "pos"> {
+  return { ...c, pos: (c.pos === "gone" ? "gone" : "visible") as WordPos };
+}
+
+function speechDocAlive(): boolean {
+  const doc = focusIframeDoc;
+  if (!doc) return false;
+  if (doc === document) return true;
+  const fe = doc.defaultView?.frameElement;
+  return !!fe && fe.isConnected && !!doc.body;
+}
+
+// EPUB: the section after the one being read. The reader may have paged or
+// jumped elsewhere, so go by the speech's own section, then show it.
+async function ttsAdvanceSection(cb: () => void): Promise<void> {
+  if (advancingPage || !currentRendition || !currentBook) return;
+  const mine = ((currentRendition as any).getContents?.() ?? []).find((c: any) => c.document === focusIframeDoc);
+  const idx: number | undefined = mine?.sectionIndex;
+  if (typeof idx !== 'number') { void turnPageAndContinue(cb); return; }   // section unknown: old behaviour
+  const target: any = (currentBook as any).spine.get(idx + 1);
+  if (!target) { toast('End of book'); stopTts(); return; }
+  advancingPage = true;
+  ttsAutoScrollUntil = performance.now() + 4000;
+  const prevDoc = focusIframeDoc;
+  try { await currentRendition.display(target.href); } catch (err) { console.warn('tts: advance failed:', err); }
+  await raf();
+  const deadline = performance.now() + 1500;
+  while (performance.now() < deadline) {
+    if (!ttsOn) { advancingPage = false; return; }
+    const doc = getVisibleIframe()?.contentDocument ?? null;
+    if (doc && doc !== prevDoc && doc.body && doc.body.childNodes.length > 0) { await raf(); break; }
+    await wait(40);
+  }
+  advancingPage = false;
+  if (!ttsOn) return;
+  collectFocusWords();
+  focusIndex = 0;
+  ttsUserScrolled = false;
+  cb();
+}
+
+function ttsFollow(pos: WordPos, rect: DOMRect | null): void {
+  if (!currentTextElement) {
+    // Paged / scrolled EPUB: turn when speech reaches the next page, unless the
+    // reader has moved away from the spoken page; back on it, we follow again.
+    if (pos === 'visible') ttsUserScrolled = false;
+    else if (pos === 'after' && !ttsUserScrolled) ttsTurnForSpill();
+    return;
+  }
+  const box = currentTextElement;
+  if (!rect) return;
+  const b = box.getBoundingClientRect();
+  if (pos === 'visible' && ttsUserScrolled) { ttsUserScrolled = false; }   // reader is back on the spoken word
+  if (ttsUserScrolled) return;
+  const nearBottom = rect.top > b.bottom - b.height * 0.15;
+  if (pos !== 'after' && !(pos === 'visible' && nearBottom)) return;
+  ttsAutoScrollUntil = performance.now() + 700;
+  box.scrollTop += rect.top - b.top - b.height * 0.3;
+}
+
 let ttsSpillTurnPending = false;
 function ttsTurnForSpill(): void {
   if (ttsSpillTurnPending || !currentRendition) return;
   ttsSpillTurnPending = true;
+  ttsAutoScrollUntil = performance.now() + 1500;   // our own turn, not the reader's
   Promise.resolve(currentRendition.next())
     .catch(() => {})
     .finally(() => { window.setTimeout(() => { ttsSpillTurnPending = false; }, 400); });
@@ -7114,7 +7886,8 @@ function collectVisibleChunkRaw(startIdx: number): { words: Chunk; hitAfter: boo
 
   while (idx < focusWords.length) {
     const fw = focusWords[idx];
-    const { pos } = classifyWord(fw);
+    // Read on from where speech is, wherever the view is (scrolled or paged away).
+    const { pos } = ttsSpeakable(classifyWord(fw));
     // EPUB pages: finish a sentence that runs off the bottom of the page instead
     // of stopping mid-sentence and paying a page-turn gap in the middle of it.
     const spill = pos === 'after' && !currentTextElement && words.length > 0 && spillWords < TTS_PAGE_SPILL_WORDS
@@ -7165,22 +7938,36 @@ function collectVisibleChunkRaw(startIdx: number): { words: Chunk; hitAfter: boo
 // Speak the next chunk starting at (or after) focusIndex. Handles page
 // turns transparently when there's nothing visible left to read. Dispatches
 // to the currently-selected engine.
+// How much of the current chapter / document has been read aloud, and how long
+// the rest will take at the current speed (about 165 words a minute at 1×).
+function updateTtsHeard(): void {
+  const n = focusWords.length;
+  if (n === 0) { el.ttsHeardFill.style.width = '0%'; el.ttsTimeLeft.textContent = ''; return; }
+  const done = Math.max(0, Math.min(n, focusIndex));
+  el.ttsHeardFill.style.width = (done / n * 100).toFixed(1) + '%';
+  const minutes = Math.max(1, Math.round((n - done) / (165 * (ttsSettings.rate || 1))));
+  el.ttsTimeLeft.textContent = minutes + ' min left';
+}
+
 function speakNextChunk(): void {
   if (!ttsOn) return;
 
   // Refresh word list if the visible iframe has swapped (page turn).
-  const visIframe = getVisibleIframe();
-  if (visIframe && visIframe.contentDocument !== focusIframeDoc) {
+  // Only when the section being read has been unloaded (the reader navigated
+  // far away) do we re-anchor, to the page they are now looking at.
+  if (!currentTextElement && !speechDocAlive()) {
     collectFocusWords();
-    focusIndex = 0;
+    const first = findFirstVisibleWordIndex();
+    focusIndex = first >= 0 ? first : 0;
   }
+  updateTtsHeard();
 
   // If we have a cached WAV for the current section+voice, prefer it —
   // audio playback is instant, no synth latency. Fires async but we
   // don't wait; if it succeeds it takes over playback, if it fails
   // (miss, IO error, etc.) it returns false and we fall through to the
   // pipelined synth path.
-  if (!cachedPlayback && ttsSettings.engine === 'piper') {
+  if (!cachedPlayback && isAudioEngine()) {
     tryStartCachedPlayback().then(started => {
       if (started) return;
       speakNextChunkPipelined();
@@ -7200,24 +7987,26 @@ function speakNextChunkPipelined(): void {
   // need to turn a page.
   let startIdx = -1;
   while (focusIndex < focusWords.length) {
-    const { pos } = classifyWord(focusWords[focusIndex]);
+    const { pos } = ttsSpeakable(classifyWord(focusWords[focusIndex]));   // never skip text just because the view is elsewhere
     if (pos === 'visible') { startIdx = focusIndex; break; }
     if (pos === 'before' || pos === 'gone') { focusIndex++; continue; }
     if (pos === 'after') break;
   }
 
   if (startIdx === -1) {
-    turnPageAndContinue(() => speakNextChunk());
+    if (currentTextElement) { toast('End of book'); stopTts(); return; }   // nothing left; never scroll the view for it
+    void ttsAdvanceSection(() => speakNextChunk());
     return;
   }
 
   const { words } = collectVisibleChunkFrom(startIdx);
   if (words.length === 0) {
-    turnPageAndContinue(() => speakNextChunk());
+    if (currentTextElement) { toast('End of book'); stopTts(); return; }
+    void ttsAdvanceSection(() => speakNextChunk());
     return;
   }
 
-  if (ttsSettings.engine === 'piper') {
+  if (isAudioEngine()) {
     speakPiperChunk(words);
   } else {
     speakSystemChunk(words);
@@ -7283,7 +8072,7 @@ function buildSystemUtterance(chunkWords: Chunk, token: number): SpeechSynthesis
         if (!fw) return;
         const { pos, range, rect } = classifyWord(fw);
         if (pos === 'visible' && range && rect) paintRange(range, rect, w.wordIdx);
-        else if (pos === 'after') ttsTurnForSpill();
+        ttsFollow(pos, rect);
         focusIndex = w.wordIdx;
         return;
       }
@@ -7488,7 +8277,7 @@ function startPiperPaintLoop(): void {
       if (fw) {
         const { pos, range, rect } = classifyWord(fw);
         if (pos === 'visible' && range && rect) paintRange(range, rect, wordIdx);
-        else if (pos === 'after') ttsTurnForSpill();
+        ttsFollow(pos, rect);
         focusIndex = wordIdx;
       }
     }
@@ -7518,19 +8307,25 @@ async function synthesizePiperChunk(
   token: number,
 ): Promise<PreparedPiperChunk | null> {
   const voice = ttsSettings.piperVoicePath;
-  if (!voice) return null;
+  const useVoca = ttsSettings.engine === 'voca';
+  if (!useVoca && !voice) return null;
   const text = ttsSpokenText(chunkWords);
   let wavBytes: Uint8Array;
   try {
-    const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
-      text,
-      voicePath: voice,
-      lengthScale: currentPiperLengthScale(),
-      expressiveness: currentExpressiveness(),
-    });
-    wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+    if (useVoca) {
+      // In natural-rate mode the model itself speaks faster/slower (pitch preserved).
+      wavBytes = await vocaSynthesize(text, ttsSettings.vocaVoice, ttsSettings.piperNaturalRate ? ttsSettings.rate : 1);
+    } else {
+      const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
+        text,
+        voicePath: voice,
+        lengthScale: currentPiperLengthScale(),
+        expressiveness: currentExpressiveness(),
+      });
+      wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+    }
   } catch (err) {
-    console.error('piper_synthesize failed:', err);
+    console.error(useVoca ? 'voca synth failed:' : 'piper_synthesize failed:', err);
     return null;
   }
   if (!ttsOn || token !== piperGenToken) return null;
@@ -7674,7 +8469,7 @@ async function prefetchNextPiperChunk(afterWordIdx: number, token: number): Prom
 
 async function speakPiperChunk(chunkWords: Chunk): Promise<void> {
   const voice = ttsSettings.piperVoicePath;
-  if (!voice) { toast('Pick a Piper voice first'); stopTts(); return; }
+  if (ttsSettings.engine === 'piper' && !voice) { toast('Pick a Piper voice first'); stopTts(); return; }
 
   const token = ++piperGenToken;
   // Any pre-existing prefetch is from a stale generation — drop it.
@@ -7685,7 +8480,8 @@ async function speakPiperChunk(chunkWords: Chunk): Promise<void> {
 
   const prepared = await synthesizePiperChunk(chunkWords, token);
   if (!prepared) {
-    if (ttsOn) { toast('Piper synth failed'); stopTts(); }
+    // A newer request (stepping, jumping, rate change) invalidates this one: that is not a failure.
+    if (ttsOn && token === piperGenToken) { toast(ttsSettings.engine === 'voca' ? 'Tiny Voca synth failed' : 'Piper synth failed'); stopTts(); }
     return;
   }
   playPreparedPiperChunk(prepared);
@@ -7702,6 +8498,7 @@ function sectionKeyFromHref(href: string): string {
 
 // The voice id used in cache paths — matches the .onnx file's stem.
 function currentVoiceId(): string | null {
+  if (ttsSettings.engine === 'voca') return `voca-${ttsSettings.vocaVoice}`;
   if (!ttsSettings.piperVoicePath) return null;
   const parts = ttsSettings.piperVoicePath.split(/[\\/]/);
   const file = parts[parts.length - 1] || '';
@@ -7803,10 +8600,8 @@ function startCachedPaintLoop(): void {
           const cls = classifyWord(fw);
           if (cls.pos === 'visible' && cls.range && cls.rect) {
             paintRange(cls.range, cls.rect, range.startWordIdx);
-          } else if (cls.pos === 'after') {
-            // Word is on a later page — auto-turn so the reader keeps up.
-            currentRendition?.next().catch(() => {});
           }
+          ttsFollow(cls.pos, cls.rect);
           focusIndex = range.startWordIdx;
         }
       }
@@ -7820,7 +8615,8 @@ function startCachedPaintLoop(): void {
 // Returns true if cached playback started, false if we should fall through
 // to pipelined synthesis.
 async function tryStartCachedPlayback(): Promise<boolean> {
-  if (ttsSettings.engine !== 'piper') return false;
+  if (!isAudioEngine()) return false;
+  if (!currentTextElement && focusIframeDoc && focusIframeDoc !== getVisibleIframe()?.contentDocument) return false;
   if (!currentBookRecord) return false;
   const voice = currentVoiceId();
   const href = currentSectionHref();
@@ -7932,7 +8728,8 @@ function updateCacheButtonState(cached: boolean, progressLabel?: string): void {
 }
 
 async function refreshCacheButtonForCurrentSection(): Promise<void> {
-  if (ttsSettings.engine !== 'piper' || !isPiperReady() || !currentBookRecord) {
+  const cacheable = ttsSettings.engine === 'voca' || (ttsSettings.engine === 'piper' && isPiperReady());
+  if (!cacheable || !currentBookRecord) {
     el.ttsCacheBtn.hidden = true;
     return;
   }
@@ -7959,8 +8756,8 @@ async function refreshCacheButtonForCurrentSection(): Promise<void> {
 async function cacheCurrentChapter(): Promise<void> {
   if (cachingInFlight) return;
   if (!currentBookRecord || !currentRendition) { toast('Open a book first'); return; }
-  if (ttsSettings.engine !== 'piper' || !isPiperReady()) {
-    toast('Piper engine required to cache'); return;
+  if (ttsSettings.engine === 'piper' ? !isPiperReady() : ttsSettings.engine !== 'voca') {
+    toast('Piper or Tiny Voca required to cache'); return;
   }
   const voice = currentVoiceId();
   const href = currentSectionHref();
@@ -7984,9 +8781,11 @@ async function cacheCurrentChapter(): Promise<void> {
   // like the voice-model downloads), so progress comes from a small atomic
   // counter on the Rust side — poll it the same way downloadFileWithProgress
   // polls piper_file_size.
+  const useVoca = ttsSettings.engine === 'voca';
+  let vocaDone = 0;
   const progressPoll = window.setInterval(async () => {
     try {
-      const [done, total] = await invoke<[number, number]>('piper_batch_progress');
+      const [done, total] = useVoca ? [vocaDone, texts.length] : await invoke<[number, number]>('piper_batch_progress');
       if (total > 0) {
         const pct = Math.round((done / total) * 100);
         const label = `Caching… ${pct}% (${done}/${total})`;
@@ -7997,6 +8796,36 @@ async function cacheCurrentChapter(): Promise<void> {
   }, 400);
 
   try {
+    if (useVoca) {
+      // Tiny Voca synthesizes in the worker; assemble the chapter WAV + sidecar
+      // here and store them where piper_cache_lookup (and playback) expect them.
+      const speed = ttsSettings.piperNaturalRate ? ttsSettings.rate : 1;
+      const pieces: Float32Array[] = [];
+      const starts: number[] = [];
+      let rate = 24000;
+      let samples = 0;
+      for (let i = 0; i < texts.length; i++) {
+        const r = await vocaSynthesizeSamples(texts[i], ttsSettings.vocaVoice, speed);
+        rate = r.sampleRate;
+        starts.push(samples / rate);
+        pieces.push(r.audio);
+        samples += r.audio.length;
+        const gap = new Float32Array(Math.round(rate * Math.min(5000, pausesMs[i] ?? 0) / 1000));
+        pieces.push(gap);
+        samples += gap.length;
+        vocaDone = i + 1;
+      }
+      const all = new Float32Array(samples);
+      let at = 0;
+      for (const p of pieces) { all.set(p, at); at += p.length; }
+      const dir = `piper/cache/${currentBookRecord.id}`;
+      const stem = `${dir}/${key}_${voice}`;
+      await mkdir(dir, { baseDir: BaseDirectory.AppData, recursive: true });
+      await writeFile(`${stem}.wav`, wavFromFloat32(all, rate), { baseDir: BaseDirectory.AppData });
+      await writeFile(`${stem}.json`, new TextEncoder().encode(JSON.stringify({
+        voice, section: key, sentence_starts: starts, total_duration: samples / rate, sample_rate: rate,
+      })), { baseDir: BaseDirectory.AppData });
+    } else {
     await invoke('piper_batch_synthesize', {
       bookId: currentBookRecord.id,
       sectionKey: key,
@@ -8006,6 +8835,7 @@ async function cacheCurrentChapter(): Promise<void> {
       lengthScale: currentPiperLengthScale(),
       expressiveness: currentExpressiveness(),
     });
+    }
     toast('Chapter cached — hit play for instant audio');
   } catch (err: any) {
     console.error('cache failed:', err);
@@ -8018,6 +8848,16 @@ async function cacheCurrentChapter(): Promise<void> {
 }
 
 function wire() {
+  // Links inside Markdown / article / PDF text live in the main document (EPUB
+  // pages are handled in their own frames, see the content hook).
+  document.addEventListener('click', (e) => {
+    const a = (e.target as Element | null)?.closest?.('#viewer a[href]') as HTMLAnchorElement | null;
+    const href = a?.getAttribute('href');
+    if (!a || !href || !isExternalLink(href)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openExternalLink(href);
+  }, true);
   el.importBtn.addEventListener('click', importBook);
   el.importBtnEmpty.addEventListener('click', importBook);
   el.libraryThemeBtn.addEventListener('click', cycleTheme);
@@ -8356,6 +9196,15 @@ function wire() {
         if (control === 'measure' && v) settings.measure = v as MeasureKind;
         if (control === 'ruler' && v)   settings.readingRuler = v === 'on';
         if (control === 'focusTracker' && v) settings.focusTracker = v as FocusTracker;
+        if (control === 'paragraph' && v) settings.paragraph = v as ParagraphKind;
+        if (control === 'justify' && v) settings.justify = v === 'on';
+        if (control === 'preset' && v && v in READING_PRESETS) {
+          Object.assign(settings, READING_PRESETS[v as ReadingProfile]);
+        }
+        if (control === 'quicktheme' && v && QUICK_THEMES[v]) {
+          settings.theme = QUICK_THEMES[v].theme;
+          settings.appearance = QUICK_THEMES[v].appearance;
+        }
         if (control === 'size') {
           const action = btn.dataset.action;
           if (action === 'inc') settings.sizePct = Math.min(MAX_FONT_PCT, settings.sizePct + FONT_STEP);
@@ -8389,6 +9238,12 @@ function wire() {
   document.addEventListener('mousemove', (e) => moveRuler(e.clientY));
   document.addEventListener('mouseleave', () => { el.readingRuler.style.opacity = '0'; });
 
+  el.returnPill.addEventListener('click', () => {
+    const cfi = returnCfi;
+    hideReturnPill();
+    if (cfi && currentRendition) currentRendition.display(cfi);
+  });
+
   el.prevBtn.addEventListener('click', () => navGo('prev'));
   el.nextBtn.addEventListener('click', () => navGo('next'));
 
@@ -8412,6 +9267,17 @@ function wire() {
     sw.addEventListener('click', () => addHighlight(sw.dataset.color as HighlightColor));
   });
   el.popoverRemove.addEventListener('click', removePendingHighlight);
+  el.popoverLookup.addEventListener('click', () => {
+    const word = pendingSelectionText;
+    if (!word) return;
+    // Swap this popover for the dictionary card; keep the selection itself.
+    el.selectionPopover.hidden = true;
+    hideDictPopover();
+    hideFootnotePopover();
+    const id = ++dictionaryLookupId;
+    void lookupWord(word, selAnchorX, selAnchorY, id);
+  });
+  el.popoverSay.addEventListener('click', () => sayWord(pendingSelectionText, el.popoverSay));
 
   // Explicit close buttons on info popovers
   el.dictClose.addEventListener('click', (e) => {

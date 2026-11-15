@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Read</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -196,7 +196,10 @@
           </div>
         </div>
         <div class="topbar-center">
-          <span id="reader-book-title" class="reader-book-title"></span>
+          <span class="reader-title-row">
+            <span id="reader-format-badge" class="reader-format-badge"></span>
+            <span id="reader-book-title" class="reader-book-title"></span>
+          </span>
           <span id="reader-chapter-title" class="reader-chapter-title"></span>
         </div>
         <div class="topbar-right">
@@ -240,6 +243,9 @@
         </div>
       </header>
 
+      <!-- "On this page" outline: Markdown / text / saved articles, wide windows only -->
+      <nav id="page-outline" class="page-outline" aria-label="On this page" hidden></nav>
+
       <!-- Reader canvas -->
       <div class="reader-stage">
         <div id="viewer" class="viewer"></div>
@@ -251,10 +257,17 @@
         </button>
       </div>
 
+      <!-- Shown after following a link to another part of the book -->
+      <button id="return-pill" class="return-pill" type="button" hidden>
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+        <span>Back to Where You Were</span>
+      </button>
+
       <!-- Auto-hiding bottom chrome (progress) -->
       <div class="edge-sensor edge-sensor-bottom"></div>
       <footer class="reader-bottombar" id="reader-bottombar">
         <div class="progress-track" id="progress-track">
+          <div class="progress-segments" id="progress-segments" aria-hidden="true"></div>
           <div class="progress-fill" id="progress-fill"></div>
           <div class="progress-thumb" id="progress-thumb"></div>
         </div>
@@ -353,6 +366,16 @@
           </div>
 
           <div class="control-group">
+            <label class="control-label">Theme</label>
+            <div class="theme-quick" data-control="quicktheme">
+              <button data-value="paper"><span class="theme-quick-dot" style="background:#f4f3ef"></span>Paper</button>
+              <button data-value="sepia"><span class="theme-quick-dot" style="background:#f4ecd8"></span>Sepia</button>
+              <button data-value="eink"><span class="theme-quick-dot" style="background:#f4f4f2;box-shadow:inset 0 0 0 1px #8a8a88"></span>E-ink</button>
+              <button data-value="night"><span class="theme-quick-dot" style="background:#161513"></span>Night</button>
+            </div>
+          </div>
+
+          <div class="control-group">
             <label class="control-label">Font</label>
             <div class="segment segment-fonts" data-control="font">
               <button data-value="serif" style="font-family: 'Newsreader', serif;">Serif</button>
@@ -402,6 +425,23 @@
           </div>
 
           <div class="control-group">
+            <label class="control-label">Paragraphs</label>
+            <div class="segment" data-control="paragraph">
+              <button data-value="original" title="Keep the publisher's paragraph spacing">Original</button>
+              <button data-value="indent" title="First-line indents, no gaps, like a printed book">Indented</button>
+              <button data-value="spaced" title="A gap between paragraphs, no indents">Spaced</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label class="control-label">Justify &amp; hyphenate</label>
+            <div class="segment" data-control="justify">
+              <button data-value="off">Off</button>
+              <button data-value="on">On</button>
+            </div>
+          </div>
+
+          <div class="control-group">
             <label class="control-label">Focus tracker</label>
             <div class="segment" data-control="focusTracker" title="Highlights the word or sentence under your cursor as a read-along guide.">
               <button data-value="off">Off</button>
@@ -415,10 +455,10 @@
           <div class="control-group">
             <label class="control-label">Line width</label>
             <div class="segment" data-control="measure" title="Cap the number of characters per line — long lines are tiring to read. Numbers are approximate characters.">
-              <button data-value="full">Full</button>
-              <button data-value="ch60">60</button>
-              <button data-value="ch70">70</button>
-              <button data-value="ch80">80</button>
+              <button data-value="ch60" title="About 60 characters per line">Narrow</button>
+              <button data-value="ch70" title="About 70 characters per line">Comfort</button>
+              <button data-value="ch80" title="About 80 characters per line">Wide</button>
+              <button data-value="full" title="Use the full window width">Full</button>
             </div>
           </div>
 
@@ -450,6 +490,7 @@
 
       <!-- Read-aloud (TTS) control panel -->
       <div class="focus-panel tts-panel" id="tts-panel" hidden>
+        <div class="tts-heard" id="tts-heard" role="img" aria-label="Part of this chapter heard"><i id="tts-heard-fill"></i></div>
         <button id="tts-prev" class="focus-btn" title="Previous sentence (Shift: paragraph)">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20 9 12l10-8v16zM5 19V5"/></svg>
         </button>
@@ -469,6 +510,7 @@
         <select id="tts-engine" class="tts-voice tts-engine" aria-label="Engine">
           <option value="system">System</option>
           <option value="piper">Piper (neural)</option>
+          <option value="voca">Tiny Voca (neural, built in)</option>
         </select>
         <select id="tts-voice" class="tts-voice" aria-label="Voice"></select>
         <button id="tts-setup" class="focus-btn tts-setup-btn" title="Piper setup" hidden>
@@ -481,6 +523,8 @@
         <button id="tts-cache-btn" class="focus-btn tts-cache-btn" title="Cache this chapter for instant audiobook-style playback" hidden>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
         </button>
+        <span id="tts-loading" class="tts-loading" role="status" aria-live="polite" hidden></span>
+        <span id="tts-time-left" class="tts-time-left" aria-live="off"></span>
         <button id="tts-tune-btn" class="focus-btn tts-tune-btn" title="More speaking controls" aria-haspopup="true" aria-expanded="false">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
         </button>
@@ -607,6 +651,15 @@
         </button>
       </div>
 
+      <!-- Shown for a few seconds when a book is reopened (wide windows only) -->
+      <aside id="resume-note" class="resume-note" hidden>
+        <div class="resume-note-title">You stopped here</div>
+        <div class="resume-note-sub" id="resume-note-sub"></div>
+      </aside>
+
+      <!-- Pages of the current chapter, EPUB paginated mode, wide windows only -->
+      <div id="page-strip" class="page-strip" hidden></div>
+
       <!-- Selection popover for highlights -->
       <div class="selection-popover" id="selection-popover" hidden>
         <button data-color="yellow" class="hl-swatch hl-yellow" title="Yellow"></button>
@@ -614,6 +667,13 @@
         <button data-color="blue" class="hl-swatch hl-blue" title="Blue"></button>
         <button data-color="pink" class="hl-swatch hl-pink" title="Pink"></button>
         <div class="popover-sep"></div>
+        <button id="popover-lookup" class="popover-action popover-wide" title="Look up in the dictionary" hidden>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span>Look up</span>
+        </button>
+        <button id="popover-say" class="popover-action" title="Pronounce" hidden>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+        </button>
         <button id="popover-ai" class="popover-action" title="Copy selection for Claude">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="M12 11l1 2.4 2.4 1-2.4 1L12 18l-1-2.6-2.4-1 2.4-1z"/></svg>
         </button>

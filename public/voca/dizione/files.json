@@ -1,0 +1,23 @@
+[
+ "__init__.py",
+ "align.py",
+ "convert.py",
+ "data/abbreviations.txt",
+ "data/chat.txt",
+ "data/endings.txt",
+ "data/exceptions.txt",
+ "data/function_words.txt",
+ "data/homograph_fixes.txt",
+ "data/homograph_rules.txt",
+ "data/letters.txt",
+ "data/phrases.txt",
+ "data/units.txt",
+ "engine.py",
+ "g2p.py",
+ "homographs.py",
+ "morphology.py",
+ "normalize.py",
+ "sentence.py",
+ "symbols.py",
+ "tables.py"
+]
