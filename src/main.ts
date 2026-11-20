@@ -1514,7 +1514,7 @@ function openSubjectMenu(book: BookRecord, anchor: HTMLElement): void {
   subjectMenuOff = () => { document.removeEventListener('mousedown', onDown, true); document.removeEventListener('keydown', onKey, true); };
 }
 
-type LibraryFilter = 'all' | 'epub' | 'pdf' | 'web' | 'read';
+type LibraryFilter = 'all' | 'epub' | 'pdf' | 'md' | 'web' | 'read';
 type LibrarySort = 'recent' | 'title' | 'author';
 
 let libraryQuery = '';
@@ -1523,6 +1523,12 @@ let librarySort: LibrarySort = 'recent';
 
 function bookFormatOf(book: BookRecord): string {
   return book.format || getBookFormat(book);
+}
+
+/** Markdown and plain-text files share one filter tab. */
+function isTextFormat(book: BookRecord): boolean {
+  const f = bookFormatOf(book);
+  return f === 'md' || f === 'txt';
 }
 
 // When a book was last touched: opened, read further, or added. Opening a
@@ -1542,6 +1548,7 @@ function getVisibleLibrary(): BookRecord[] {
   let list = libraryItems().filter(book => {
     if (libraryFilter === 'read') { if (!book.finishedAt) return false; }
     else if (libraryFilter === 'web' && !book.sourceUrl) return false;
+    else if (libraryFilter === 'md') { if (book.sourceUrl || !isTextFormat(book)) return false; }
     else if (libraryFilter !== 'all' && libraryFilter !== 'web' && (book.sourceUrl || bookFormatOf(book) !== libraryFilter)) return false;
     if (!inSubjectFilter(book, librarySubject)) return false;
     if (!q) return true;
@@ -1566,6 +1573,8 @@ function renderFormatCounts(): void {
   el.filterCountEpub.textContent = String(epub);
   el.filterCountPdf.textContent = String(pdf);
   el.filterCountWeb.textContent = String(web);
+  const mdCount = document.getElementById('filter-count-md');
+  if (mdCount) mdCount.textContent = String(items.filter(b => !b.sourceUrl && isTextFormat(b)).length);
   el.filterCountRead.textContent = String(items.filter(b => !!b.finishedAt).length);
 }
 
@@ -2260,11 +2269,170 @@ function isNewsViewOpen(): boolean {
   return document.querySelector<HTMLElement>('.library-main')?.dataset.view === 'news';
 }
 
+/* ---------- Highlights & bookmarks across every book ---------- */
+
+type MarksKind = 'highlights' | 'bookmarks';
+let marksKind: MarksKind = 'highlights';
+let marksQuery = '';
+let marksColor: HighlightColor | null = null;
+let returnToMarks: MarksKind | null = null;
+
+interface MarkRow { book: BookRecord; mark: Highlight | Bookmark; }
+
+/** Every highlight (or bookmark) of every kept book that matches the search / colour filter. */
+function collectMarks(kind: MarksKind, applyFilters: boolean): { book: BookRecord; items: (Highlight | Bookmark)[] }[] {
+  const q = applyFilters ? marksQuery.trim().toLowerCase() : '';
+  const out: { book: BookRecord; items: (Highlight | Bookmark)[] }[] = [];
+  const books = [...libraryItems()].sort((a, b) => recencyOf(b) - recencyOf(a));
+  for (const book of books) {
+    const m = load<BookMarks>(KEY_MARKS(book.id), { bookmarks: [], highlights: [] });
+    const all: (Highlight | Bookmark)[] = kind === 'highlights' ? (m.highlights || []) : (m.bookmarks || []);
+    const items = all.filter(x => {
+      if (applyFilters && kind === 'highlights' && marksColor && (x as Highlight).color !== marksColor) return false;
+      if (!q) return true;
+      return `${x.text} ${x.chapter} ${book.title} ${book.author || ''}`.toLowerCase().includes(q);
+    }).sort((a, b) => b.createdAt - a.createdAt);
+    if (items.length) out.push({ book, items });
+  }
+  return out;
+}
+
+function marksAsMarkdown(kind: MarksKind): string {
+  const lines: string[] = [`# ${kind === 'highlights' ? 'Highlights' : 'Bookmarks'}`, ''];
+  for (const g of collectMarks(kind, true)) {
+    lines.push(`## ${g.book.title}${g.book.author ? ` — ${g.book.author}` : ''}`, '');
+    for (const x of g.items) {
+      const text = (x.text || '(no preview)').replace(/\s+/g, ' ').trim();
+      lines.push(`> ${text}`);
+      if (x.chapter) lines.push(`> — *${x.chapter}*`);
+      lines.push('');
+    }
+  }
+  return lines.join('\n');
+}
+
+function renderMarks(): void {
+  const list = $<HTMLElement>('marks-list');
+  const chips = $<HTMLElement>('marks-chips');
+  list.innerHTML = '';
+  chips.innerHTML = '';
+  $('marks-title').textContent = marksKind === 'highlights' ? 'Highlights' : 'Bookmarks';
+
+  const everything = collectMarks(marksKind, false);
+  const total = everything.reduce((n, g) => n + g.items.length, 0);
+
+  if (marksKind === 'highlights' && total > 0) {
+    const counts = new Map<HighlightColor, number>();
+    for (const g of everything) for (const x of g.items) counts.set((x as Highlight).color, (counts.get((x as Highlight).color) || 0) + 1);
+    for (const color of Object.keys(HL_SOLID) as HighlightColor[]) {
+      const n = counts.get(color);
+      if (!n) continue;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'subject-chip' + (marksColor === color ? ' active' : '');
+      b.innerHTML = `<span class="marks-dot" style="background:${HL_SOLID[color]}"></span>${n}`;
+      b.title = color;
+      b.addEventListener('click', () => { marksColor = marksColor === color ? null : color; renderMarks(); });
+      chips.appendChild(b);
+    }
+  }
+
+  const groups = collectMarks(marksKind, true);
+  const shown = groups.reduce((n, g) => n + g.items.length, 0);
+  const noun = marksKind === 'highlights' ? 'highlight' : 'bookmark';
+  $('marks-status').textContent = total === 0
+    ? `No ${noun}s yet`
+    : `${shown === total ? total : `${shown} of ${total}`} ${noun}${total === 1 ? '' : 's'} in ${groups.length} ${groups.length === 1 ? 'book' : 'books'}`;
+  ($('marks-export-btn') as HTMLButtonElement).disabled = shown === 0;
+
+  if (shown === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'news-empty';
+    empty.textContent = total === 0
+      ? (marksKind === 'highlights' ? 'Select text while reading and pick a colour; your highlights from every book collect here.' : 'Tap the ribbon icon while reading to bookmark a spot; bookmarks from every book collect here.')
+      : 'Nothing matches that search.';
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const g of groups) {
+    const sec = document.createElement('section');
+    sec.className = 'marks-group';
+    const h = document.createElement('h2');
+    h.className = 'marks-book';
+    h.innerHTML = `<span>${escapeHtml(g.book.title)}</span>${g.book.author ? `<small>${escapeHtml(g.book.author)}</small>` : ''}`;
+    sec.appendChild(h);
+    for (const x of g.items) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'marks-item';
+      const color = (x as Highlight).color;
+      const stripe = marksKind === 'highlights' && color ? ` style="--mark:${HL_SOLID[color]}"` : '';
+      row.innerHTML = `
+        <span class="marks-stripe"${stripe}></span>
+        <span class="marks-body">
+          <span class="marks-text">${escapeHtml(x.text || '(no preview)')}</span>
+          <span class="marks-meta">${escapeHtml(x.chapter || '')}${x.chapter ? ' · ' : ''}${escapeHtml(timeAgo(x.createdAt))}</span>
+        </span>`;
+      row.addEventListener('click', () => { void openMark({ book: g.book, mark: x }); });
+      sec.appendChild(row);
+    }
+    list.appendChild(sec);
+  }
+}
+
+/** Open the book and jump to the saved spot. */
+async function openMark(row: MarkRow): Promise<void> {
+  returnToMarks = marksKind;
+  await openFromLibrary(row.book);
+  // The reader has rendered by the time openFromLibrary resolves, but give
+  // the page layout a beat before scrolling to the anchor.
+  window.setTimeout(() => { if (currentBookRecord?.id === row.book.id) navigateToCfi(row.mark.cfi); }, 350);
+}
+
+function setMarksView(kind: MarksKind | null): void {
+  const main = document.querySelector<HTMLElement>('.library-main');
+  if (!main) return;
+  if (kind) {
+    marksKind = kind;
+    marksColor = null;
+    marksQuery = '';
+    ($('marks-search') as HTMLInputElement).value = '';
+    main.dataset.view = 'marks';
+    $<HTMLElement>('news-view').hidden = true;
+  } else if (main.dataset.view === 'marks') {
+    delete main.dataset.view;
+  }
+  $<HTMLElement>('marks-view').hidden = !kind;
+  document.querySelectorAll<HTMLButtonElement>('.sidebar-nav-item[data-library-nav]').forEach(b => {
+    b.classList.toggle('active', b.dataset.libraryNav === (kind ?? 'library'));
+  });
+  if (kind) { renderMarks(); main.scrollTo({ top: 0 }); }
+}
+
+function wireMarks(): void {
+  ($('marks-search') as HTMLInputElement).addEventListener('input', (e) => {
+    marksQuery = (e.target as HTMLInputElement).value;
+    renderMarks();
+  });
+  $('marks-back-btn').addEventListener('click', () => {
+    setMarksView(null);
+    renderLibrary();
+  });
+  $('marks-export-btn').addEventListener('click', () => {
+    navigator.clipboard.writeText(marksAsMarkdown(marksKind))
+      .then(() => toast('Copied as Markdown'))
+      .catch(() => toast("Couldn't copy to the clipboard"));
+  });
+  document.getElementById('min-highlights-link')?.addEventListener('click', (e) => { e.preventDefault(); setMarksView('highlights'); });
+}
+
 function setNewsView(on: boolean): void {
   const main = document.querySelector<HTMLElement>('.library-main');
   if (!main) return;
   if (on) main.dataset.view = 'news'; else delete main.dataset.view;
   $<HTMLElement>('news-view').hidden = !on;
+  $<HTMLElement>('marks-view').hidden = true;
   document.querySelectorAll<HTMLButtonElement>('.sidebar-nav-item[data-library-nav]').forEach(b => {
     b.classList.toggle('active', b.dataset.libraryNav === (on ? 'news' : 'library'));
   });
@@ -10284,6 +10452,7 @@ function wire() {
   });
 
   wireNews();
+  wireMarks();
   // Tiny Voca runs from files inside the app (nothing is downloaded) but takes a few seconds to start.
   // When it is the chosen voice, start it in the background so it is already up when playback begins.
   if (ttsSettings.engine === 'voca' && !IS_IOS) {
@@ -10298,6 +10467,8 @@ function wire() {
       const nav = item.dataset.libraryNav;
       if (nav === 'news') {
         setNewsView(true);
+      } else if (nav === 'highlights' || nav === 'bookmarks') {
+        setMarksView(nav);
       } else if (nav === 'library') {
         setNewsView(false);
         el.librarySearch.value = '';
@@ -10381,10 +10552,13 @@ function wire() {
     if (isTtsOn()) stopTts();
     flushLibrary();
     const backToNews = returnToNews;
+    const backToMarks = returnToMarks;
     returnToNews = false;
+    returnToMarks = null;
     refreshNewsSaveButton();
     goToScreen('library');
     if (backToNews) setNewsView(true);
+    else if (backToMarks) setMarksView(backToMarks);
   });
 
   el.tocBtn.addEventListener('click', () => openDrawer('toc', 'toc'));

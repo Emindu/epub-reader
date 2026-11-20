@@ -140,6 +140,7 @@
               <button class="format-tab active" data-filter="all" role="tab" aria-selected="true">All <span id="filter-count-all">0</span></button>
               <button class="format-tab" data-filter="epub" role="tab" aria-selected="false">EPUB <span id="filter-count-epub">0</span></button>
               <button class="format-tab" data-filter="pdf" role="tab" aria-selected="false">PDF <span id="filter-count-pdf">0</span></button>
+              <button class="format-tab" data-filter="md" role="tab" aria-selected="false">Markdown <span id="filter-count-md">0</span></button>
               <button class="format-tab" data-filter="web" role="tab" aria-selected="false">Articles <span id="filter-count-web">0</span></button>
               <button class="format-tab" data-filter="read" role="tab" aria-selected="false">Read <span id="filter-count-read">0</span></button>
             </div>
@@ -194,8 +195,24 @@
           <div id="news-chips" class="subject-bar" aria-label="Sources"></div>
           <div id="news-list" class="news-list"></div>
         </section>
+        <section id="marks-view" class="marks-view" aria-label="Highlights and bookmarks" hidden>
+          <header class="news-head">
+            <div class="library-heading">
+              <h1 id="marks-title" class="library-title">Highlights</h1>
+              <p id="marks-status" class="library-subtitle"></p>
+            </div>
+            <div class="library-actions">
+              <button id="marks-export-btn" class="library-action-btn" type="button" title="Copy everything shown as Markdown">Copy as Markdown</button>
+              <button id="marks-back-btn" class="library-action-btn" type="button">Library</button>
+            </div>
+          </header>
+          <input id="marks-search" class="marks-search" type="search" placeholder="Search text, chapter, book" autocomplete="off" spellcheck="false">
+          <div id="marks-chips" class="subject-bar" aria-label="Colours"></div>
+          <div id="marks-list" class="marks-list"></div>
+        </section>
         <div class="min-library-foot">
           <a href="#" id="min-news-link" class="min-link">News</a>
+          <a href="#" id="min-highlights-link" class="min-link">Highlights</a>
           <a href="#" id="min-vocab-link" class="min-link" hidden></a>
           <span class="min-foot-actions">
             <a href="#" id="min-add-book" class="min-link">Add a book</a>

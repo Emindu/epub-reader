@@ -4622,6 +4622,20 @@ html[data-appearance="dark"] ::highlight(hl-purple) { background-color: rgba(196
    News
    ============================================================ */
 .library-main[data-view="news"] > :not(.news-view):not(.min-library-head):not(.min-library-foot) { display: none !important; }
+.library-main[data-view="marks"] > :not(.marks-view):not(.min-library-head):not(.min-library-foot) { display: none !important; }
+.marks-view { display: flex; flex-direction: column; gap: 14px; padding-bottom: 40px; }
+.marks-view[hidden] { display: none; }
+.marks-search { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border, rgba(127,127,127,.3)); background: var(--surface); color: var(--text); font: inherit; }
+.marks-group { margin-top: 8px; }
+.marks-book { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 6px; font-family: var(--font-serif, Georgia, serif); font-size: 17px; font-weight: 600; }
+.marks-book small { font-family: inherit; font-size: 12.5px; font-weight: 400; color: var(--text-muted); }
+.marks-item { display: flex; gap: 12px; width: 100%; text-align: left; padding: 10px 8px; border: 0; border-radius: 8px; background: none; color: inherit; font: inherit; cursor: pointer; }
+.marks-item:hover { background: var(--surface-hover); }
+.marks-stripe { flex: none; width: 4px; border-radius: 2px; background: var(--mark, var(--border, rgba(127,127,127,.4))); }
+.marks-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.marks-text { font-family: var(--font-serif, Georgia, serif); font-size: 15.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+.marks-meta { font-size: 12px; color: var(--text-muted); }
+.marks-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
 .news-view { display: flex; flex-direction: column; gap: 14px; padding-bottom: 40px; }
 .news-view[hidden] { display: none; }
 .news-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
