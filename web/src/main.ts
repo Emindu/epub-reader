@@ -11,7 +11,7 @@ import { marked } from 'marked';
 import { Readability } from '@mozilla/readability';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
-import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule } from './codeblocks';
+import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -1484,7 +1484,7 @@ async function saveArticleFromUrl(rawUrl: string) {
     // DOMPurify strips scripts/handlers by default; the explicit FORBID list
     // additionally drops interactive/embed tags that make no sense in a
     // saved article (forms, iframes, buttons).
-    const cleanHtml = DOMPurify.sanitize(article.content, {
+    const cleanHtml = DOMPurify.sanitize(restoreHeadings(article.content), {
       FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
       FORBID_ATTR: ['style', 'onerror', 'onload'],
     });

@@ -170,7 +170,49 @@ export function prepareCodeForImport(doc: Document): void {
     pre.replaceChildren(flat);
     pre.removeAttribute('class');
     if (lang) pre.setAttribute('data-lang', lang);
+
+    // Readability scores elements by class name and deletes "negative" ones
+    // (anything with scroll / hidden / share / header-anchor ... in a class).
+    // Substack-style code wrappers ("scrollBar-hidden-...") made whole code
+    // blocks vanish, so strip the classes of wrappers that hold only this block.
+    const keep = (pre.textContent ?? '').trim().length;
+    let up = pre.parentElement;
+    while (up && up.tagName !== 'BODY' && up.tagName !== 'ARTICLE' && (up.textContent ?? '').trim().length <= keep + 20) {
+      up.removeAttribute('class');
+      up.removeAttribute('id');
+      up = up.parentElement;
+    }
   });
+
+  // Same problem for headings: sites put anchor-link widgets and utility
+  // classes on them, and Readability drops the "negative" ones, taking the
+  // subtitles with it. Keep the text, drop the decoration.
+  doc.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h0 => {
+    let h = h0;
+    // Readability also deletes any h1/h2 that repeats words of the page title
+    // ("Self-Attention" inside "Understanding and Coding Self-Attention ..."),
+    // so section titles travel as <h3 data-h2> and are put back afterwards.
+    if (h0.tagName === 'H2') {
+      h = doc.createElement('h3');
+      h.setAttribute('data-h2', '');
+      while (h0.firstChild) h.appendChild(h0.firstChild);
+      h0.replaceWith(h);
+    }
+    h.removeAttribute('class');
+    h.removeAttribute('id');
+    h.querySelectorAll('div, button, svg, form').forEach(w => { if (!(w.textContent ?? '').trim()) w.remove(); });
+  });
+}
+
+/** Undo prepareCodeForImport's heading shield on Readability's output HTML. */
+export function restoreHeadings(html: string): string {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('h3[data-h2]').forEach(h3 => {
+    const h2 = doc.createElement('h2');
+    while (h3.firstChild) h2.appendChild(h3.firstChild);
+    h3.replaceWith(h2);
+  });
+  return doc.body.innerHTML;
 }
 
 type TurndownLike = {

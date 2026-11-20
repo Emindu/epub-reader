@@ -77,8 +77,11 @@ function splitSentences(text: string): string[] {
   return parts.map(s => s.trim()).filter(Boolean);
 }
 
+/** One utterance: audio plus when each token starts (seconds from the utterance start). */
+interface Piece { audio: Float32Array; ids: number[]; tokenStarts: number[] }
+
 /** Phonemize and run one utterance; null when there is nothing to pronounce. */
-async function runOne(text: string, voice: number, speed: number): Promise<Float32Array | null> {
+async function runOne(text: string, voice: number, speed: number): Promise<Piece | null> {
   const json = phonemize!(text);
   if (!json) return null;
   const [ids, stress]: [number[], number[]] = JSON.parse(json);
@@ -92,15 +95,55 @@ async function runOne(text: string, voice: number, speed: number): Promise<Float
     pitch_shift: f32(0),
     pitch_range: f32(1),
   });
-  return new Float32Array((out.audio.data as Float32Array));
+  const audio = new Float32Array((out.audio.data as Float32Array));
+  // The model also reports how long each token lasts. Its unit is not assumed:
+  // scale the durations so they add up to the audio that actually came out.
+  const tokenStarts: number[] = [];
+  const dur = out.durations?.data as ArrayLike<number> | undefined;
+  if (dur && dur.length >= ids.length) {
+    let sum = 0;
+    for (let i = 0; i < ids.length; i++) sum += Number(dur[i]);
+    const secPerUnit = sum > 0 ? (audio.length / SAMPLE_RATE) / sum : 0;
+    let acc = 0;
+    for (let i = 0; i < ids.length; i++) { tokenStarts.push(acc * secPerUnit); acc += Number(dur[i]); }
+    tokenStarts.push(acc * secPerUnit);
+  }
+  return { audio, ids, tokenStarts };
 }
 
-async function synth(text: string, voice: number, speed: number): Promise<Float32Array> {
+// Token ids (see dizione/symbols.py): 0-4 specials (4 = unknown phone), 5-16 punctuation, 17+ phones.
+const isSpeechToken = (id: number) => id >= 17 || id === 4;
+
+export interface SynthResult {
+  audio: Float32Array;
+  spoken: Array<[number, number]>;   // [start, end] seconds of each spoken word (a run of phones)
+  tokenStarts: number[];             // start second of every token, then the end; whole text
+}
+
+async function synth(text: string, voice: number, speed: number): Promise<SynthResult> {
   const pieces: Float32Array[] = [];
-  const push = (a: Float32Array | null) => {
-    if (!a) return;
-    if (pieces.length) pieces.push(new Float32Array(PAUSE_SAMPLES));
-    pieces.push(a);
+  const spoken: Array<[number, number]> = [];
+  const tokenStarts: number[] = [];
+  let clock = 0;   // seconds of audio placed so far
+  const push = (p: Piece | null) => {
+    if (!p) return;
+    if (pieces.length) { pieces.push(new Float32Array(PAUSE_SAMPLES)); clock += PAUSE_SAMPLES / SAMPLE_RATE; }
+    const ts = p.tokenStarts;
+    if (ts.length === p.ids.length + 1) {
+      let runStart = -1;
+      for (let i = 0; i < p.ids.length; i++) {
+        const sp = isSpeechToken(p.ids[i]);
+        if (sp && runStart < 0) runStart = i;
+        if (runStart >= 0 && (!sp || i === p.ids.length - 1)) {
+          const endTok = sp ? i + 1 : i;
+          spoken.push([clock + ts[runStart], clock + ts[endTok]]);
+          runStart = -1;
+        }
+      }
+      for (let i = 0; i < p.ids.length; i++) tokenStarts.push(clock + ts[i]);
+    }
+    pieces.push(p.audio);
+    clock += p.audio.length / SAMPLE_RATE;
   };
   const whole = await runOne(text, voice, speed);
   if (whole !== undefined) {
@@ -121,7 +164,8 @@ async function synth(text: string, voice: number, speed: number): Promise<Float3
   const audio = new Float32Array(total || Math.round(SAMPLE_RATE * 0.15));   // silence if nothing was said
   let at = 0;
   for (const p of pieces) { audio.set(p, at); at += p.length; }
-  return audio;
+  tokenStarts.push(audio.length / SAMPLE_RATE);
+  return { audio, spoken, tokenStarts };
 }
 
 ctx.onmessage = async (event: MessageEvent) => {
@@ -134,8 +178,8 @@ ctx.onmessage = async (event: MessageEvent) => {
       ctx.postMessage({ type: 'ready', id: msg.id });
     } else if (msg.type === 'synth') {
       await initPromise;
-      const audio = await synth(msg.text, msg.voice, msg.speed);
-      ctx.postMessage({ type: 'audio', id: msg.id, audio, sampleRate: SAMPLE_RATE }, [audio.buffer]);
+      const r = await synth(msg.text, msg.voice, msg.speed);
+      ctx.postMessage({ type: 'audio', id: msg.id, audio: r.audio, spoken: r.spoken, tokenStarts: r.tokenStarts, sampleRate: SAMPLE_RATE }, [r.audio.buffer]);
     }
   } catch (err) {
     initPromise = msg.type === 'init' ? null : initPromise;

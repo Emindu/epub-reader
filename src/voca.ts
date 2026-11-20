@@ -66,15 +66,28 @@ export function wavFromFloat32(samples: Float32Array, sampleRate: number): Uint8
   return out;
 }
 
+/** What the model says about when things are spoken. Times are seconds in the audio. */
+export interface VocaTiming {
+  spoken: Array<[number, number]>;   // start/end of each spoken word, in order
+  tokenStarts: number[];             // start of every phoneme/punctuation token, then the end
+}
+
+export interface VocaSamples extends Partial<VocaTiming> { audio: Float32Array; sampleRate: number }
+
 /** Synthesizes `text` to raw mono samples. `speed` 1 = the voice's natural pace. */
-export async function vocaSynthesizeSamples(text: string, voice: VocaVoice, speed = 1): Promise<{ audio: Float32Array; sampleRate: number }> {
+export async function vocaSynthesizeSamples(text: string, voice: VocaVoice, speed = 1): Promise<VocaSamples> {
   await startVoca();
-  return request<{ audio: Float32Array; sampleRate: number }>(
-    { type: 'synth', text, voice: voice === 'M2' ? 1 : 0, speed });
+  return request<VocaSamples>({ type: 'synth', text, voice: voice === 'M2' ? 1 : 0, speed });
 }
 
 /** Synthesizes `text` and returns a 16-bit mono WAV. */
 export async function vocaSynthesize(text: string, voice: VocaVoice, speed = 1): Promise<Uint8Array> {
+  return (await vocaSynthesizeTimed(text, voice, speed)).wav;
+}
+
+/** Like vocaSynthesize, plus the model's own timing so the highlight can follow the speech exactly. */
+export async function vocaSynthesizeTimed(text: string, voice: VocaVoice, speed = 1): Promise<{ wav: Uint8Array; timing: VocaTiming | null }> {
   const m = await vocaSynthesizeSamples(text, voice, speed);
-  return wavFromFloat32(m.audio, m.sampleRate);
+  const timing = m.spoken && m.tokenStarts && m.tokenStarts.length > 1 ? { spoken: m.spoken, tokenStarts: m.tokenStarts } : null;
+  return { wav: wavFromFloat32(m.audio, m.sampleRate), timing };
 }
