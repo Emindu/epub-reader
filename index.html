@@ -38,6 +38,11 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4z"/></svg>
             <span>Bookmarks</span>
           </button>
+          <button class="sidebar-nav-item" data-library-nav="news" title="News from your RSS feeds">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13a1 1 0 0 1 1 1v13H6a2 2 0 0 1-2-2z"/><path d="M18 9h2v8a2 2 0 0 1-2 2"/><path d="M8 9h6M8 13h6M8 16h3"/></svg>
+            <span>News</span>
+            <span id="nav-news-count" class="sidebar-due-badge" hidden>0</span>
+          </button>
           <button id="library-vocab-review-btn" class="sidebar-nav-item sidebar-vocab-item" title="Review vocabulary across all books">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V6a2 2 0 0 1 2-2h12v13H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 0 2 2h12"/><path d="M9 9h5"/></svg>
             <span>Vocabulary</span>
@@ -144,6 +149,9 @@
             </button>
           </div>
 
+          <!-- Subjects -->
+          <div id="subject-bar" class="subject-bar" aria-label="Subjects"></div>
+
           <!-- Empty state -->
           <div id="library-empty" class="library-empty">
             <div class="empty-illustration">
@@ -160,7 +168,34 @@
           <!-- Book grid -->
           <div id="library-grid" class="library-grid" hidden></div>
         </section>
+        <section id="news-view" class="news-view" aria-label="News" hidden>
+          <header class="news-head">
+            <div class="library-heading">
+              <h1 class="library-title">News</h1>
+              <p id="news-status" class="library-subtitle">Not refreshed yet</p>
+            </div>
+            <div class="library-actions">
+              <button id="news-refresh-btn" class="library-action-btn" type="button" title="Fetch the latest from every source">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.9-3M4 5v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3M20 19v-4h-4"/></svg>
+                <span>Refresh</span>
+              </button>
+              <button id="news-sources-btn" class="library-action-btn" type="button">Sources</button>
+              <button id="news-back-btn" class="library-action-btn" type="button">Library</button>
+            </div>
+          </header>
+          <div id="news-sources" class="news-sources" hidden>
+            <div id="news-source-list"></div>
+            <form id="news-add-form" class="news-add-form">
+              <input id="news-add-input" type="url" placeholder="Add a feed: https://example.com/feed/" autocomplete="off" spellcheck="false">
+              <button class="library-action-btn" type="submit">Add</button>
+            </form>
+            <p id="news-add-status" class="news-add-status" hidden></p>
+          </div>
+          <div id="news-chips" class="subject-bar" aria-label="Sources"></div>
+          <div id="news-list" class="news-list"></div>
+        </section>
         <div class="min-library-foot">
+          <a href="#" id="min-news-link" class="min-link">News</a>
           <a href="#" id="min-vocab-link" class="min-link" hidden></a>
           <span class="min-foot-actions">
             <a href="#" id="min-add-book" class="min-link">Add a book</a>
@@ -222,6 +257,9 @@
             </button>
             <button id="pdf-dict-btn" class="topbar-icon-btn" title="Look up a word (copy it from the PDF first, then click here)">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h5"/></svg>
+            </button>
+            <button id="save-news-btn" class="topbar-icon-btn" title="Save this article to your library" hidden>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>
             </button>
             <button id="mark-read-btn" class="topbar-icon-btn" title="Mark as read">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12.5 3 3 5-6"/></svg>
@@ -520,6 +558,12 @@
           <input type="checkbox" id="tts-natural-rate" />
           <span>Natural</span>
         </label>
+        <button id="tts-hl-btn" class="focus-btn tts-hl-btn" title="Highlight style: box" aria-label="Highlight style">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h9"/><path d="M4 17h16"/><rect x="12" y="9.5" width="6" height="5" rx="1" fill="currentColor" stroke="none" opacity=".35"/></svg>
+        </button>
+        <button id="tts-tw-btn" class="focus-btn tts-tw-btn" title="Typewriter scrolling: off" aria-label="Typewriter scrolling" aria-pressed="false">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 18h16" opacity=".5"/><path d="M4 12h16"/><path d="M2 12l2-2v4z" fill="currentColor"/></svg>
+        </button>
         <button id="tts-cache-btn" class="focus-btn tts-cache-btn" title="Cache this chapter for instant audiobook-style playback" hidden>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
         </button>
@@ -564,8 +608,11 @@
               <option value="30">30 min</option>
               <option value="45">45 min</option>
               <option value="60">60 min</option>
+              <option value="-1">End of paragraph</option>
+              <option value="-2">End of chapter</option>
             </select>
           </label>
+          <button id="tts-pron-btn" class="ghost-btn tts-pron-link" type="button">Pronunciations…</button>
           <p class="tts-tune-hint">← / → jump by sentence · Shift + ← / → by paragraph</p>
         </div>
       </div>
@@ -666,6 +713,11 @@
         <button data-color="green" class="hl-swatch hl-green" title="Green"></button>
         <button data-color="blue" class="hl-swatch hl-blue" title="Blue"></button>
         <button data-color="pink" class="hl-swatch hl-pink" title="Pink"></button>
+        <button data-color="orange" class="hl-swatch hl-orange" title="Orange"></button>
+        <button data-color="purple" class="hl-swatch hl-purple" title="Purple"></button>
+        <div class="popover-sep"></div>
+        <button id="popover-word" class="popover-action popover-wide" title="Select the whole word">Word</button>
+        <button id="popover-sentence" class="popover-action popover-wide" title="Select the whole sentence">Sentence</button>
         <div class="popover-sep"></div>
         <button id="popover-lookup" class="popover-action popover-wide" title="Look up in the dictionary" hidden>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
@@ -950,6 +1002,55 @@
           </form>
           <div id="url-import-status" class="url-import-status" hidden></div>
         </div>
+      </div>
+    </div>
+
+    <!-- Subject create / edit -->
+    <div id="pron-modal" class="modal-backdrop" hidden>
+      <div class="modal-container subject-container">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <h3>Pronunciations</h3>
+            <p>One per line: <code>word = how to say it</code>. Applies to every book.</p>
+          </div>
+          <div class="modal-header-right">
+            <button id="pron-close-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="modal-body subject-body">
+          <textarea id="pron-text" class="url-import-input pron-text" rows="9" spellcheck="false" placeholder="Hermione = her my oh nee&#10;Nguyen = win&#10;SQL = sequel"></textarea>
+          <div class="subject-actions">
+            <span class="subject-actions-spacer"></span>
+            <button id="pron-save-btn" type="button" class="pill-btn"><span>Save</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="subject-modal" class="modal-backdrop" hidden>
+      <div class="modal-container subject-container">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <h3 id="subject-modal-title">New subject</h3>
+            <p>Group books, PDFs and articles under a topic of your own.</p>
+          </div>
+          <div class="modal-header-right">
+            <button id="subject-close-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <form id="subject-form" class="modal-body subject-body">
+          <input type="text" id="subject-name" class="url-import-input" placeholder="e.g. Machine Learning" maxlength="40" autocomplete="off" spellcheck="false" required>
+          <div id="subject-colors" class="subject-colors" role="radiogroup" aria-label="Colour"></div>
+          <div class="subject-actions">
+            <button type="button" id="subject-delete-btn" class="ghost-btn subject-delete" hidden>Delete subject</button>
+            <span class="subject-actions-spacer"></span>
+            <button type="submit" class="pill-btn"><span>Save</span></button>
+          </div>
+        </form>
       </div>
     </div>
 

@@ -10,8 +10,9 @@ import { marked } from 'marked';
 import { Readability } from '@mozilla/readability';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
-import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule } from './codeblocks';
-import { VOCA_VOICES, VocaVoice, isVocaReady, startVoca, vocaSynthesize, vocaSynthesizeSamples, wavFromFloat32, setVocaProgressListener, setVocaReadyListener } from './voca';
+import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
+import { CATEGORY_ORDER, DEFAULT_FEEDS, NewsFeed, NewsItem, parseFeed, timeAgo } from './news';
+import { VOCA_VOICES, VocaVoice, isVocaReady, startVoca, vocaSynthesize, vocaSynthesizeTimed, vocaSynthesizeSamples, wavFromFloat32, VocaTiming, setVocaProgressListener, setVocaReadyListener } from './voca';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -28,7 +29,19 @@ type LineKind = 'compact' | 'normal' | 'relaxed';
 type MarginKind = 'narrow' | 'medium' | 'wide';
 type MeasureKind = 'full' | 'ch60' | 'ch70' | 'ch80';
 type LayoutKind = 'paginated' | 'spread' | 'scroll';
-type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
+type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink' | 'orange' | 'purple';
+const HL_COLORS: HighlightColor[] = ['yellow', 'green', 'blue', 'pink', 'orange', 'purple'];
+const HL_RGBA: Record<HighlightColor, string> = {
+  yellow: 'rgba(253, 230, 138, 0.55)',
+  green:  'rgba(187, 247, 208, 0.55)',
+  blue:   'rgba(191, 219, 254, 0.55)',
+  pink:   'rgba(251, 207, 232, 0.55)',
+  orange: 'rgba(253, 186, 116, 0.55)',
+  purple: 'rgba(221, 214, 254, 0.65)',
+};
+const HL_SOLID: Record<HighlightColor, string> = {
+  yellow: '#fde68a', green: '#bbf7d0', blue: '#bfdbfe', pink: '#fbcfe8', orange: '#fdba74', purple: '#ddd6fe',
+};
 type FocusTracker = 'off' | 'word' | 'sentence';
 type ParagraphKind = 'original' | 'indent' | 'spaced';
 // Each kind of reading keeps its own typography: a novel wants a serif with
@@ -82,6 +95,9 @@ interface BookRecord {
   sourceUrl?: string;               // present for web articles saved via "Read mode"
   lastOpenedAt?: number;            // stamped every time the book is opened (drives "recently opened")
   finishedAt?: number;              // set when the user marks the book / article as read
+  subjectIds?: string[];            // user-defined subjects this item is filed under
+  newsTemp?: boolean;               // opened from News, not saved: hidden from the library
+  expiresAt?: number;               // newsTemp records are deleted after this time
 }
 
 interface Bookmark {
@@ -260,7 +276,73 @@ function matchingPreset(): ReadingProfile | null {
   }
   return null;
 }
-const persistLibrary = () => save(KEY_LIBRARY, library);
+/** Re-encode a cover as a small JPEG so the library list stays well inside the ~5 MB localStorage quota. */
+function compressCover(dataUrl: string, maxWidth = 240): Promise<string> {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxWidth / (img.naturalWidth || maxWidth));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { resolve(dataUrl); return; }
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const out = canvas.toDataURL('image/jpeg', 0.8);
+        resolve(out.length < dataUrl.length ? out : dataUrl);
+      } catch { resolve(dataUrl); }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+let coversShrinking: Promise<void> | null = null;
+/** Shrink any oversized covers already in the library (one-off for older imports). */
+function shrinkLibraryCovers(): Promise<void> {
+  if (!coversShrinking) {
+    coversShrinking = (async () => {
+      for (const b of library) {
+        if (b.coverDataUrl && b.coverDataUrl.length > 30000) b.coverDataUrl = await compressCover(b.coverDataUrl);
+      }
+    })().finally(() => { coversShrinking = null; });
+  }
+  return coversShrinking;
+}
+
+/** Progress changes fire on every scroll tick; writing the whole library (covers included) each time makes the reader stutter. */
+let persistTimer = 0;
+const persistLibrarySoon = () => {
+  if (persistTimer) return;
+  persistTimer = window.setTimeout(() => { persistTimer = 0; persistLibrary(); }, 600);
+};
+const flushLibrary = () => {
+  if (!persistTimer) return;
+  clearTimeout(persistTimer);
+  persistTimer = 0;
+  persistLibrary();
+};
+window.addEventListener('beforeunload', flushLibrary);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushLibrary(); });
+
+let quotaToastShown = false;
+const persistLibrary = () => {
+  try {
+    save(KEY_LIBRARY, library);
+  } catch (err) {
+    console.warn('persistLibrary: storage full, shrinking covers', err);
+    void shrinkLibraryCovers().then(() => {
+      try { save(KEY_LIBRARY, library); }
+      catch (err2) {
+        console.error('persistLibrary failed after shrinking:', err2);
+        if (!quotaToastShown) { quotaToastShown = true; toast('Storage is full — remove some saved articles or books'); }
+      }
+    });
+  }
+};
 
 const KEY_STATS = 'read.stats';
 let stats = load<ReadingStats>(KEY_STATS, {
@@ -800,7 +882,7 @@ function toast(message: string) {
   el.toast.textContent = message;
   el.toast.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => { el.toast.hidden = true; }, 1800);
+  toastTimer = window.setTimeout(() => { el.toast.hidden = true; }, message.length > 40 ? 6000 : 1800);
 }
 
 /* ============================================================
@@ -1142,10 +1224,12 @@ function cycleTheme() {
    Library rendering
    ============================================================ */
 function renderLibrary() {
-  const count = library.length;
+  const count = libraryItems().length;
   el.libraryCount.textContent = `${count} title${count === 1 ? '' : 's'}`;
   if (el.navLibraryCount) el.navLibraryCount.textContent = String(count);
 
+  if (librarySubject && librarySubject !== SUBJECT_NONE && !subjects.some(x => x.id === librarySubject)) librarySubject = null;
+  renderSubjectBar();
   refreshLibraryVocabButton();
   renderContinueReading();
   renderFormatCounts();
@@ -1174,9 +1258,260 @@ function renderLibrary() {
   el.libraryGrid.hidden = false;
   el.libraryGrid.innerHTML = '';
 
+  if (groupBySubject && !librarySubject && subjects.length > 0) {
+    const addGroup = (title: string, color: string | null, books: BookRecord[]) => {
+      if (books.length === 0) return;
+      const head = document.createElement('div');
+      head.className = 'library-group-head';
+      if (color) { const dot = document.createElement('span'); dot.className = 'subject-dot'; dot.style.background = color; head.appendChild(dot); }
+      const name = document.createElement('span');
+      name.textContent = title;
+      const n = document.createElement('span');
+      n.className = 'library-group-count';
+      n.textContent = String(books.length);
+      head.append(name, n);
+      el.libraryGrid.appendChild(head);
+      for (const b of books) el.libraryGrid.appendChild(renderBookCard(b));
+    };
+    for (const sub of subjects) addGroup(sub.name, sub.color, visible.filter(b => b.subjectIds?.includes(sub.id)));
+    addGroup('Unsorted', null, visible.filter(b => !(b.subjectIds || []).some(id => subjects.some(x => x.id === id))));
+    return;
+  }
+
   for (const book of visible) {
     el.libraryGrid.appendChild(renderBookCard(book));
   }
+}
+
+/* ============================================================
+   Subjects — user-defined groups for library items
+   ============================================================ */
+interface Subject { id: string; name: string; color: string }
+const KEY_SUBJECTS = 'read.subjects';
+const KEY_GROUP_BY_SUBJECT = 'read.library.groupBySubject';
+const SUBJECT_NONE = '__none';
+const SUBJECT_COLORS = ['#3B6FD8', '#2E9B6A', '#C2562F', '#8A4FBF', '#C79A1B', '#D1467E', '#2B8FA3', '#6B7280'];
+let subjects: Subject[] = load<Subject[]>(KEY_SUBJECTS, []);
+let librarySubject: string | null = null;           // subject id, SUBJECT_NONE, or null = everything
+let groupBySubject = load<boolean>(KEY_GROUP_BY_SUBJECT, false);
+let subjectEditId: string | null = null;            // subject being edited in the dialog
+let subjectAssignBookId: string | null = null;      // book to file under a subject created from the menu
+let subjectPickColor = SUBJECT_COLORS[0];
+
+const persistSubjects = () => save(KEY_SUBJECTS, subjects);
+
+function bookSubjectList(book: BookRecord): Subject[] {
+  return (book.subjectIds || []).map(id => subjects.find(x => x.id === id)).filter((x): x is Subject => !!x);
+}
+
+function inSubjectFilter(book: BookRecord, filter: string | null): boolean {
+  if (!filter) return true;
+  if (filter === SUBJECT_NONE) return bookSubjectList(book).length === 0;
+  return !!book.subjectIds?.includes(filter);
+}
+
+function renderSubjectBar(): void {
+  const bar = document.getElementById('subject-bar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const chip = (cls: string, label: string, onClick: () => void): HTMLButtonElement => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'subject-chip ' + cls;
+    b.addEventListener('click', onClick);
+    if (label) { const t = document.createElement('span'); t.textContent = label; b.appendChild(t); }
+    return b;
+  };
+
+  for (const sub of subjects) {
+    const active = librarySubject === sub.id;
+    const b = chip(active ? 'active' : '', '', () => { librarySubject = active ? null : sub.id; renderLibrary(); });
+    const dot = document.createElement('span');
+    dot.className = 'subject-dot';
+    dot.style.background = sub.color;
+    const name = document.createElement('span');
+    name.textContent = sub.name;
+    const count = document.createElement('span');
+    count.className = 'subject-chip-count';
+    count.textContent = String(library.filter(x => x.subjectIds?.includes(sub.id)).length);
+    b.append(dot, name, count);
+    b.setAttribute('aria-pressed', String(active));
+    bar.appendChild(b);
+    if (active) {
+      const edit = chip('subject-chip-edit', '', () => openSubjectModal(sub.id));
+      edit.title = 'Rename, recolour or delete this subject';
+      edit.setAttribute('aria-label', edit.title);
+      edit.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+      bar.appendChild(edit);
+    }
+  }
+
+  if (subjects.length > 0) {
+    const un = librarySubject === SUBJECT_NONE;
+    const b = chip(un ? 'active' : '', 'Unsorted', () => { librarySubject = un ? null : SUBJECT_NONE; renderLibrary(); });
+    b.setAttribute('aria-pressed', String(un));
+    bar.appendChild(b);
+  }
+
+  const add = chip('subject-chip-add', subjects.length ? '' : 'Add a subject', () => openSubjectModal(null));
+  add.title = 'New subject';
+  add.insertAdjacentHTML('afterbegin', '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>');
+  bar.appendChild(add);
+
+  if (subjects.length > 0 && !librarySubject) {
+    const g = chip('subject-chip-group' + (groupBySubject ? ' active' : ''), 'Group by subject', () => {
+      groupBySubject = !groupBySubject;
+      save(KEY_GROUP_BY_SUBJECT, groupBySubject);
+      renderLibrary();
+    });
+    g.setAttribute('aria-pressed', String(groupBySubject));
+    bar.appendChild(g);
+  }
+}
+
+function openSubjectModal(editId: string | null, assignBookId: string | null = null): void {
+  closeSubjectMenu();
+  subjectEditId = editId;
+  subjectAssignBookId = assignBookId;
+  const sub = editId ? subjects.find(x => x.id === editId) : undefined;
+  (document.getElementById('subject-modal-title') as HTMLElement).textContent = sub ? 'Edit subject' : 'New subject';
+  const name = document.getElementById('subject-name') as HTMLInputElement;
+  name.value = sub?.name || '';
+  subjectPickColor = sub?.color || SUBJECT_COLORS[subjects.length % SUBJECT_COLORS.length];
+  (document.getElementById('subject-delete-btn') as HTMLElement).hidden = !sub;
+  renderSubjectColors();
+  (document.getElementById('subject-modal') as HTMLElement).hidden = false;
+  setTimeout(() => { name.focus(); name.select(); }, 30);
+}
+
+function closeSubjectModal(): void {
+  (document.getElementById('subject-modal') as HTMLElement).hidden = true;
+}
+
+function renderSubjectColors(): void {
+  const box = document.getElementById('subject-colors');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const c of SUBJECT_COLORS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'subject-swatch' + (c === subjectPickColor ? ' on' : '');
+    b.style.background = c;
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(c === subjectPickColor));
+    b.setAttribute('aria-label', c);
+    b.addEventListener('click', () => { subjectPickColor = c; renderSubjectColors(); });
+    box.appendChild(b);
+  }
+}
+
+function saveSubjectFromModal(): void {
+  const name = (document.getElementById('subject-name') as HTMLInputElement).value.trim().replace(/\s+/g, ' ');
+  if (!name) return;
+  const dupe = subjects.find(x => x.name.toLowerCase() === name.toLowerCase() && x.id !== subjectEditId);
+  if (dupe) { toast('A subject with that name already exists'); return; }
+  if (subjectEditId) {
+    const sub = subjects.find(x => x.id === subjectEditId);
+    if (sub) { sub.name = name; sub.color = subjectPickColor; }
+  } else {
+    const sub: Subject = { id: 'sub-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, color: subjectPickColor };
+    subjects.push(sub);
+    const target = subjectAssignBookId ? library.find(b => b.id === subjectAssignBookId) : undefined;
+    if (target) { target.subjectIds = [...(target.subjectIds || []), sub.id]; persistLibrary(); }
+  }
+  persistSubjects();
+  closeSubjectModal();
+  renderLibrary();
+}
+
+function deleteSubjectFromModal(): void {
+  if (!subjectEditId) return;
+  const id = subjectEditId;
+  const sub = subjects.find(x => x.id === id);
+  if (!sub) return;
+  const n = library.filter(b => b.subjectIds?.includes(id)).length;
+  if (!window.confirm(`Delete the subject "${sub.name}"? The ${n} item${n === 1 ? '' : 's'} in it stay in your library.`)) return;
+  subjects = subjects.filter(x => x.id !== id);
+  for (const b of library) if (b.subjectIds?.includes(id)) b.subjectIds = b.subjectIds.filter(x => x !== id);
+  if (librarySubject === id) librarySubject = null;
+  persistSubjects();
+  persistLibrary();
+  closeSubjectModal();
+  renderLibrary();
+}
+
+let subjectMenuEl: HTMLElement | null = null;
+let subjectMenuOff: (() => void) | null = null;
+
+function closeSubjectMenu(): void {
+  subjectMenuEl?.remove();
+  subjectMenuEl = null;
+  subjectMenuOff?.();
+  subjectMenuOff = null;
+}
+
+// Small popover on a book card: tick the subjects the item belongs to.
+function openSubjectMenu(book: BookRecord, anchor: HTMLElement): void {
+  closeSubjectMenu();
+  const menu = document.createElement('div');
+  menu.className = 'subject-menu';
+  menu.setAttribute('role', 'menu');
+  subjectMenuEl = menu;
+
+  const fill = () => {
+    menu.innerHTML = '';
+    const head = document.createElement('div');
+    head.className = 'subject-menu-head';
+    head.textContent = 'File under';
+    menu.appendChild(head);
+    for (const sub of subjects) {
+      const on = !!book.subjectIds?.includes(sub.id);
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'subject-menu-row' + (on ? ' on' : '');
+      row.setAttribute('role', 'menuitemcheckbox');
+      row.setAttribute('aria-checked', String(on));
+      const dot = document.createElement('span');
+      dot.className = 'subject-dot';
+      dot.style.background = sub.color;
+      const label = document.createElement('span');
+      label.className = 'subject-menu-label';
+      label.textContent = sub.name;
+      const tick = document.createElement('span');
+      tick.className = 'subject-menu-tick';
+      tick.textContent = on ? '✓' : '';
+      row.append(dot, label, tick);
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const cur = new Set(book.subjectIds || []);
+        if (cur.has(sub.id)) cur.delete(sub.id); else cur.add(sub.id);
+        book.subjectIds = [...cur];
+        persistLibrary();
+        renderLibrary();
+        fill();
+      });
+      menu.appendChild(row);
+    }
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'subject-menu-row subject-menu-new';
+    add.textContent = '+ New subject…';
+    add.addEventListener('click', (e) => { e.stopPropagation(); openSubjectModal(null, book.id); });
+    menu.appendChild(add);
+  };
+  fill();
+  document.body.appendChild(menu);
+
+  const r = anchor.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+  menu.style.top = (r.bottom + 6 + h > window.innerHeight ? Math.max(8, r.top - h - 6) : r.bottom + 6) + 'px';
+
+  const onDown = (e: Event) => { if (!menu.contains(e.target as Node)) closeSubjectMenu(); };
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSubjectMenu(); };
+  setTimeout(() => document.addEventListener('mousedown', onDown, true), 0);
+  document.addEventListener('keydown', onKey, true);
+  subjectMenuOff = () => { document.removeEventListener('mousedown', onDown, true); document.removeEventListener('keydown', onKey, true); };
 }
 
 type LibraryFilter = 'all' | 'epub' | 'pdf' | 'web' | 'read';
@@ -1193,16 +1528,22 @@ function bookFormatOf(book: BookRecord): string {
 // When a book was last touched: opened, read further, or added. Opening a
 // book without turning a page still counts (lastOpenedAt), and records from
 // before that field existed fall back to updatedAt.
+/** Everything the user has kept: excludes articles opened from News but not saved. */
+function libraryItems(): BookRecord[] {
+  return library.filter(b => !b.newsTemp);
+}
+
 function recencyOf(b: BookRecord): number {
   return Math.max(b.lastOpenedAt || 0, b.updatedAt || 0, b.addedAt || 0);
 }
 
 function getVisibleLibrary(): BookRecord[] {
   const q = libraryQuery.trim().toLowerCase();
-  let list = library.filter(book => {
+  let list = libraryItems().filter(book => {
     if (libraryFilter === 'read') { if (!book.finishedAt) return false; }
     else if (libraryFilter === 'web' && !book.sourceUrl) return false;
     else if (libraryFilter !== 'all' && libraryFilter !== 'web' && (book.sourceUrl || bookFormatOf(book) !== libraryFilter)) return false;
+    if (!inSubjectFilter(book, librarySubject)) return false;
     if (!q) return true;
     return `${book.title} ${book.author || ''}`.toLowerCase().includes(q);
   });
@@ -1217,14 +1558,15 @@ function getVisibleLibrary(): BookRecord[] {
 
 function renderFormatCounts(): void {
   if (!el.filterCountAll) return;
-  const web = library.filter(b => !!b.sourceUrl).length;
-  const epub = library.filter(b => !b.sourceUrl && bookFormatOf(b) === 'epub').length;
-  const pdf = library.filter(b => !b.sourceUrl && bookFormatOf(b) === 'pdf').length;
-  el.filterCountAll.textContent = String(library.length);
+  const items = libraryItems();
+  const web = items.filter(b => !!b.sourceUrl).length;
+  const epub = items.filter(b => !b.sourceUrl && bookFormatOf(b) === 'epub').length;
+  const pdf = items.filter(b => !b.sourceUrl && bookFormatOf(b) === 'pdf').length;
+  el.filterCountAll.textContent = String(items.length);
   el.filterCountEpub.textContent = String(epub);
   el.filterCountPdf.textContent = String(pdf);
   el.filterCountWeb.textContent = String(web);
-  el.filterCountRead.textContent = String(library.filter(b => !!b.finishedAt).length);
+  el.filterCountRead.textContent = String(items.filter(b => !!b.finishedAt).length);
 }
 
 const BOOK_COVER_PALETTES = [
@@ -1246,7 +1588,7 @@ function coverPalette(key: string): { bg: string; font: string } {
 
 function renderContinueReading(): void {
   if (!el.continueReading) return;
-  const started = [...library]
+  const started = libraryItems()
     .filter(b => b.progress > 0 && !b.finishedAt)
     .sort((a, b) => recencyOf(b) - recencyOf(a));
 
@@ -1320,11 +1662,13 @@ function refreshLibraryVocabButton(): void {
   el.libraryVocabReviewBtn.hidden = false;
   el.libraryVocabCount.hidden = capped === 0;
   el.libraryVocabCount.textContent = `${capped} due`;
+  const scopeName = librarySubject === SUBJECT_NONE ? 'Unsorted' : subjects.find(x => x.id === librarySubject)?.name;
+  const scopeNote = scopeName ? ` in "${scopeName}"` : '';
   el.libraryVocabReviewBtn.title = capped === 0
-    ? 'No vocabulary due right now'
+    ? `No vocabulary due right now${scopeNote}`
     : dueTotal > capped
       ? `${capped} of ${dueTotal} due — the rest wait until tomorrow (${NEW_CARDS_PER_DAY_CAP}/day cap)`
-      : `${capped} card${capped === 1 ? '' : 's'} due for review`;
+      : `${capped} card${capped === 1 ? '' : 's'} due for review${scopeNote}`;
   el.minVocabLink.hidden = capped === 0;
   el.minVocabLink.textContent = `${capped} word${capped === 1 ? '' : 's'} to review`;
 }
@@ -1380,6 +1724,17 @@ function renderBookCard(book: BookRecord): HTMLElement {
   });
   cover.appendChild(remove);
 
+  const subjBtn = document.createElement('button');
+  subjBtn.className = 'book-subject-btn';
+  subjBtn.title = 'File under a subject';
+  subjBtn.setAttribute('aria-label', subjBtn.title);
+  subjBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.2"/></svg>';
+  subjBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSubjectMenu(book, subjBtn);
+  });
+  cover.appendChild(subjBtn);
+
   const readBtn = document.createElement('button');
   readBtn.className = 'book-read-toggle' + (book.finishedAt ? ' on' : '');
   readBtn.title = book.finishedAt ? 'Mark as unread' : 'Mark as read';
@@ -1408,6 +1763,24 @@ function renderBookCard(book: BookRecord): HTMLElement {
   author.textContent = book.author || 'Unknown';
   meta.appendChild(title);
   meta.appendChild(author);
+  const bookSubs = bookSubjectList(book);
+  if (bookSubs.length) {
+    const tags = document.createElement('div');
+    tags.className = 'book-subject-tags';
+    for (const sub of bookSubs) {
+      const t = document.createElement('span');
+      t.className = 'book-subject-tag';
+      t.title = sub.name;
+      const d = document.createElement('span');
+      d.className = 'subject-dot';
+      d.style.background = sub.color;
+      const n = document.createElement('span');
+      n.textContent = sub.name;
+      t.append(d, n);
+      tags.appendChild(t);
+    }
+    meta.appendChild(tags);
+  }
   const minMeta = document.createElement('span');
   minMeta.className = 'book-min-meta';
   minMeta.textContent = `${book.sourceUrl ? 'Article' : fmt.toUpperCase()} · ${book.finishedAt ? 'Read' : book.progress > 0 ? Math.round(book.progress * 100) + '%' : 'New'}`;
@@ -1449,7 +1822,7 @@ function refreshReadButton(): void {
   el.markReadBtn.title = done ? 'Marked as read — click to mark unread' : 'Mark as read';
 }
 
-function removeBook(id: string) {
+function removeBook(id: string, quiet = false) {
   const rec = library.find(b => b.id === id);
   library = library.filter(b => b.id !== id);
   localStorage.removeItem(KEY_MARKS(id));
@@ -1466,7 +1839,7 @@ function removeBook(id: string) {
   // scattered under AppData.
   invoke('piper_cache_delete_book', { bookId: id })
     .catch(err => console.warn(`removeBook: cache cleanup failed: ${err}`));
-  toast('Removed from library');
+  if (!quiet) toast('Removed from library');
 }
 
 /* ============================================================
@@ -1592,7 +1965,7 @@ async function importBook() {
       author = (meta.creator as unknown as string) || '';
       try {
         const coverUrl = await tempBook.coverUrl();
-        if (coverUrl) coverDataUrl = await urlToDataUrl(coverUrl);
+        if (coverUrl) coverDataUrl = await compressCover(await urlToDataUrl(coverUrl));
       } catch { /* no cover */ }
       tempBook.destroy();
     } else if (format === 'pdf') {
@@ -1711,9 +2084,8 @@ async function saveArticleFromUrl(rawUrl: string) {
   if (urlImportInFlight) return;
   const url = normalizeArticleUrl(rawUrl);
 
-  let hostname: string;
   try {
-    hostname = new URL(url).hostname;
+    new URL(url);
   } catch {
     showUrlImportStatus('error', "That doesn't look like a valid URL.");
     return;
@@ -1731,23 +2103,8 @@ async function saveArticleFromUrl(rawUrl: string) {
   showUrlImportStatus('busy', 'Fetching and cleaning up the page…');
 
   try {
-    const html = await invoke<string>('fetch_url_html', { url });
-
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    // Readability resolves relative image/link URLs against the document's
-    // base; a DOMParser document defaults to about:blank, so point it at the
-    // real page URL first (reuse an existing <base> if the page shipped one).
-    let base = doc.querySelector('base');
-    if (!base) {
-      base = doc.createElement('base');
-      doc.head.prepend(base);
-    }
-    base.setAttribute('href', url);
-
-    // Capture code languages / flatten code text before Readability strips classes.
-    prepareCodeForImport(doc);
-    const article = new Readability(doc).parse();
-    if (!article || !article.content || (article.textContent || '').trim().length < 200) {
+    const art = await fetchArticleMarkdown(url);
+    if (!art) {
       showUrlImportStatus(
         'error',
         "Couldn't find a readable article on that page — it may be paywalled, script-rendered, or not article content."
@@ -1756,44 +2113,7 @@ async function saveArticleFromUrl(rawUrl: string) {
       return;
     }
 
-    // DOMPurify strips scripts/handlers by default; the explicit FORBID list
-    // additionally drops interactive/embed tags that make no sense in a
-    // saved article (forms, iframes, buttons).
-    const cleanHtml = DOMPurify.sanitize(article.content, {
-      FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
-      FORBID_ATTR: ['style', 'onerror', 'onload'],
-    });
-
-    const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
-    addCodeFenceRule(turndown);
-    const markdownBody = turndown.turndown(cleanHtml);
-
-    const title = (article.title || hostname).trim();
-    const byline = (article.byline || article.siteName || hostname).trim();
-    const markdown = `# ${title}\n\n*${byline} — [${hostname}](${url})*\n\n${markdownBody}\n`;
-
-    const id = safeUuid();
-    const record: BookRecord = {
-      id,
-      title,
-      author: byline,
-      filePath: url,
-      coverDataUrl: generateTextCoverDataUrl(title, 'md', true),
-      lastCfi: null,
-      progress: 0,
-      addedAt: Date.now(),
-      updatedAt: Date.now(),
-      format: 'md',
-      sourceUrl: url,
-    };
-
-    await ensureBooksDir();
-    const rel = `${BOOKS_DIR}/${id}.md`;
-    await writeFile(rel, new TextEncoder().encode(markdown), { baseDir: BaseDirectory.AppData });
-    record.storedRelPath = rel;
-
-    library.push(record);
-    persistLibrary();
+    const record = await createArticleRecord(art.title, art.byline, url, art.markdown, false);
 
     setUrlImportBusy(false);
     el.urlImportModal.hidden = true;
@@ -1804,6 +2124,493 @@ async function saveArticleFromUrl(rawUrl: string) {
     showUrlImportStatus('error', `Couldn't save that page: ${String(err)}`);
     setUrlImportBusy(false);
   }
+}
+
+const ARTICLE_PURIFY = {
+  FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+  FORBID_ATTR: ['style', 'onerror', 'onload'],
+};
+
+function htmlToMarkdown(cleanHtml: string): string {
+  const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+  addCodeFenceRule(turndown);
+  return turndown.turndown(cleanHtml);
+}
+
+/** Fetch a page and reduce it to a reader-mode markdown document; null when nothing readable was found. */
+async function fetchArticleMarkdown(url: string): Promise<{ title: string; byline: string; markdown: string } | null> {
+  const hostname = new URL(url).hostname;
+  const html = await invoke<string>('fetch_url_html', { url });
+
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  // Readability resolves relative image/link URLs against the document's
+  // base; a DOMParser document defaults to about:blank, so point it at the
+  // real page URL first (reuse an existing <base> if the page shipped one).
+  let base = doc.querySelector('base');
+  if (!base) {
+    base = doc.createElement('base');
+    doc.head.prepend(base);
+  }
+  base.setAttribute('href', url);
+
+  // Capture code languages / flatten code text before Readability strips classes.
+  prepareCodeForImport(doc);
+  const article = new Readability(doc).parse();
+  if (!article || !article.content || (article.textContent || '').trim().length < 200) return null;
+
+  const cleanHtml = DOMPurify.sanitize(restoreHeadings(article.content), ARTICLE_PURIFY);
+  const markdownBody = htmlToMarkdown(cleanHtml);
+  const title = (article.title || hostname).trim();
+  const byline = (article.byline || article.siteName || hostname).trim();
+  return { title, byline, markdown: `# ${title}\n\n*${byline} — [${hostname}](${url})*\n\n${markdownBody}\n` };
+}
+
+/** Write an article's markdown into AppData and register it. `temp` records are News reads that expire. */
+async function createArticleRecord(title: string, byline: string, url: string, markdown: string, temp: boolean): Promise<BookRecord> {
+  const id = safeUuid();
+  const now = Date.now();
+  const record: BookRecord = {
+    id,
+    title,
+    author: byline,
+    filePath: url,
+    coverDataUrl: temp ? null : generateTextCoverDataUrl(title, 'md', true),
+    lastCfi: null,
+    progress: 0,
+    addedAt: now,
+    updatedAt: now,
+    format: 'md',
+    sourceUrl: url,
+  };
+  if (temp) {
+    record.newsTemp = true;
+    record.expiresAt = now + NEWS_TEMP_MS;
+  }
+  await ensureBooksDir();
+  const rel = `${BOOKS_DIR}/${id}.md`;
+  await writeFile(rel, new TextEncoder().encode(markdown), { baseDir: BaseDirectory.AppData });
+  record.storedRelPath = rel;
+  library.push(record);
+  persistLibrary();
+  return record;
+}
+
+/* ============================================================
+   News — RSS / Atom feeds (fetched by Rust: feeds send no CORS headers)
+   ============================================================ */
+const KEY_NEWS_ITEMS = 'read.news.items';
+const KEY_NEWS_READ = 'read.news.read';
+const KEY_NEWS_CUSTOM = 'read.news.custom';
+const KEY_NEWS_OFF = 'read.news.off';
+const KEY_NEWS_FETCHED = 'read.news.fetched';
+const NEWS_STALE_MS = 20 * 60 * 1000;          // don't refetch more often than this on open
+const NEWS_TEMP_MS = 30 * 24 * 60 * 60 * 1000; // unsaved reads are removed after 30 days
+const NEWS_PER_FEED = 40;
+const NEWS_READ_CAP = 2000;
+
+let newsItems: NewsItem[] = load<NewsItem[]>(KEY_NEWS_ITEMS, []);
+let newsRead = new Set<string>(load<string[]>(KEY_NEWS_READ, []));
+let newsCustom: NewsFeed[] = load<NewsFeed[]>(KEY_NEWS_CUSTOM, []);
+let newsOff = new Set<string>(load<string[]>(KEY_NEWS_OFF, []));
+let newsLastFetch = load<number>(KEY_NEWS_FETCHED, 0);
+let newsSource = 'all';
+let newsCategory = 'all';
+let newsRefreshing = false;
+let returnToNews = false;
+const newsErrors: Record<string, string> = {};
+const newsHtml = new Map<string, string>();    // full bodies from this session's fetch; too big to persist
+
+const newsAllFeeds = (): NewsFeed[] => [...DEFAULT_FEEDS, ...newsCustom];
+const newsActiveFeeds = (): NewsFeed[] => newsAllFeeds().filter(f => !newsOff.has(f.id));
+const newsFeedOf = (id: string): NewsFeed | undefined => newsAllFeeds().find(f => f.id === id);
+const newsCategoryOf = (f: NewsFeed): string => f.category || 'My feeds';
+function newsCategories(): string[] {
+  const present = new Set(newsActiveFeeds().map(newsCategoryOf));
+  return [...CATEGORY_ORDER, 'My feeds'].filter(c => present.has(c));
+}
+const newsSortKey = (i: NewsItem): number => i.published || i.fetchedAt;
+
+function persistNews(): void {
+  try {
+    save(KEY_NEWS_ITEMS, newsItems);
+    save(KEY_NEWS_READ, [...newsRead].slice(-NEWS_READ_CAP));
+    save(KEY_NEWS_CUSTOM, newsCustom);
+    save(KEY_NEWS_OFF, [...newsOff]);
+    save(KEY_NEWS_FETCHED, newsLastFetch);
+  } catch (err) {
+    console.warn('persistNews failed:', err);
+  }
+}
+
+function newsVisibleItems(): NewsItem[] {
+  const active = new Set(newsActiveFeeds().map(f => f.id));
+  const catOf = new Map(newsActiveFeeds().map(f => [f.id, newsCategoryOf(f)] as [string, string]));
+  return newsItems
+    .filter(i => active.has(i.feedId) && (newsSource === 'all' || i.feedId === newsSource) && (newsCategory === 'all' || catOf.get(i.feedId) === newsCategory))
+    .sort((a, b) => newsSortKey(b) - newsSortKey(a));
+}
+
+function newsUnread(feedId?: string, category?: string): number {
+  const feeds = newsActiveFeeds().filter(f => !category || newsCategoryOf(f) === category);
+  const active = new Set(feeds.map(f => f.id));
+  return newsItems.filter(i => active.has(i.feedId) && (!feedId || i.feedId === feedId) && !newsRead.has(i.id)).length;
+}
+
+function isNewsViewOpen(): boolean {
+  return document.querySelector<HTMLElement>('.library-main')?.dataset.view === 'news';
+}
+
+function setNewsView(on: boolean): void {
+  const main = document.querySelector<HTMLElement>('.library-main');
+  if (!main) return;
+  if (on) main.dataset.view = 'news'; else delete main.dataset.view;
+  $<HTMLElement>('news-view').hidden = !on;
+  document.querySelectorAll<HTMLButtonElement>('.sidebar-nav-item[data-library-nav]').forEach(b => {
+    b.classList.toggle('active', b.dataset.libraryNav === (on ? 'news' : 'library'));
+  });
+  if (on) {
+    renderNews();
+    void refreshNews(false);
+    main.scrollTo({ top: 0 });
+  }
+}
+
+function renderNewsBadge(): void {
+  const badge = document.getElementById('nav-news-count');
+  if (!badge) return;
+  const n = newsUnread();
+  badge.hidden = n === 0;
+  badge.textContent = n > 99 ? '99+' : String(n);
+}
+
+function renderNewsStatus(): void {
+  const status = document.getElementById('news-status');
+  if (!status) return;
+  const failed = Object.keys(newsErrors).length;
+  const refresh = document.getElementById('news-refresh-btn') as HTMLButtonElement | null;
+  if (refresh) { refresh.disabled = newsRefreshing; refresh.classList.toggle('busy', newsRefreshing); }
+  if (newsRefreshing) { status.textContent = 'Refreshing…'; return; }
+  const when = newsLastFetch ? `Updated ${timeAgo(newsLastFetch)}` : 'Not refreshed yet';
+  status.textContent = failed ? `${when} · ${failed} source${failed === 1 ? '' : 's'} could not be reached` : when;
+}
+
+function renderNews(): void {
+  renderNewsBadge();
+  renderNewsStatus();
+
+  // Category row, then the sources inside the chosen category
+  const chips = $<HTMLElement>('news-chips');
+  chips.innerHTML = '';
+  const row = (): HTMLDivElement => { const d = document.createElement('div'); d.className = 'news-chip-row'; chips.appendChild(d); return d; };
+  const addChip = (parent: HTMLElement, label: string, count: number, active: boolean, onClick: () => void) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'subject-chip' + (active ? ' active' : '');
+    const name = document.createElement('span');
+    name.textContent = label;
+    b.appendChild(name);
+    if (count > 0) {
+      const c = document.createElement('span');
+      c.className = 'subject-chip-count';
+      c.textContent = String(count);
+      b.appendChild(c);
+    }
+    b.addEventListener('click', onClick);
+    parent.appendChild(b);
+  };
+  const cats = newsCategories();
+  if (newsCategory !== 'all' && !cats.includes(newsCategory)) { newsCategory = 'all'; newsSource = 'all'; }
+  const catRow = row();
+  addChip(catRow, 'All', newsUnread(), newsCategory === 'all', () => { newsCategory = 'all'; newsSource = 'all'; renderNews(); });
+  for (const c of cats) addChip(catRow, c, newsUnread(undefined, c), newsCategory === c, () => { newsCategory = c; newsSource = 'all'; renderNews(); });
+  if (newsCategory !== 'all') {
+    const inCat = newsActiveFeeds().filter(f => newsCategoryOf(f) === newsCategory);
+    if (newsSource !== 'all' && !inCat.some(f => f.id === newsSource)) newsSource = 'all';
+    if (inCat.length > 1) {
+      const srcRow = row();
+      srcRow.classList.add('news-chip-sources');
+      addChip(srcRow, 'Every source', 0, newsSource === 'all', () => { newsSource = 'all'; renderNews(); });
+      for (const f of inCat) addChip(srcRow, f.name.replace(/ (Sinhala)$/, ''), newsUnread(f.id), newsSource === f.id, () => { newsSource = f.id; renderNews(); });
+    }
+  }
+
+  // Articles
+  const list = $<HTMLElement>('news-list');
+  list.innerHTML = '';
+  const items = newsVisibleItems().slice(0, 150);
+  if (items.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'news-empty';
+    empty.textContent = newsRefreshing ? 'Fetching the latest news…'
+      : newsItems.length === 0 ? 'No articles yet. Press Refresh to fetch them.' : 'No articles from this source.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const feed = newsFeedOf(item.feedId);
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'news-item' + (newsRead.has(item.id) ? ' is-read' : '');
+
+    const meta = document.createElement('div');
+    meta.className = 'news-item-meta';
+    const dot = document.createElement('span');
+    dot.className = 'news-dot';
+    const src = document.createElement('span');
+    src.textContent = feed ? feed.name.replace(/ \(Sinhala\)$/, '') : 'Unknown source';
+    const when = document.createElement('span');
+    when.textContent = timeAgo(newsSortKey(item));
+    meta.append(dot, src, when);
+    if (feed?.lang === 'si') {
+      const tag = document.createElement('span');
+      tag.className = 'news-tag';
+      tag.textContent = 'Sinhala · no voice';
+      meta.appendChild(tag);
+    }
+
+    const title = document.createElement('div');
+    title.className = 'news-item-title';
+    title.textContent = item.title;
+    row.append(meta, title);
+    if (item.summary) {
+      const sum = document.createElement('div');
+      sum.className = 'news-item-summary';
+      sum.textContent = item.summary;
+      row.appendChild(sum);
+    }
+    row.addEventListener('click', () => { void openNewsItem(item); });
+    list.appendChild(row);
+  }
+}
+
+async function refreshNews(force: boolean): Promise<void> {
+  if (newsRefreshing) return;
+  if (!force && newsItems.length > 0 && Date.now() - newsLastFetch < NEWS_STALE_MS) return;
+  newsRefreshing = true;
+  renderNewsStatus();
+
+  const feeds = newsActiveFeeds();
+  const results = await Promise.allSettled(feeds.map(async feed => {
+    const xml = await invoke<string>('fetch_feed_xml', { url: feed.url });
+    return parseFeed(xml.replace(/^\uFEFF/, '').trimStart(), feed);
+  }));
+
+  const byId = new Map(newsItems.map(i => [i.id, i]));
+  results.forEach((r, idx) => {
+    const feed = feeds[idx];
+    if (r.status === 'fulfilled') {
+      delete newsErrors[feed.id];
+      for (const item of r.value) {
+        const old = byId.get(item.id);
+        if (old) item.fetchedAt = old.fetchedAt;
+        if (item.html) { newsHtml.set(item.id, item.html); item.html = undefined; }
+        byId.set(item.id, item);
+      }
+    } else {
+      newsErrors[feed.id] = String((r.reason && r.reason.message) || r.reason);
+    }
+  });
+
+  // Keep the newest few per feed, and nothing from feeds that no longer exist.
+  const known = new Set(newsAllFeeds().map(f => f.id));
+  const perFeed = new Map<string, number>();
+  newsItems = [...byId.values()]
+    .filter(i => known.has(i.feedId))
+    .sort((a, b) => newsSortKey(b) - newsSortKey(a))
+    .filter(i => {
+      const n = (perFeed.get(i.feedId) || 0) + 1;
+      perFeed.set(i.feedId, n);
+      return n <= NEWS_PER_FEED;
+    });
+  if (results.some(r => r.status === 'fulfilled')) newsLastFetch = Date.now();
+  newsRefreshing = false;
+  persistNews();
+  if (isNewsViewOpen()) renderNews(); else { renderNewsBadge(); }
+  renderNewsSources();
+}
+
+async function openNewsItem(item: NewsItem): Promise<void> {
+  newsRead.add(item.id);
+  persistNews();
+  renderNews();
+
+  // Forum threads don't make a readable article; hand them to the browser.
+  if (item.feedId === 'elakiri') {
+    openExternalLink(item.link);
+    return;
+  }
+
+  const existing = library.find(b => b.sourceUrl === item.link);
+  if (existing) {
+    returnToNews = true;
+    void openFromLibrary(existing);
+    return;
+  }
+
+  toast('Opening article…');
+  const feed = newsFeedOf(item.feedId);
+  const host = new URL(item.link).hostname;
+  const source = feed ? feed.name.replace(/ \(Sinhala\)$/, '') : host;
+  let title = item.title;
+  let markdown: string | null = null;
+
+  const feedBody = newsHtml.get(item.id);
+  if (feedBody) {
+    const body = htmlToMarkdown(DOMPurify.sanitize(feedBody, ARTICLE_PURIFY));
+    markdown = `# ${title}\n\n*${source} — [${host}](${item.link})*\n\n${body}\n`;
+  } else {
+    try {
+      const art = await fetchArticleMarkdown(item.link);
+      if (art) { markdown = art.markdown; title = art.title || title; }
+    } catch (err) {
+      console.warn('openNewsItem: page fetch failed', err);
+    }
+  }
+  if (!markdown) {
+    // Offline, paywalled or script-rendered: fall back to the feed's own summary.
+    markdown = `# ${title}\n\n*${source} — [${host}](${item.link})*\n\n${item.summary || 'No preview is available for this article.'}\n\n[Read the full article in your browser](${item.link})\n`;
+  }
+
+  try {
+    const record = await createArticleRecord(title, source, item.link, markdown, true);
+    returnToNews = true;
+    await openFromLibrary(record);
+  } catch (err) {
+    console.error('openNewsItem failed:', err);
+    returnToNews = false;
+    toast("Couldn't open that article: " + String((err as Error)?.message || err).slice(0, 120));
+  }
+}
+
+/** Keep a News read: it joins the library permanently. */
+function saveNewsRecord(record: BookRecord): void {
+  record.newsTemp = undefined;
+  record.expiresAt = undefined;
+  if (!record.coverDataUrl) record.coverDataUrl = generateTextCoverDataUrl(record.title, 'md', true);
+  persistLibrary();
+  renderLibrary();
+  refreshNewsSaveButton();
+  toast('Saved to your library');
+}
+
+function refreshNewsSaveButton(): void {
+  $<HTMLButtonElement>('save-news-btn').hidden = !currentBookRecord?.newsTemp;
+}
+
+function purgeExpiredNews(): void {
+  const now = Date.now();
+  for (const b of [...library]) {
+    if (b.newsTemp && b.expiresAt && b.expiresAt < now && b.id !== currentBookRecord?.id) removeBook(b.id, true);
+  }
+}
+
+function renderNewsSources(): void {
+  const wrap = document.getElementById('news-source-list');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  let lastCat = '';
+  const ordered = [...newsAllFeeds()].sort((x, y) => {
+    const order = [...CATEGORY_ORDER, 'My feeds'];
+    return order.indexOf(newsCategoryOf(x)) - order.indexOf(newsCategoryOf(y));
+  });
+  for (const feed of ordered) {
+    if (newsCategoryOf(feed) !== lastCat) {
+      lastCat = newsCategoryOf(feed);
+      const h = document.createElement('div');
+      h.className = 'news-source-cat';
+      h.textContent = lastCat;
+      wrap.appendChild(h);
+    }
+    const row = document.createElement('div');
+    row.className = 'news-source-row';
+    const label = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = !newsOff.has(feed.id);
+    box.addEventListener('change', () => {
+      if (box.checked) newsOff.delete(feed.id); else newsOff.add(feed.id);
+      persistNews();
+      renderNews();
+    });
+    const name = document.createElement('span');
+    name.textContent = feed.name;
+    const note = document.createElement('small');
+    note.textContent = feed.topic;
+    label.append(box, name, note);
+    row.appendChild(label);
+    if (newsErrors[feed.id]) {
+      const err = document.createElement('span');
+      err.className = 'news-source-err';
+      err.textContent = 'unreachable';
+      err.title = newsErrors[feed.id];
+      row.appendChild(err);
+    }
+    if (!feed.builtin) {
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'library-action-btn';
+      rm.textContent = 'Remove';
+      rm.addEventListener('click', () => {
+        newsCustom = newsCustom.filter(c => c.id !== feed.id);
+        newsOff.delete(feed.id);
+        newsItems = newsItems.filter(i => i.feedId !== feed.id);
+        delete newsErrors[feed.id];
+        persistNews();
+        renderNews();
+        renderNewsSources();
+      });
+      row.appendChild(rm);
+    }
+    wrap.appendChild(row);
+  }
+}
+
+async function addNewsFeed(rawUrl: string): Promise<void> {
+  const status = $<HTMLElement>('news-add-status');
+  const show = (msg: string, error = false) => { status.hidden = false; status.textContent = msg; status.classList.toggle('error', error); };
+  const url = normalizeArticleUrl(rawUrl);
+  let host: string;
+  try { host = new URL(url).hostname.replace(/^www\./, ''); } catch { show("That doesn't look like a valid URL.", true); return; }
+  if (newsAllFeeds().some(f => f.url === url)) { show('That feed is already in the list.', true); return; }
+  show('Checking the feed…');
+  const feed: NewsFeed = { id: 'c-' + safeUuid().slice(0, 8), name: host, url, lang: 'en', topic: 'Added by you' };
+  try {
+    const xml = await invoke<string>('fetch_feed_xml', { url });
+    const items = parseFeed(xml.replace(/^\uFEFF/, '').trimStart(), feed);
+    const title = new DOMParser().parseFromString(xml.trimStart(), 'text/xml').querySelector('channel > title, feed > title')?.textContent?.trim();
+    if (title) feed.name = title.slice(0, 40);
+    newsCustom.push(feed);
+    for (const item of items) { if (item.html) { newsHtml.set(item.id, item.html); item.html = undefined; } }
+    newsItems = [...newsItems, ...items.slice(0, NEWS_PER_FEED)];
+    persistNews();
+    $<HTMLInputElement>('news-add-input').value = '';
+    show(`Added ${feed.name} (${items.length} articles).`);
+    renderNews();
+    renderNewsSources();
+  } catch (err) {
+    show(`Couldn't read that as a feed: ${(err as Error)?.message || err}`, true);
+  }
+}
+
+function wireNews(): void {
+  $<HTMLButtonElement>('news-refresh-btn').addEventListener('click', () => { void refreshNews(true); });
+  $<HTMLButtonElement>('news-back-btn').addEventListener('click', () => setNewsView(false));
+  $<HTMLButtonElement>('news-sources-btn').addEventListener('click', () => {
+    const panel = $<HTMLElement>('news-sources');
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) renderNewsSources();
+  });
+  $<HTMLFormElement>('news-add-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const v = $<HTMLInputElement>('news-add-input').value.trim();
+    if (v) void addNewsFeed(v);
+  });
+  $<HTMLButtonElement>('save-news-btn').addEventListener('click', () => {
+    if (currentBookRecord?.newsTemp) saveNewsRecord(currentBookRecord);
+  });
+  document.getElementById('min-news-link')?.addEventListener('click', (e) => { e.preventDefault(); setNewsView(true); });
+  renderNewsBadge();
+  purgeExpiredNews();
 }
 
 function safeUuid(): string {
@@ -1839,6 +2646,7 @@ function repairColliding(): void {
   if (changed) persistLibrary();
 }
 repairColliding();
+void shrinkLibraryCovers().then(() => { try { save(KEY_LIBRARY, library); } catch { /* handled on next write */ } });
 
 async function urlToDataUrl(url: string): Promise<string> {
   const blob = await fetch(url).then(r => r.blob());
@@ -1898,6 +2706,7 @@ function cleanupCurrentReader() {
   pdfHasOutline = false;
   pdfPageTextCache = new Map();
   currentTextElement = null;
+  try { for (const col of HL_COLORS) (CSS as any).highlights?.delete('hl-' + col); } catch { /* unsupported */ }
   el.viewer.innerHTML = '';
   delete document.documentElement.dataset.format;
   // Chat is per-book — a conversation about one book's chapter makes no
@@ -2216,7 +3025,8 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
   container.innerHTML = renderedHtml;
   container.dataset.words = String((container.textContent || '').split(/\s+/).filter(Boolean).length);
   // Frame + syntax-colour code blocks (async; never changes the text itself).
-  void enhanceCodeBlocks(container);
+  void enhanceCodeBlocks(container).finally(() => applyTextHighlights());
+  applyTextHighlights();
 
   flatToc = [];
   const tocTree: TocTreeNode[] = [];
@@ -2276,7 +3086,7 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
     el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
     el.progressFill.style.width = `${pct * 100}%`;
     updateTextProgressMeta(container, pct);
-    persistLibrary();
+    persistLibrarySoon();
     scheduleTextSpy(container);
     // A scroll the reader made themselves (not our own follow-scroll) means they
     // are browsing: read-aloud must stay where it is, not chase or fight the view.
@@ -2526,7 +3336,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
       if (cb && cb.locations && (cb.locations as any).total) {
         currentBookRecord.progress = cb.locations.percentageFromCfi(loc.start.cfi);
       }
-      persistLibrary();
+      persistLibrarySoon();
     }
     const newKey = sectionKeyFromHref(loc.start.href);
     if (newKey !== currentSectionKey) {
@@ -2707,6 +3517,7 @@ async function openReader(record: BookRecord, buffer: ArrayBuffer) {
     showResumeNote(prevSeen);
   }
   el.openOriginalBtn.hidden = !record.sourceUrl;
+  refreshNewsSaveButton();
   goToScreen('reader');
   resetReflowTracking();
   // Covers the case where this book opens before the boot-time LLM probe
@@ -2826,11 +3637,12 @@ function minutesLabel(min: number): string {
   return m ? `${h} h ${m} min` : `${h} h`;
 }
 
-function updateProgress() {
+function updateProgress(cfiOverride?: string) {
   if (!currentRendition || !currentBook) return;
   const loc = currentRendition.currentLocation() as any;
   if (!loc || !loc.start) return;
-  const pct = currentBook.locations.percentageFromCfi(loc.start.cfi);
+  const cfi: string = cfiOverride || loc.start.cfi;
+  const pct = currentBook.locations.percentageFromCfi(cfi);
   if (!Number.isFinite(pct)) return;
   el.progressFill.style.width = `${pct * 100}%`;
   el.progressThumb.style.left = `${pct * 100}%`;
@@ -2839,7 +3651,7 @@ function updateProgress() {
   updatePageStrip(loc);
 
   const total = (currentBook.locations as any).length?.() ?? 0;
-  const current = (currentBook.locations as any).locationFromCfi(loc.start.cfi) ?? 0;
+  const current = (currentBook.locations as any).locationFromCfi(cfi) ?? 0;
   if (total > 0) {
     const section = spineStats.find(st => current >= st.start && current < st.start + st.count);
     if (section) {
@@ -2896,6 +3708,16 @@ function navigateToCfi(cfi: string) {
     }
     return;
   }
+  if (cfi.startsWith(TEXT_ANCHOR) && currentTextElement) {
+    const a = parseTextAnchor(cfi);
+    const r = a ? textOffsetsToRange(currentTextElement, a[0], a[1]) : null;
+    if (r) {
+      const box = currentTextElement.getBoundingClientRect();
+      const rr = r.getBoundingClientRect();
+      currentTextElement.scrollTo({ top: currentTextElement.scrollTop + rr.top - box.top - box.height * 0.3, behavior: 'smooth' });
+    }
+    return;
+  }
   if (cfi.startsWith('pdf-page-')) {
     const page = parseInt(cfi.slice('pdf-page-'.length), 10);
     if (!Number.isNaN(page)) navigateToPdfPage(page);
@@ -2930,9 +3752,7 @@ function renderHighlightsList() {
     el.highlightsList.innerHTML = '<div class="mark-empty">No highlights yet.<br>Select text while reading.</div>';
     return;
   }
-  const colorHex: Record<HighlightColor, string> = {
-    yellow: '#fde68a', green: '#bbf7d0', blue: '#bfdbfe', pink: '#fbcfe8',
-  };
+  const colorHex = HL_SOLID;
   for (const h of currentMarks.highlights) {
     const li = document.createElement('li');
     li.className = 'mark-item';
@@ -3272,6 +4092,214 @@ function installFocusTracker(doc: Document, frameEl: HTMLIFrameElement | null) {
    ============================================================ */
 let pendingSelectionCfi: string | null = null;
 let pendingSelectionText = '';
+let pendingTextAnchor: [number, number] | null = null;   // text/Markdown/article: [start, end] character offsets
+let pendingContents: any = null;                         // EPUB: the section the selection is in
+
+/* ---- Text-reader highlights ---------------------------------------------
+   Plain text, Markdown and saved articles have no EPUB CFI, so a highlight is
+   anchored by character offsets over the reader's text ("txt:start-end").
+   It is painted with the CSS Custom Highlight API, which colours a range
+   without touching the DOM (so the text, TTS and code frames are unaffected). */
+const TEXT_ANCHOR = 'txt:';
+const parseTextAnchor = (cfi: string): [number, number] | null => {
+  const m = /^txt:(\d+)-(\d+)$/.exec(cfi);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+};
+const TEXT_SKIP = '.code-block-head, [data-focus-word], [data-focus-sentence], [data-focus-overlay], [data-vocab-highlights], script, style, svg';
+
+function textNodesOf(root: HTMLElement): Text[] {
+  const out: Text[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement && n.parentElement.closest(TEXT_SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) out.push(n as Text);
+  return out;
+}
+
+/** Character offset of a DOM boundary over the reader's text (-1 if outside it). */
+function textBoundaryOffset(root: HTMLElement, container: Node, offset: number): number {
+  if (!root.contains(container)) return -1;
+  const br = document.createRange();
+  try { br.setStart(container, offset); br.collapse(true); } catch { return -1; }
+  let acc = 0;
+  for (const n of textNodesOf(root)) {
+    if (n === container) return acc + Math.min(offset, n.length);
+    if (br.comparePoint(n, n.length) <= 0) acc += n.length;
+    else break;
+  }
+  return acc;
+}
+
+function textOffsetsToRange(root: HTMLElement, start: number, end: number): Range | null {
+  const nodes = textNodesOf(root);
+  let acc = 0;
+  let sNode: Text | null = null, sOff = 0, eNode: Text | null = null, eOff = 0;
+  for (const n of nodes) {
+    const next = acc + n.length;
+    if (!sNode && start < next) { sNode = n; sOff = start - acc; }
+    if (sNode && end <= next) { eNode = n; eOff = end - acc; break; }
+    acc = next;
+  }
+  if (!sNode || !eNode) return null;
+  const r = document.createRange();
+  try { r.setStart(sNode, sOff); r.setEnd(eNode, eOff); } catch { return null; }
+  return r;
+}
+
+function applyTextHighlights(): void {
+  const reg = (CSS as any).highlights;
+  const HL = (window as any).Highlight;
+  if (!reg || !HL) return;
+  for (const col of HL_COLORS) reg.delete('hl-' + col);
+  const root = currentTextElement;
+  if (!root) return;
+  const by = new Map<HighlightColor, Range[]>();
+  for (const h of currentMarks.highlights) {
+    const a = parseTextAnchor(h.cfi);
+    if (!a) continue;
+    const r = textOffsetsToRange(root, a[0], a[1]);
+    if (!r) continue;
+    const list = by.get(h.color) ?? [];
+    list.push(r);
+    by.set(h.color, list);
+  }
+  for (const [col, ranges] of by) reg.set('hl-' + col, new HL(...ranges));
+}
+
+/* ---- Word / sentence selection ------------------------------------------ */
+const BLOCK_SEL = 'p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th, dd, dt, pre, figcaption, div';
+const ABBREV = new Set(['mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'etc', 'e.g', 'i.e', 'fig', 'no', 'inc', 'ltd', 'cf', 'al']);
+const CLOSERS = '"\'”’)]»';
+
+function isSentenceEnd(t: string, i: number): boolean {
+  if (!/[.!?…]/.test(t[i])) return false;
+  let j = i + 1;
+  while (j < t.length && CLOSERS.includes(t[j])) j++;
+  if (j < t.length && !/\s/.test(t[j])) return false;           // "3.5", "example.com"
+  if (t[i] === '.') {
+    const m = /([A-Za-z]+(?:\.[A-Za-z]+)*)$/.exec(t.slice(Math.max(0, i - 8), i));
+    if (m) {
+      const w = m[1].toLowerCase();
+      if (ABBREV.has(w) || (w.length === 1 && /[A-Z]/.test(t[i - 1]))) return false;
+    }
+  }
+  return true;
+}
+
+function sentenceBounds(t: string, from: number, to: number): [number, number] {
+  let s = from;
+  while (s > 0) {
+    if (isSentenceEnd(t, s - 1)) break;
+    s--;
+  }
+  while (s < t.length && /[\s"'“‘(\[«]/.test(t[s]) && s < to) s++;
+  let e = Math.max(to, s);
+  while (e < t.length) {
+    if (e > 0 && isSentenceEnd(t, e - 1) && e > from) break;
+    e++;
+  }
+  while (e > s && /\s/.test(t[e - 1])) e--;
+  return [s, e];
+}
+
+const WORD_CH = /[\p{L}\p{N}_'’-]/u;
+function wordBounds(t: string, from: number, to: number): [number, number] {
+  let s = from, e = to;
+  while (s > 0 && WORD_CH.test(t[s - 1])) s--;
+  while (e < t.length && WORD_CH.test(t[e])) e++;
+  while (s < e && /['’-]/.test(t[s])) s++;
+  while (e > s && /['’-]/.test(t[e - 1])) e--;
+  return [s, e];
+}
+
+/** Widen a range to whole words or whole sentences (within the paragraph / list item it sits in). */
+function expandRange(range: Range, unit: 'word' | 'sentence'): Range | null {
+  const blockOf = (n: Node): HTMLElement | null => (n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement)?.closest(BLOCK_SEL) as HTMLElement | null;
+  const bs = blockOf(range.startContainer), be = blockOf(range.endContainer);
+  if (!bs || !be) return null;
+  const nodesOf = (b: HTMLElement): Text[] => {
+    const out: Text[] = [];
+    const w = b.ownerDocument.createTreeWalker(b, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement && n.parentElement.closest(TEXT_SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    for (let n = w.nextNode(); n; n = w.nextNode()) out.push(n as Text);
+    return out;
+  };
+  const offsetIn = (nodes: Text[], container: Node, offset: number, doc: Document): number => {
+    const br = doc.createRange();
+    try { br.setStart(container, offset); br.collapse(true); } catch { return 0; }
+    let acc = 0;
+    for (const n of nodes) {
+      if (n === container) return acc + Math.min(offset, n.length);
+      if (br.comparePoint(n, n.length) <= 0) acc += n.length; else break;
+    }
+    return acc;
+  };
+  const pointAt = (nodes: Text[], off: number, atEnd: boolean): [Text, number] | null => {
+    let acc = 0;
+    for (const n of nodes) {
+      const next = acc + n.length;
+      if (atEnd ? off <= next : off < next) return [n, off - acc];
+      acc = next;
+    }
+    const last = nodes[nodes.length - 1];
+    return last ? [last, last.length] : null;
+  };
+  const sNodes = nodesOf(bs), eNodes = be === bs ? sNodes : nodesOf(be);
+  const sText = sNodes.map(n => n.data).join(''), eText = eNodes.map(n => n.data).join('');
+  const doc = bs.ownerDocument;
+  const so = offsetIn(sNodes, range.startContainer, range.startOffset, doc);
+  const eo = offsetIn(eNodes, range.endContainer, range.endOffset, doc);
+  const fn = unit === 'word' ? wordBounds : sentenceBounds;
+  const startB = fn(sText, so, be === bs ? Math.max(so, eo) : so);
+  const endB = be === bs ? startB : fn(eText, eo, eo);
+  const a = pointAt(sNodes, startB[0], false);
+  const b = pointAt(eNodes, endB[1], true);
+  if (!a || !b) return null;
+  const r = doc.createRange();
+  try { r.setStart(a[0], a[1]); r.setEnd(b[0], b[1]); } catch { return null; }
+  return r;
+}
+
+// Popover buttons "Word" / "Sentence": widen what is selected, keep the popover open.
+function reselect(unit: 'word' | 'sentence'): void {
+  let range: Range | null = null;
+  let win: Window | null = null;
+  if (currentTextElement) {
+    win = window;
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount && !sel.isCollapsed) range = sel.getRangeAt(0);
+    else if (pendingTextAnchor) range = textOffsetsToRange(currentTextElement, pendingTextAnchor[0], pendingTextAnchor[1]);
+  } else if (pendingContents) {
+    win = pendingContents.window;
+    const sel = win!.getSelection();
+    if (sel && sel.rangeCount) range = sel.getRangeAt(0);
+  }
+  if (!range || !win) return;
+  const wider = expandRange(range, unit);
+  if (!wider || wider.collapsed) return;
+  const sel = win.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(wider);
+  pendingSelectionText = wider.toString().trim();
+  if (currentTextElement) {
+    const so = textBoundaryOffset(currentTextElement, wider.startContainer, wider.startOffset);
+    const eo = textBoundaryOffset(currentTextElement, wider.endContainer, wider.endOffset);
+    pendingTextAnchor = so >= 0 && eo > so ? [so, eo] : null;
+  } else if (pendingContents) {
+    try { pendingSelectionCfi = pendingContents.cfiFromRange(wider); } catch { /* keep the old anchor */ }
+  }
+  pendingSelectionContext = extractSentenceContext(wider);
+  const rect = wider.getBoundingClientRect();
+  const iframe = !currentTextElement ? (pendingContents?.window?.frameElement as HTMLIFrameElement | null) : null;
+  const off = iframe ? iframe.getBoundingClientRect() : { left: 0, top: 0 };
+  selAnchorX = off.left + rect.left + rect.width / 2;
+  selAnchorY = off.top + rect.top - 10;
+  const single = isSingleWord(pendingSelectionText);
+  el.popoverLookup.hidden = !single;
+  el.popoverSay.hidden = !single;
+  showSelectionPopover(selAnchorX, selAnchorY);
+}
 
 let dictionaryLookupId = 0;
 let dictAbortController: AbortController | null = null;
@@ -3473,6 +4501,8 @@ function sayWord(word: string, btn: HTMLButtonElement): void {
 
 function onSelected(cfiRange: string, contents: any) {
   pendingSelectionCfi = cfiRange;
+  pendingTextAnchor = null;
+  pendingContents = contents;
   try {
     const sel = contents.window.getSelection();
     pendingSelectionText = (sel?.toString() || '').trim();
@@ -3518,6 +4548,7 @@ function onSelected(cfiRange: string, contents: any) {
 // which plain text has no equivalent of.
 function onTextReaderMouseUp(e: MouseEvent) {
   if (!currentTextElement) return;
+  pendingContents = null;
   // This listener is global (registered once on `document`), so it fires for
   // EVERY mouseup in the app — including clicks on the dict popover's own
   // buttons, which live in the same main document as the text reader. Without
@@ -3531,6 +4562,26 @@ function onTextReaderMouseUp(e: MouseEvent) {
 
   const sel = window.getSelection();
   const text = (sel?.toString() || '').trim();
+  if (sel && sel.isCollapsed && !ttsOn && !(e.target as Element).closest('a, button')) {
+    // A plain click inside an existing highlight offers to recolour or remove it.
+    const caret = sel.rangeCount ? textBoundaryOffset(currentTextElement, sel.getRangeAt(0).startContainer, sel.getRangeAt(0).startOffset) : -1;
+    const hit = caret < 0 ? undefined : currentMarks.highlights.find(hl => {
+      const a = parseTextAnchor(hl.cfi);
+      return !!a && caret >= a[0] && caret <= a[1];
+    });
+    if (hit) {
+      const a = parseTextAnchor(hit.cfi)!;
+      pendingTextAnchor = a;
+      pendingSelectionCfi = null;
+      pendingSelectionText = hit.text;
+      el.popoverLookup.hidden = true;
+      el.popoverSay.hidden = true;
+      selAnchorX = e.clientX;
+      selAnchorY = e.clientY - 14;
+      showSelectionPopover(selAnchorX, selAnchorY);
+    }
+    return;
+  }
   if (!sel || sel.isCollapsed || !text) return;
   const anchorNode = sel.anchorNode;
   if (!anchorNode || !currentTextElement.contains(anchorNode)) return;
@@ -3544,14 +4595,22 @@ function onTextReaderMouseUp(e: MouseEvent) {
   pendingSelectionCfi = null;
   pendingSelectionText = text;
   pendingSelectionContext = extractSentenceContext(range);
+  const sOff = textBoundaryOffset(currentTextElement, range.startContainer, range.startOffset);
+  const eOff = textBoundaryOffset(currentTextElement, range.endContainer, range.endOffset);
+  pendingTextAnchor = sOff >= 0 && eOff > sOff ? [sOff, eOff] : null;
 
   hideDictPopover();
   hideFootnotePopover();
-  const currentId = ++dictionaryLookupId;
+  ++dictionaryLookupId;
 
-  if (!text.includes(' ') && text.length > 1) {
-    lookupWord(text, pageX, pageY, currentId);
-  }
+  // Same popover as the EPUB reader: highlight colours, plus Look up and
+  // Pronounce when a single word is selected.
+  const single = isSingleWord(text);
+  el.popoverLookup.hidden = !single;
+  el.popoverSay.hidden = !single;
+  selAnchorX = pageX;
+  selAnchorY = pageY;
+  showSelectionPopover(pageX, pageY);
 }
 
 async function lookupWord(word: string, x: number, y: number, lookupId: number) {
@@ -4245,10 +5304,32 @@ function showSelectionPopover(pageX: number, pageY: number) {
 function hideSelectionPopover() {
   el.selectionPopover.hidden = true;
   pendingSelectionCfi = null;
+  pendingTextAnchor = null;
   pendingSelectionText = '';
 }
 
+function addTextHighlight(color: HighlightColor): void {
+  if (!currentBookRecord || !currentTextElement || !pendingTextAnchor) return;
+  const [start, end] = pendingTextAnchor;
+  const cfi = `${TEXT_ANCHOR}${start}-${end}`;
+  if (settings.lastHighlightColor !== color) { settings.lastHighlightColor = color; persistSettings(); }
+  // A new highlight replaces any it overlaps, so colours never stack.
+  currentMarks.highlights = currentMarks.highlights.filter(h => {
+    const a = parseTextAnchor(h.cfi);
+    return !a || a[1] <= start || a[0] >= end;
+  });
+  const text = (pendingSelectionText || currentTextElement.textContent?.slice(start, end) || '').trim();
+  currentMarks.highlights.push({ cfi, color, text, chapter: currentChapterLabel, createdAt: Date.now() });
+  currentMarks.highlights.sort((x, y) => (parseTextAnchor(x.cfi)?.[0] ?? 0) - (parseTextAnchor(y.cfi)?.[0] ?? 0));
+  save(KEY_MARKS(currentBookRecord.id), currentMarks);
+  applyTextHighlights();
+  window.getSelection()?.removeAllRanges();
+  hideSelectionPopover();
+  toast('Highlighted');
+}
+
 function addHighlight(color: HighlightColor) {
+  if (currentTextElement) { addTextHighlight(color); return; }
   if (!currentRendition || !currentBookRecord || !pendingSelectionCfi) return;
   const cfi = pendingSelectionCfi;
   const text = pendingSelectionText;
@@ -4257,12 +5338,7 @@ function addHighlight(color: HighlightColor) {
     persistSettings();
   }
 
-  const hex: Record<HighlightColor, string> = {
-    yellow: 'rgba(253, 230, 138, 0.55)',
-    green:  'rgba(187, 247, 208, 0.55)',
-    blue:   'rgba(191, 219, 254, 0.55)',
-    pink:   'rgba(251, 207, 232, 0.55)',
-  };
+  const hex = HL_RGBA;
   try {
     currentRendition.annotations.add('highlight', cfi, {}, undefined, `hl-${color}`, {
       'background-color': hex[color],
@@ -4282,6 +5358,19 @@ function addHighlight(color: HighlightColor) {
 }
 
 function removePendingHighlight() {
+  if (currentTextElement && currentBookRecord && pendingTextAnchor) {
+    const [start, end] = pendingTextAnchor;
+    currentMarks.highlights = currentMarks.highlights.filter(h => {
+      const a = parseTextAnchor(h.cfi);
+      return !a || a[1] <= start || a[0] >= end;
+    });
+    save(KEY_MARKS(currentBookRecord.id), currentMarks);
+    applyTextHighlights();
+    window.getSelection()?.removeAllRanges();
+    hideSelectionPopover();
+    toast('Highlight removed');
+    return;
+  }
   if (!currentRendition || !currentBookRecord || !pendingSelectionCfi) return;
   try { currentRendition.annotations.remove(pendingSelectionCfi, 'highlight'); } catch {}
   currentMarks.highlights = currentMarks.highlights.filter(h => h.cfi !== pendingSelectionCfi);
@@ -4292,12 +5381,7 @@ function removePendingHighlight() {
 
 function reapplyHighlights() {
   if (!currentRendition) return;
-  const hex: Record<HighlightColor, string> = {
-    yellow: 'rgba(253, 230, 138, 0.55)',
-    green:  'rgba(187, 247, 208, 0.55)',
-    blue:   'rgba(191, 219, 254, 0.55)',
-    pink:   'rgba(251, 207, 232, 0.55)',
-  };
+  const hex = HL_RGBA;
   for (const h of currentMarks.highlights) {
     try {
       currentRendition.annotations.add('highlight', h.cfi, {}, undefined, `hl-${h.color}`, {
@@ -4717,6 +5801,7 @@ function loadAllDueVocab(): CrossBookVocabWord[] {
   const now = Date.now();
   const all: CrossBookVocabWord[] = [];
   for (const book of library) {
+    if (!inSubjectFilter(book, librarySubject)) continue;   // library "Review" follows the active subject
     const journal = loadVocab(book.id);
     for (const w of journal.words) {
       if (w.dueAt <= now) {
@@ -5456,16 +6541,12 @@ function overlayOffset(doc: Document): { sx: number; sy: number } {
 
 function ensureFocusOverlay(doc: Document): HTMLDivElement {
   if (focusOverlay && focusOverlay.isConnected) return focusOverlay;
-  const rgb = accentRgbTuple();
   const div = doc.createElement('div');
   div.setAttribute('data-focus-word', '');
   div.style.cssText = [
     'position:absolute',
     'pointer-events:none',
     'z-index:2147483001',
-    'border-radius:3px',
-    `background:rgba(${rgb}, 0.35)`,
-    `box-shadow:0 0 0 1px rgba(${rgb}, 0.55)`,
     'transition:transform 90ms linear, width 90ms linear, height 90ms linear, opacity 120ms',
     'will-change:transform,width,height',
     'left:0',
@@ -5473,9 +6554,74 @@ function ensureFocusOverlay(doc: Document): HTMLDivElement {
     'opacity:0',
     'mix-blend-mode:multiply',
   ].join(';');
+  applyHighlightStyle(div);
   overlayHostFor(doc).appendChild(div);
   focusOverlay = div;
   return div;
+}
+
+// The word marker's look. 'box' is the original tinted box; 'underline' is a
+// line under the word; 'soft' is a lighter wash without an outline.
+// On a dark page "multiply" would make the tint vanish, so it is drawn normally
+// (and a little stronger) there.
+const hlIsDark = (): boolean => el.html.dataset.appearance === 'dark';
+
+function applyHighlightStyle(div: HTMLElement): void {
+  const rgb = accentRgbTuple();
+  const style = ttsSettings.hlMode;
+  const dark = hlIsDark();
+  div.style.mixBlendMode = dark ? 'normal' : 'multiply';
+  if (style !== 'sweep') div.querySelector('[data-fill]')?.remove();
+  div.style.overflow = style === 'sweep' ? 'hidden' : '';
+  if (style === 'sweep') {
+    // Karaoke: a light wash over the word that fills in as it is spoken.
+    div.style.borderRadius = '4px';
+    div.style.background = `rgba(${rgb}, ${dark ? 0.18 : 0.12})`;
+    div.style.boxShadow = 'none';
+  } else if (style === 'underline') {
+    div.style.borderRadius = '0';
+    div.style.background = 'transparent';
+    div.style.boxShadow = `inset 0 -2.5px 0 rgba(${rgb}, ${dark ? 1 : 0.9})`;
+  } else if (style === 'soft') {
+    div.style.borderRadius = '5px';
+    div.style.background = `rgba(${rgb}, ${dark ? 0.32 : 0.2})`;
+    div.style.boxShadow = 'none';
+  } else {
+    div.style.borderRadius = '3px';
+    div.style.background = `rgba(${rgb}, ${dark ? 0.45 : 0.35})`;
+    div.style.boxShadow = `0 0 0 1px rgba(${rgb}, ${dark ? 0.8 : 0.55})`;
+  }
+  div.dataset.hlKey = style + '|' + dark + '|' + ttsOn;
+}
+
+const HL_STYLES: Array<TtsSettings['hlMode']> = ['sentence', 'box', 'underline', 'soft', 'sweep'];
+// During read-aloud in sentence mode only the sentence is marked, no single word.
+const hlSentenceOnly = (): boolean => ttsOn && ttsSettings.hlMode === 'sentence';
+
+// Sweep style: fill the word from left to right over `durMs` (no duration = already full).
+function animateSweep(overlay: HTMLElement, durMs: number | undefined): void {
+  let fill = overlay.querySelector<HTMLElement>('[data-fill]');
+  if (!fill) {
+    fill = overlay.ownerDocument.createElement('div');
+    fill.setAttribute('data-fill', '');
+    const dark = hlIsDark();
+    fill.style.cssText = `position:absolute;inset:0;transform-origin:0 50%;background:rgba(${accentRgbTuple()}, ${dark ? 0.5 : 0.38})`;
+    overlay.appendChild(fill);
+  }
+  fill.style.transition = 'none';
+  fill.style.transform = 'scaleX(0)';
+  if (!durMs || durMs < 40) { fill.style.transform = 'scaleX(1)'; return; }
+  void fill.offsetWidth;   // restart the transition from zero
+  fill.style.transition = `transform ${Math.round(durMs)}ms linear`;
+  fill.style.transform = 'scaleX(1)';
+}
+function cycleHighlightStyle(): void {
+  ttsSettings.hlMode = HL_STYLES[(HL_STYLES.indexOf(ttsSettings.hlMode) + 1) % HL_STYLES.length];
+  persistTts();
+  if (focusOverlay) applyHighlightStyle(focusOverlay);
+  const b = document.getElementById('tts-hl-btn');
+  if (b) b.title = 'Highlight: ' + ttsSettings.hlMode;
+  toast(ttsSettings.hlMode === 'sentence' ? 'Highlight: whole sentence' : 'Highlight: single word (' + ttsSettings.hlMode + ')');
 }
 
 // The sentence overlay is a container div that holds one child rect per
@@ -5792,8 +6938,8 @@ function paintSentenceRange(startWordIdx: number, endWordIdx: number): void {
       'position:absolute',
       'pointer-events:none',
       'border-radius:2px',
-      `background:rgba(${rgb}, 0.10)`,
-      'mix-blend-mode:multiply',
+      `background:rgba(${rgb}, ${hlSentenceOnly() ? (hlIsDark() ? 0.34 : 0.26) : (hlIsDark() ? 0.18 : 0.10)})`,
+      `mix-blend-mode:${hlIsDark() ? 'normal' : 'multiply'}`,
       'transition:transform 120ms linear, width 120ms linear, height 120ms linear',
       'will-change:transform,width,height',
       'left:0',
@@ -5812,7 +6958,7 @@ function paintSentenceRange(startWordIdx: number, endWordIdx: number): void {
   overlay.style.opacity = '1';
 }
 
-function paintRange(range: Range, rect: DOMRect, wordIdx: number = -1): void {
+function paintRange(range: Range, rect: DOMRect, wordIdx: number = -1, durMs?: number): void {
   if (!focusIframeDoc) return;
 
   // Paint the dim sentence context first (so the sharp word cursor sits
@@ -5824,6 +6970,12 @@ function paintRange(range: Range, rect: DOMRect, wordIdx: number = -1): void {
   }
 
   const overlay = ensureFocusOverlay(focusIframeDoc);
+  // Theme or style changed since this overlay was last styled (e.g. light -> dark).
+  if (overlay.dataset.hlKey !== ttsSettings.hlMode + '|' + hlIsDark() + '|' + ttsOn) {
+    applyHighlightStyle(overlay);
+    sentenceOverlay?.replaceChildren();
+    currentSentenceKey = '';
+  }
   const { sx, sy } = overlayOffset(focusIframeDoc);
 
   // Detect line break vs. same-line motion. A diagonal transition across
@@ -5846,6 +6998,8 @@ function paintRange(range: Range, rect: DOMRect, wordIdx: number = -1): void {
   overlay.style.height = `${rect.height}px`;
   overlay.style.opacity = '1';
   lastPaintedRect = rect;
+  if (ttsSettings.hlMode === 'sweep') animateSweep(overlay, durMs);
+  if (hlSentenceOnly()) overlay.style.opacity = '0';   // the sentence band is the highlight
 
   if (brokeLine) {
     // Restore the transition next frame so subsequent same-line moves
@@ -6125,9 +7279,13 @@ interface TtsSettings {
   pitch: number;            // 0.5 – 1.5 (system voices only; Piper has no pitch control)
   pauseScale: number;       // multiplier for heading / paragraph / sentence pauses
   expressiveness: number;   // Piper only: multiplier on the voice's noise-scale / noise-w (1 = voice default)
+  hlMode: 'sentence' | 'box' | 'underline' | 'soft' | 'sweep';   // sentence = the whole spoken sentence; the rest mark the single spoken word
+  hlTypewriter: boolean;    // text/web reading: keep the spoken line at a fixed height
 }
 
 const DEFAULT_TTS: TtsSettings = {
+  hlMode: 'box',
+  hlTypewriter: false,
   engine: 'system',
   rate: 1.0,
   voiceUri: '',
@@ -6310,10 +7468,11 @@ function isAudioEngine(): boolean {
 // Tiny Voca loads Python + the model on first use (a few seconds, once per
 // launch). Show where it is in the listening bar, and say so once as a toast.
 let vocaToldLoading = false;
+let vocaPreloading = false;
 setVocaProgressListener((stage, step, steps) => {
   el.ttsLoading.textContent = `Loading Tiny Voca · ${step}/${steps} · ${stage}…`;
   el.ttsLoading.hidden = false;
-  if (!vocaToldLoading) { vocaToldLoading = true; toast('Preparing Tiny Voca — first start takes a few seconds'); }
+  if (!vocaToldLoading && !vocaPreloading) { vocaToldLoading = true; toast('Starting Tiny Voca — loads from this device, nothing is downloaded'); }
 });
 // Called once the model is up (or failed): clears the indicator.
 function vocaLoadFinished(): void { el.ttsLoading.hidden = true; el.ttsLoading.textContent = ''; }
@@ -6508,9 +7667,11 @@ function stopTts(): void {
   hideAllHighlights();
 }
 
+let ttsPausedAt = 0;
 function pauseTts(): void {
   if (!ttsOn || ttsPaused) return;
   ttsPaused = true;
+  ttsPausedAt = Date.now();
   if (cachedPlayback) {
     cachedPlayback.audio.pause();
   } else if (isAudioEngine()) {
@@ -6525,9 +7686,27 @@ function pauseTts(): void {
   updateTtsPlayIcon();
 }
 
+// After a pause the listener has lost a little of the thread: a short one restarts the current
+// sentence, a long one starts from the sentence before it. A deliberate jump while paused
+// (clicking a word) is respected and not rewound.
+function ttsAutoRewind(pausedMs: number): boolean {
+  if (pausedMs < 5000 || focusWords.length === 0) return false;
+  const cur = Math.max(0, Math.min(focusWords.length - 1, focusIndex));
+  let start = sentenceRangeAround(cur)[0];
+  if (start < 0) return false;
+  if (pausedMs > 120_000 && start > 0) {
+    const prev = sentenceRangeAround(start - 1)[0];
+    if (prev >= 0) start = prev;
+  }
+  if (start >= cur) return false;
+  jumpTtsToWordIdx(start);
+  return true;
+}
+
 function resumeTts(): void {
   if (!ttsOn || !ttsPaused) return;
   ttsPaused = false;
+  if (!ttsGapHeld && !cachedPlayback && ttsAutoRewind(Date.now() - ttsPausedAt)) { updateTtsPlayIcon(); return; }
   if (ttsGapHeld) {
     const held = ttsGapHeld;
     ttsGapHeld = null;
@@ -6644,15 +7823,22 @@ function findWordIdxAt(container: Node, offset: number): number {
 }
 
 // Restart TTS playback from a specific focusWords index. Used by click-to-jump
-// (and any other feature that wants to seek within the current page). Also
-// clears ttsPaused so a click on someone who paused resumes playback from
-// the clicked word — matches the expectation of "tap here to hear this."
+// (and any other feature that wants to seek within the current page). While
+// paused it only moves the position; the next Play starts from the clicked word.
 function jumpTtsToWordIdx(idx: number): void {
   if (!ttsOn) return;
   if (idx < 0 || idx >= focusWords.length) return;
   focusIndex = idx;
   ttsUserScrolled = false;           // they just pointed at it: they are looking at it
   cancelCurrentUtterance();
+  if (ttsPaused) {
+    // Paused stays paused: move the position and the highlight, and let the
+    // next Play start from this word.
+    ttsGapHeld = () => speakNextChunk();
+    const { pos, range, rect } = classifyWord(focusWords[idx]);
+    if (pos === 'visible' && range && rect) paintRange(range, rect, idx);
+    return;
+  }
   ttsPaused = false;
   updateTtsPlayIcon();
   speakNextChunk();
@@ -6743,20 +7929,45 @@ function setTtsExpressiveness(v: number): void {
 }
 
 let ttsSleepTimer = 0;
+// When set, read-aloud stops at the next clean boundary instead of at once.
+let ttsSleepAt: 'paragraph' | 'chapter' | 'chunk' | null = null;
+
+// Called as each spoken chunk finishes (lastIdx = its last word): true if it stopped read-aloud.
+function ttsSleepStopHere(lastIdx: number): boolean {
+  if (!ttsSleepAt) return false;
+  const next = focusWords[lastIdx + 1];
+  const paragraphEnd = !next || ttsBlockEndsAfter(lastIdx);
+  const nextTag = next ? ttsBlockOf(next)?.tagName : '';
+  const chapterEnd = !next || (paragraphEnd && (nextTag === 'H1' || nextTag === 'H2'));
+  const due = ttsSleepAt === 'chunk' || (ttsSleepAt === 'paragraph' && paragraphEnd) || (ttsSleepAt === 'chapter' && chapterEnd);
+  if (!due) return false;
+  clearTtsSleep();
+  stopTts();
+  toast('Sleep timer: read aloud stopped');
+  return true;
+}
 function clearTtsSleep(): void {
+  ttsSleepAt = null;
   if (ttsSleepTimer) { clearTimeout(ttsSleepTimer); ttsSleepTimer = 0; }
   el.ttsSleep.value = '0';
   el.ttsTuneBtn.classList.remove('active');
 }
 function setTtsSleep(minutes: number): void {
   if (ttsSleepTimer) { clearTimeout(ttsSleepTimer); ttsSleepTimer = 0; }
-  el.ttsTuneBtn.classList.toggle('active', minutes > 0);
-  if (minutes <= 0) return;
+  ttsSleepAt = null;
+  el.ttsTuneBtn.classList.toggle('active', minutes !== 0);
+  if (minutes === 0) return;
+  if (minutes < 0) {
+    ttsSleepAt = minutes === -1 ? 'paragraph' : 'chapter';
+    toast(minutes === -1 ? 'Read aloud will stop at the end of this paragraph' : 'Read aloud will stop at the end of this chapter');
+    return;
+  }
   ttsSleepTimer = window.setTimeout(() => {
     ttsSleepTimer = 0;
     if (!ttsOn) return;
-    stopTts();
-    toast('Sleep timer: read aloud stopped');
+    // Finish the sentence being read, so it never cuts off mid-word.
+    if (ttsPaused || cachedPlayback) { stopTts(); toast('Sleep timer: read aloud stopped'); return; }
+    ttsSleepAt = 'chunk';
   }, minutes * 60_000);
   toast(`Read aloud will stop in ${minutes} min`);
 }
@@ -7638,6 +8849,8 @@ function ttsWordText(idx: number): string {
    becomes its own chunk: a short pause before and after, no spoken brackets,
    and a comma on the text before it so the voice hands over naturally.
    ----------------------------------------------------------------------- */
+const TTS_PAUSE_SCENE_MS = 2000;       // a scene break (* * *, a rule): a long beat of silence
+const TTS_PAUSE_CHAPTER_MS = 1400;     // before a chapter-level heading
 const TTS_PAUSE_ASIDE_MS = 220;
 const TTS_PAUSE_LINE_MS = 260;          // <br> line breaks (verse, addresses)
 const TTS_PAGE_SPILL_WORDS = 28;        // finish a sentence that runs off the page, up to this many words
@@ -7684,6 +8897,22 @@ function ttsBlockEndsAfter(idx: number): boolean {
   return !!cur && !!nxt && ttsBlockOf(cur) !== ttsBlockOf(nxt);
 }
 
+const TTS_SCENE_MARK_RE = /^[\s*~#=_\-–—•·.°+◆◇❖✦✧⁂]+$/;
+function ttsSceneBreakBetween(idx: number): boolean {
+  const cur = focusWords[idx];
+  const nxt = focusWords[idx + 1];
+  if (!cur || !nxt) return false;
+  const nb = ttsBlockOf(nxt);
+  if (nb && nb !== ttsBlockOf(cur) && TTS_SCENE_MARK_RE.test(nb.textContent || '') && (nb.textContent || '').trim().length > 0) return true;
+  try {
+    const r = cur.node.ownerDocument.createRange();
+    r.setStart(cur.node, cur.end);
+    r.setEnd(nxt.node, nxt.start);
+    if (r.cloneContents().querySelector('hr')) return true;
+  } catch { /* detached nodes */ }
+  return false;
+}
+
 // Silence to leave after the word at idx: 0 inside a block, a longer one
 // when the block (heading > paragraph > list item) ends there.
 function ttsPauseAfter(idx: number): number {
@@ -7696,6 +8925,11 @@ function ttsPauseAfter(idx: number): number {
     if (ttsNodeGap(idx + 1) === 'br') return ttsScaledPause(TTS_PAUSE_LINE_MS);
     return ttsInParen(idx) !== ttsInParen(idx + 1) ? ttsScaledPause(TTS_PAUSE_ASIDE_MS) : 0;
   }
+  // A scene break is a block of nothing but marks (***, * * *, ———) or a horizontal rule. It is
+  // never spoken, so the pause belongs to the sentence before it.
+  if (ttsSceneBreakBetween(idx)) return ttsScaledPause(TTS_PAUSE_SCENE_MS);
+  const nextTag = ttsBlockOf(nxt)?.tagName;
+  if (ttsIsHeading(nxt) && (nextTag === 'H1' || nextTag === 'H2')) return ttsScaledPause(TTS_PAUSE_CHAPTER_MS);
   if (ttsIsHeading(cur)) return ttsScaledPause(TTS_PAUSE_HEADING_MS);
   const tag = block?.tagName;
   if (tag === 'LI' || tag === 'DT' || tag === 'DD' || tag === 'TD' || tag === 'TH' || tag === 'TR') return ttsScaledPause(TTS_PAUSE_ITEM_MS);
@@ -7722,12 +8956,53 @@ function ttsJoinTokens(words: ChunkWord[]): string {
   return out;
 }
 
+/* --- Pronunciation fixes ------------------------------------------------
+   One line per word: "Hermione = her my oh nee". Applied to the text sent to the
+   voice, for every book, so a name is said the same way every time. */
+const KEY_PRON = 'read.pronunciations';
+let pronText: string = load<string>(KEY_PRON, '');
+let pronRules: Array<[RegExp, string]> | null = null;
+
+function parsePronunciations(text: string): Array<[RegExp, string]> {
+  const rules: Array<[RegExp, string]> = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*(.+?)\s*(?:=>|->|=)\s*(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    const from = m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try { rules.push([new RegExp('(?<![\\p{L}\\p{N}])' + from + '(?![\\p{L}\\p{N}])', 'giu'), m[2]]); } catch { /* skip a bad line */ }
+  }
+  return rules;
+}
+
+function applyPronunciations(text: string): string {
+  if (!pronText.trim()) return text;
+  if (!pronRules) pronRules = parsePronunciations(pronText);
+  let out = text;
+  for (const [re, to] of pronRules) out = out.replace(re, () => to);
+  return out;
+}
+
+function openPronModal(): void {
+  const modal = document.getElementById('pron-modal') as HTMLElement;
+  (document.getElementById('pron-text') as HTMLTextAreaElement).value = pronText;
+  modal.hidden = false;
+  closeTtsTune();
+}
+function closePronModal(): void { (document.getElementById('pron-modal') as HTMLElement).hidden = true; }
+function savePronModal(): void {
+  pronText = (document.getElementById('pron-text') as HTMLTextAreaElement).value;
+  pronRules = null;
+  save(KEY_PRON, pronText);
+  closePronModal();
+  toast('Pronunciations saved — they apply to audio read from now on');
+}
+
 // Text actually sent to the engine. Headings, list items and other fragments
 // usually lack closing punctuation; without it engines run them into the
 // next line with no falling intonation, so close them with a full stop.
 function ttsSpokenText(words: ChunkWord[]): string {
   const chunk = words as Chunk;
-  let text = ttsJoinTokens(words);
+  let text = applyPronunciations(ttsJoinTokens(words));
   // Brackets aren't spoken; the pause and tone around the chunk carry the aside.
   if (chunk.aside) text = text.replace(/[()[\]]/g, '');
   const bare = text.replace(TRAILING_CLOSING_RE, '');
@@ -7795,6 +9070,7 @@ function speechDocAlive(): boolean {
 // jumped elsewhere, so go by the speech's own section, then show it.
 async function ttsAdvanceSection(cb: () => void): Promise<void> {
   if (advancingPage || !currentRendition || !currentBook) return;
+  if (ttsSleepAt === 'chapter' || ttsSleepAt === 'paragraph') { clearTtsSleep(); stopTts(); toast('Sleep timer: read aloud stopped'); return; }
   const mine = ((currentRendition as any).getContents?.() ?? []).find((c: any) => c.document === focusIframeDoc);
   const idx: number | undefined = mine?.sectionIndex;
   if (typeof idx !== 'number') { void turnPageAndContinue(cb); return; }   // section unknown: old behaviour
@@ -7820,7 +9096,61 @@ async function ttsAdvanceSection(cb: () => void): Promise<void> {
   cb();
 }
 
-function ttsFollow(pos: WordPos, rect: DOMRect | null): void {
+let ttsTypewriterUntil = 0;
+
+function toggleTypewriter(): void {
+  ttsSettings.hlTypewriter = !ttsSettings.hlTypewriter;
+  persistTts();
+  syncTypewriterBtn();
+  toast(ttsSettings.hlTypewriter ? 'Typewriter scrolling on' : 'Typewriter scrolling off');
+}
+function syncTypewriterBtn(): void {
+  const b = document.getElementById('tts-tw-btn');
+  if (!b) return;
+  b.title = 'Typewriter scrolling: ' + (ttsSettings.hlTypewriter ? 'on' : 'off') + ' (articles, text, Markdown)';
+  b.setAttribute('aria-pressed', String(ttsSettings.hlTypewriter));
+  b.classList.toggle('active', ttsSettings.hlTypewriter);
+}
+
+let ttsProgressAt = 0;
+/** Reading progress follows the spoken word, not the scroll position: the page only moves when speech reaches its end. */
+function ttsReportProgress(rect: DOMRect | null, range: Range | null | undefined): void {
+  const now = performance.now();
+  if (now - ttsProgressAt < (currentTextElement ? 250 : 1500)) return;
+  const rec = currentBookRecord;
+  if (!rec || !rect) return;
+  if (currentTextElement) {
+    const box = currentTextElement;
+    const b = box.getBoundingClientRect();
+    const total = box.scrollHeight - box.clientHeight;
+    if (total <= 0) return;
+    ttsProgressAt = now;
+    const y = box.scrollTop + (rect.top - b.top) - box.clientHeight * 0.3;
+    const pct = Math.min(1, Math.max(0, y / total));
+    rec.progress = pct;
+    rec.lastCfi = `scroll-${pct.toFixed(4)}`;
+    currentLocationCfi = rec.lastCfi;
+    el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
+    el.progressFill.style.width = `${pct * 100}%`;
+    updateTextProgressMeta(box, pct);
+    persistLibrarySoon();
+    return;
+  }
+  if (!range || !currentRendition || !currentBook || !(currentBook.locations as any).total) return;
+  const doc = range.startContainer.ownerDocument;
+  const contents = ((currentRendition.getContents() as unknown as any[])).find(c => c.document === doc);
+  if (!contents) return;
+  ttsProgressAt = now;
+  try {
+    const cfi: string = contents.cfiFromRange(range);
+    updateProgress(cfi);
+    const pct = currentBook.locations.percentageFromCfi(cfi);
+    if (Number.isFinite(pct)) { rec.progress = pct; rec.lastCfi = cfi; currentLocationCfi = cfi; persistLibrarySoon(); }
+  } catch { /* range not mappable right now */ }
+}
+
+function ttsFollow(pos: WordPos, rect: DOMRect | null, range?: Range | null): void {
+  if (pos === 'visible') ttsReportProgress(rect, range);
   if (!currentTextElement) {
     // Paged / scrolled EPUB: turn when speech reaches the next page, unless the
     // reader has moved away from the spoken page; back on it, we follow again.
@@ -7833,6 +9163,16 @@ function ttsFollow(pos: WordPos, rect: DOMRect | null): void {
   const b = box.getBoundingClientRect();
   if (pos === 'visible' && ttsUserScrolled) { ttsUserScrolled = false; }   // reader is back on the spoken word
   if (ttsUserScrolled) return;
+  if (ttsSettings.hlTypewriter && pos === 'visible') {
+    // Hold the spoken line at a fixed height; glide when it moves to a new line.
+    const delta = rect.top - (b.top + b.height * 0.38);
+    if (Math.abs(delta) > rect.height * 0.6 && performance.now() > ttsTypewriterUntil) {
+      ttsTypewriterUntil = performance.now() + 380;
+      ttsAutoScrollUntil = performance.now() + 700;
+      box.scrollBy({ top: delta, behavior: 'smooth' });
+    }
+    return;
+  }
   const nearBottom = rect.top > b.bottom - b.height * 0.15;
   if (pos !== 'after' && !(pos === 'visible' && nearBottom)) return;
   ttsAutoScrollUntil = performance.now() + 700;
@@ -8072,7 +9412,7 @@ function buildSystemUtterance(chunkWords: Chunk, token: number): SpeechSynthesis
         if (!fw) return;
         const { pos, range, rect } = classifyWord(fw);
         if (pos === 'visible' && range && rect) paintRange(range, rect, w.wordIdx);
-        ttsFollow(pos, rect);
+        ttsFollow(pos, rect, range);
         focusIndex = w.wordIdx;
         return;
       }
@@ -8082,6 +9422,7 @@ function buildSystemUtterance(chunkWords: Chunk, token: number): SpeechSynthesis
   u.onend = () => {
     if (!ttsOn || token !== piperGenToken) return;
     focusIndex = chunkWords[chunkWords.length - 1].wordIdx + 1;
+    if (ttsSleepStopHere(focusIndex - 1)) return;
     // If a queued utterance is already playing, its onstart will handle the
     // rest — don't kick off another speakNextChunk or we'd double-speak.
     systemQueuedAhead = false;
@@ -8157,6 +9498,44 @@ interface PreparedPiperChunk {
   words: Chunk;
   audio: HTMLAudioElement;
   url: string;
+  timing?: VocaTiming | null;     // the model's own word timing (Tiny Voca only)
+}
+
+// When, in the audio, each word of a chunk is spoken (seconds). Used to move
+// the highlight. Three sources, best first:
+//  1. the model's per-word timing, when the spoken words line up 1:1 with ours;
+//  2. the model's token timeline (so pauses are real), warped onto our words
+//     when the text was expanded ("$3.50", "Dr.") and the counts differ;
+//  3. an estimate from syllables plus a pause after punctuation.
+function buildWordStarts(words: Chunk, dur: number, timing?: VocaTiming | null): number[] {
+  const n = words.length;
+  if (n === 0) return [];
+  if (timing && timing.spoken.length === n) {
+    return timing.spoken.map((w, i) => (i === 0 ? 0 : w[0]));
+  }
+  const pauseAfter = (t: string): number => {
+    const bare = t.replace(TRAILING_CLOSING_RE, '');
+    if (/[.!?…]$/.test(bare)) return 1.4;
+    if (/[;:—–]$/.test(bare)) return 0.9;
+    if (/,$/.test(bare)) return 0.7;
+    return 0;
+  };
+  const weights = words.map((w, i) => syllableWeight(w.text) + 0.04 * w.text.length + (i < n - 1 ? pauseAfter(w.text) : 0));
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  const frac: number[] = [];
+  let acc = 0;
+  for (const w of weights) { frac.push(acc / total); acc += w; }
+  const ts = timing?.tokenStarts;
+  if (ts && ts.length > 2) {
+    const last = ts.length - 1;
+    return frac.map((f, i) => {
+      if (i === 0) return 0;
+      const k = f * last;
+      const lo = Math.min(last - 1, Math.floor(k));
+      return ts[lo] + (k - lo) * (ts[lo + 1] - ts[lo]);
+    });
+  }
+  return frac.map(f => f * dur);
 }
 
 // Prefetched next chunk (may be null if there's nothing to prefetch, e.g.
@@ -8276,8 +9655,11 @@ function startPiperPaintLoop(): void {
       const fw = focusWords[wordIdx];
       if (fw) {
         const { pos, range, rect } = classifyWord(fw);
-        if (pos === 'visible' && range && rect) paintRange(range, rect, wordIdx);
-        ttsFollow(pos, rect);
+        const nextStart = piperWordStarts[idx + 1];
+        const spanS = (nextStart !== undefined ? nextStart : (piperAudio.duration || t)) - piperWordStarts[idx];
+        const durMs = (spanS * 1000) / (piperAudio.playbackRate || 1);
+        if (pos === 'visible' && range && rect) paintRange(range, rect, wordIdx, durMs);
+        ttsFollow(pos, rect, range);
         focusIndex = wordIdx;
       }
     }
@@ -8311,10 +9693,13 @@ async function synthesizePiperChunk(
   if (!useVoca && !voice) return null;
   const text = ttsSpokenText(chunkWords);
   let wavBytes: Uint8Array;
+  let timing: VocaTiming | null = null;
   try {
     if (useVoca) {
       // In natural-rate mode the model itself speaks faster/slower (pitch preserved).
-      wavBytes = await vocaSynthesize(text, ttsSettings.vocaVoice, ttsSettings.piperNaturalRate ? ttsSettings.rate : 1);
+      const r = await vocaSynthesizeTimed(text, ttsSettings.vocaVoice, ttsSettings.piperNaturalRate ? ttsSettings.rate : 1);
+      wavBytes = r.wav;
+      timing = r.timing;
     } else {
       const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
         text,
@@ -8336,7 +9721,7 @@ async function synthesizePiperChunk(
   audio.playbackRate = currentPiperPlaybackRate();
   audio.volume = ttsSettings.volume;
   audio.preload = 'auto';   // start loading metadata immediately
-  return { token, words: chunkWords, audio, url };
+  return { token, words: chunkWords, audio, url, timing };
 }
 
 // Wire event handlers on a prepared chunk and start playback. This is the
@@ -8376,14 +9761,7 @@ function playPreparedPiperChunk(prepared: PreparedPiperChunk): void {
   const computeWordStarts = () => {
     const dur = piperAudio?.duration || 0;
     if (!isFinite(dur) || dur <= 0) return;
-    const weights = prepared.words.map(w => syllableWeight(w.text));
-    const total = weights.reduce((a, b) => a + b, 0) || 1;
-    let acc = 0;
-    piperWordStarts = [];
-    for (const w of weights) {
-      piperWordStarts.push((acc / total) * dur);
-      acc += w;
-    }
+    piperWordStarts = buildWordStarts(prepared.words, dur, prepared.timing);
   };
 
   // A prefetched audio may already have metadata loaded (readyState >=1).
@@ -8410,6 +9788,7 @@ function playPreparedPiperChunk(prepared: PreparedPiperChunk): void {
   piperAudio.onended = () => {
     if (!ttsOn || prepared.token !== piperGenToken) return;
     focusIndex = prepared.words[prepared.words.length - 1].wordIdx + 1;
+    if (ttsSleepStopHere(focusIndex - 1)) return;
 
     const advance = () => {
       if (!ttsOn || prepared.token !== piperGenToken) return;
@@ -8601,7 +9980,7 @@ function startCachedPaintLoop(): void {
           if (cls.pos === 'visible' && cls.range && cls.rect) {
             paintRange(cls.range, cls.rect, range.startWordIdx);
           }
-          ttsFollow(cls.pos, cls.rect);
+          ttsFollow(cls.pos, cls.rect, cls.range);
           focusIndex = range.startWordIdx;
         }
       }
@@ -8904,13 +10283,27 @@ function wire() {
     renderLibrary();
   });
 
+  wireNews();
+  // Tiny Voca runs from files inside the app (nothing is downloaded) but takes a few seconds to start.
+  // When it is the chosen voice, start it in the background so it is already up when playback begins.
+  if (ttsSettings.engine === 'voca' && !IS_IOS) {
+    window.setTimeout(() => {
+      vocaPreloading = true;
+      startVoca().catch(() => { /* the play path reports real errors */ }).finally(() => { vocaPreloading = false; });
+    }, 2500);
+  }
+
   document.querySelectorAll<HTMLButtonElement>('.sidebar-nav-item[data-library-nav]').forEach(item => {
     item.addEventListener('click', () => {
       const nav = item.dataset.libraryNav;
-      if (nav === 'library') {
+      if (nav === 'news') {
+        setNewsView(true);
+      } else if (nav === 'library') {
+        setNewsView(false);
         el.librarySearch.value = '';
         libraryQuery = '';
         libraryFilter = 'all';
+        librarySubject = null;
         document.querySelectorAll<HTMLButtonElement>('.format-tab').forEach(t => {
           const on = t.dataset.filter === 'all';
           t.classList.toggle('active', on);
@@ -8957,6 +10350,14 @@ function wire() {
     });
   });
 
+  // Subjects
+  document.getElementById('subject-close-btn')?.addEventListener('click', closeSubjectModal);
+  document.getElementById('subject-modal')?.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeSubjectModal();
+  });
+  document.getElementById('subject-form')?.addEventListener('submit', (e) => { e.preventDefault(); saveSubjectFromModal(); });
+  document.getElementById('subject-delete-btn')?.addEventListener('click', deleteSubjectFromModal);
+
   // Save Article (web page → reader mode)
   el.importUrlBtn.addEventListener('click', openUrlImportModal);
   el.closeUrlImportBtn.addEventListener('click', closeUrlImportModal);
@@ -8978,7 +10379,12 @@ function wire() {
     document.removeEventListener('mousemove', onReaderMouseMove);
     if (isFocusModeOn()) stopFocusMode();
     if (isTtsOn()) stopTts();
+    flushLibrary();
+    const backToNews = returnToNews;
+    returnToNews = false;
+    refreshNewsSaveButton();
     goToScreen('library');
+    if (backToNews) setNewsView(true);
   });
 
   el.tocBtn.addEventListener('click', () => openDrawer('toc', 'toc'));
@@ -9044,6 +10450,10 @@ function wire() {
     setTtsPiperNaturalRate(el.ttsNaturalRate.checked);
   });
   el.ttsCacheBtn.addEventListener('click', cacheCurrentChapter);
+  const hlBtn = document.getElementById('tts-hl-btn');
+  document.getElementById('tts-tw-btn')?.addEventListener('click', toggleTypewriter);
+  syncTypewriterBtn();
+  if (hlBtn) { hlBtn.title = 'Highlight: ' + ttsSettings.hlMode; hlBtn.addEventListener('click', cycleHighlightStyle); }
 
   // Extra speaking controls
   syncTtsTuneUi();
@@ -9060,6 +10470,10 @@ function wire() {
   el.ttsPauses.addEventListener('input', () => setTtsPauseScale(parseFloat(el.ttsPauses.value)));
   el.ttsExpr.addEventListener('input', () => setTtsExpressiveness(parseFloat(el.ttsExpr.value)));
   el.ttsSleep.addEventListener('change', () => setTtsSleep(parseInt(el.ttsSleep.value, 10) || 0));
+  document.getElementById('tts-pron-btn')?.addEventListener('click', openPronModal);
+  document.getElementById('pron-close-btn')?.addEventListener('click', closePronModal);
+  document.getElementById('pron-save-btn')?.addEventListener('click', savePronModal);
+  document.getElementById('pron-modal')?.addEventListener('click', (e) => { if (e.target === e.currentTarget) closePronModal(); });
 
   // Piper setup modal
   el.closePiperSetupBtn.addEventListener('click', closePiperSetup);
@@ -9267,6 +10681,8 @@ function wire() {
     sw.addEventListener('click', () => addHighlight(sw.dataset.color as HighlightColor));
   });
   el.popoverRemove.addEventListener('click', removePendingHighlight);
+  document.getElementById('popover-word')?.addEventListener('click', () => reselect('word'));
+  document.getElementById('popover-sentence')?.addEventListener('click', () => reselect('sentence'));
   el.popoverLookup.addEventListener('click', () => {
     const word = pendingSelectionText;
     if (!word) return;

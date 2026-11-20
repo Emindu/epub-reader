@@ -1221,42 +1221,35 @@ fn wrap_wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
 /// reason piper_download_file shells out to curl rather than using the
 /// webview's fetch(). A desktop-browser User-Agent is set because many sites
 /// serve a stripped/blocked page to unrecognized clients.
-#[tauri::command]
-async fn fetch_url_html(url: String) -> Result<String, String> {
-    let trimmed = url.trim().to_string();
-    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-        return Err("Only http:// and https:// URLs are supported".into());
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const PLAIN_UA: &str = "Read/1.0 (RSS reader)";
+
+/// One curl GET with a given User-Agent. Some sites (e.g. economynext.com) answer
+/// a browser-looking UA with an error but serve a plain client fine, so callers
+/// try more than one.
+fn curl_get(url: &str, ua: &str, accept: &str) -> Result<String, String> {
+    let mut cmd = Command::new("curl");
+    cmd.arg("-L")                    // follow redirects
+        .arg("--fail")               // exit non-zero on HTTP errors (404, 403, ...)
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--compressed")         // request + auto-decode gzip/deflate/br
+        .arg("--connect-timeout").arg("15")
+        .arg("--max-time").arg("30")
+        .arg("--max-filesize").arg("20000000") // 20MB safety cap
+        .arg("-A").arg(ua)
+        .arg("-H").arg(format!("Accept: {accept}"))
+        .arg(url);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        let mut cmd = Command::new("curl");
-        cmd.arg("-L")                    // follow redirects
-            .arg("--fail")               // exit non-zero on HTTP errors (404, 403, ...)
-            .arg("--silent")
-            .arg("--show-error")
-            .arg("--compressed")         // request + auto-decode gzip/deflate/br
-            .arg("--connect-timeout").arg("15")
-            .arg("--max-time").arg("30")
-            .arg("--max-filesize").arg("20000000") // 20MB safety cap
-            .arg("-A").arg(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            )
-            .arg("-H").arg("Accept: text/html,application/xhtml+xml")
-            .arg(&trimmed);
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
-
-        cmd.output()
-    })
-    .await
-    .map_err(|e| format!("task join: {e}"))?
-    .map_err(|e| format!("failed to spawn curl (is it installed?): {e}"))?;
-
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn curl (is it installed?): {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(format!(
@@ -1268,11 +1261,39 @@ async fn fetch_url_html(url: String) -> Result<String, String> {
     if output.stdout.is_empty() {
         return Err("the page returned no content".into());
     }
-
     // Lossy UTF-8 decode. Good enough for the vast majority of modern pages
     // (UTF-8 is close to universal); a page served in a legacy 8-bit charset
     // may show mangled characters rather than a hard failure.
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn fetch_with_fallback(url: String, uas: [&'static str; 2], accept: &'static str) -> Result<String, String> {
+    let trimmed = url.trim().to_string();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("Only http:// and https:// URLs are supported".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let first = curl_get(&trimmed, uas[0], accept);
+        if first.is_ok() { return first; }
+        curl_get(&trimmed, uas[1], accept).or(first)
+    })
+    .await
+    .map_err(|e| format!("task join: {e}"))?
+}
+
+/// Fetch a web page's raw HTML for the "Save article" reader-mode importer.
+/// Runs in Rust (not the webview) so we sidestep CORS entirely. A desktop-browser
+/// User-Agent is tried first (many sites serve a stripped page to unknown
+/// clients); a plain one is the fallback for sites that reject fake browsers.
+#[tauri::command]
+async fn fetch_url_html(url: String) -> Result<String, String> {
+    fetch_with_fallback(url, [BROWSER_UA, PLAIN_UA], "text/html,application/xhtml+xml").await
+}
+
+/// Fetch an RSS/Atom feed. Feeds are for machines, so the plain client goes first.
+#[tauri::command]
+async fn fetch_feed_xml(url: String) -> Result<String, String> {
+    fetch_with_fallback(url, [PLAIN_UA, BROWSER_UA], "application/rss+xml, application/atom+xml, application/xml, text/xml, */*").await
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -1291,6 +1312,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             fetch_url_html,
+            fetch_feed_xml,
             piper_status,
             piper_synthesize,
             piper_extract_downloaded_archive,
