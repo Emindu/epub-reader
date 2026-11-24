@@ -27,3 +27,5 @@ dist-ssr
 public/voca/pyodide/
 public/voca/ort/
 public/voca/model/
+public/voca/espeak/
+public/voca/model-si/

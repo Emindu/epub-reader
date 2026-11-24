@@ -12,7 +12,7 @@ import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
 import { CATEGORY_ORDER, DEFAULT_FEEDS, NewsFeed, NewsItem, parseFeed, timeAgo } from './news';
-import { VOCA_VOICES, VocaVoice, isVocaReady, startVoca, vocaSynthesize, vocaSynthesizeTimed, vocaSynthesizeSamples, wavFromFloat32, VocaTiming, setVocaProgressListener, setVocaReadyListener } from './voca';
+import { VOCA_VOICES, VocaVoice, normalizeVocaVoice, isVocaReady, startVoca, vocaSynthesize, vocaSynthesizeTimed, vocaSynthesizeSamples, wavFromFloat32, VocaTiming, setVocaProgressListener, setVocaReadyListener } from './voca';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -511,6 +511,14 @@ const el = {
 
   // Save Article (web page → reader mode)
   importUrlBtn: $<HTMLButtonElement>('import-url-btn'),
+  pasteTextBtn: $<HTMLButtonElement>('paste-text-btn'),
+  pasteTextModal: $<HTMLDivElement>('paste-text-modal'),
+  closePasteTextBtn: $<HTMLButtonElement>('close-paste-text-btn'),
+  pasteTextForm: $<HTMLFormElement>('paste-text-form'),
+  pasteTextTitle: $<HTMLInputElement>('paste-text-title'),
+  pasteTextInput: $<HTMLTextAreaElement>('paste-text-input'),
+  pasteTextSave: $<HTMLButtonElement>('paste-text-save'),
+  pasteTextStatus: $<HTMLDivElement>('paste-text-status'),
   urlImportModal: $<HTMLDivElement>('url-import-modal'),
   closeUrlImportBtn: $<HTMLButtonElement>('close-url-import-btn'),
   urlImportForm: $<HTMLFormElement>('url-import-form'),
@@ -613,6 +621,7 @@ const el = {
 
   // Dictionary-from-clipboard (PDF only — see #pdf-dict-btn's CSS comment)
   pdfDictBtn: $<HTMLButtonElement>('pdf-dict-btn'),
+  pdfSpeakBtn: $<HTMLButtonElement>('pdf-speak-btn'),
 
   // Chat (local-LLM Q&A about the current page/chapter)
   chatBtn: $<HTMLButtonElement>('chat-btn'),
@@ -1230,6 +1239,7 @@ function renderLibrary() {
 
   if (librarySubject && librarySubject !== SUBJECT_NONE && !subjects.some(x => x.id === librarySubject)) librarySubject = null;
   renderSubjectBar();
+  renderSourceBar();
   refreshLibraryVocabButton();
   renderContinueReading();
   renderFormatCounts();
@@ -1525,6 +1535,60 @@ function bookFormatOf(book: BookRecord): string {
   return book.format || getBookFormat(book);
 }
 
+/* ---- Articles tab: filter by the website an article came from ---- */
+let librarySource: string | null = null;
+
+/** The site an article was saved from ("island.lk"), or null for books and files. */
+function articleHost(book: BookRecord): string | null {
+  if (!book.sourceUrl) return null;
+  try { return new URL(book.sourceUrl).hostname.replace(/^www\./, ''); } catch { return null; }
+}
+
+/** A readable name for a host: the News feed's name when it is one of your feeds, otherwise the host itself. */
+function articleSourceName(host: string): string {
+  for (const f of newsAllFeeds()) {
+    try {
+      if (new URL(f.url).hostname.replace(/^www\./, '') === host) return f.name.replace(/ \(Sinhala\)$/, '');
+    } catch { /* skip a bad feed URL */ }
+  }
+  return host;
+}
+
+function renderSourceBar(): void {
+  const bar = document.getElementById('source-bar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  if (libraryFilter !== 'web') { librarySource = null; bar.hidden = true; return; }
+
+  const counts = new Map<string, number>();
+  for (const b of libraryItems()) {
+    const h = articleHost(b);
+    if (h) counts.set(h, (counts.get(h) || 0) + 1);
+  }
+  if (librarySource && !counts.has(librarySource)) librarySource = null;
+  bar.hidden = counts.size < 2;      // one source is no choice at all
+  if (bar.hidden) return;
+
+  const chip = (label: string, n: number, active: boolean, onClick: () => void): void => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'subject-chip' + (active ? ' active' : '');
+    b.setAttribute('aria-pressed', String(active));
+    const t = document.createElement('span');
+    t.textContent = label;
+    const c = document.createElement('span');
+    c.className = 'subject-chip-count';
+    c.textContent = String(n);
+    b.append(t, c);
+    b.addEventListener('click', onClick);
+    bar.appendChild(b);
+  };
+  const total = [...counts.values()].reduce((a, b) => a + b, 0);
+  chip('All sources', total, !librarySource, () => { librarySource = null; renderLibrary(); });
+  const hosts = [...counts.keys()].sort((a, b) => (counts.get(b)! - counts.get(a)!) || a.localeCompare(b));
+  for (const h of hosts) chip(articleSourceName(h), counts.get(h)!, librarySource === h, () => { librarySource = librarySource === h ? null : h; renderLibrary(); });
+}
+
 /** Markdown and plain-text files share one filter tab. */
 function isTextFormat(book: BookRecord): boolean {
   const f = bookFormatOf(book);
@@ -1547,9 +1611,9 @@ function getVisibleLibrary(): BookRecord[] {
   const q = libraryQuery.trim().toLowerCase();
   let list = libraryItems().filter(book => {
     if (libraryFilter === 'read') { if (!book.finishedAt) return false; }
-    else if (libraryFilter === 'web' && !book.sourceUrl) return false;
+    else if (libraryFilter === 'web') { if (!book.sourceUrl || (librarySource && articleHost(book) !== librarySource)) return false; }
     else if (libraryFilter === 'md') { if (book.sourceUrl || !isTextFormat(book)) return false; }
-    else if (libraryFilter !== 'all' && libraryFilter !== 'web' && (book.sourceUrl || bookFormatOf(book) !== libraryFilter)) return false;
+    else if (libraryFilter !== 'all' && (book.sourceUrl || bookFormatOf(book) !== libraryFilter)) return false;
     if (!inSubjectFilter(book, librarySubject)) return false;
     if (!q) return true;
     return `${book.title} ${book.author || ''}`.toLowerCase().includes(q);
@@ -2135,6 +2199,58 @@ async function saveArticleFromUrl(rawUrl: string) {
   }
 }
 
+/* Paste text: any text becomes a library document that can be read aloud like a book. */
+function openPasteTextModal(): void {
+  el.pasteTextModal.hidden = false;
+  el.pasteTextTitle.value = '';
+  el.pasteTextInput.value = '';
+  el.pasteTextStatus.hidden = true;
+  requestAnimationFrame(() => el.pasteTextInput.focus());
+}
+
+async function savePastedText(readAloud: boolean): Promise<void> {
+  const fail = (message: string) => {
+    el.pasteTextStatus.hidden = false;
+    el.pasteTextStatus.className = 'url-import-status error';
+    el.pasteTextStatus.textContent = message;
+  };
+  const raw = el.pasteTextInput.value.replace(/\r\n?/g, '\n').trim();
+  if (!raw) { fail('Paste some text first.'); return; }
+  // Pasted text is usually plain: when it has no blank lines, treat every line break as a paragraph.
+  const body = /\n\s*\n/.test(raw) ? raw : raw.replace(/\n/g, '\n\n');
+  const firstLine = raw.split('\n').find(l => l.trim()) ?? '';
+  const typed = el.pasteTextTitle.value.trim();
+  const title = (typed || firstLine.replace(/^#+\s*/, '').slice(0, 70) || 'Pasted text').trim();
+  // A typed title becomes the heading; otherwise the text is kept exactly as pasted.
+  const markdown = typed ? `# ${title}\n\n${body}\n` : `${body}\n`;
+  try {
+    const id = safeUuid();
+    const now = Date.now();
+    const record: BookRecord = {
+      id, title, author: 'Pasted text', filePath: `pasted:${id}`,
+      coverDataUrl: generateTextCoverDataUrl(title, 'md', false),
+      lastCfi: null, progress: 0, addedAt: now, updatedAt: now, format: 'md',
+    };
+    await ensureBooksDir();
+    const rel = `${BOOKS_DIR}/${id}.md`;
+    await writeFile(rel, new TextEncoder().encode(markdown), { baseDir: BaseDirectory.AppData });
+    record.storedRelPath = rel;
+    library.push(record);
+    persistLibrary();
+    el.pasteTextModal.hidden = true;
+    if (readAloud) {
+      await openFromLibrary(record);
+      window.setTimeout(() => { if (!ttsOn) startTts(); }, 500);
+    } else {
+      renderLibrary();
+      toast('Saved to your library');
+    }
+  } catch (err) {
+    console.error('savePastedText failed:', err);
+    fail(`Couldn't save that text: ${String(err)}`);
+  }
+}
+
 const ARTICLE_PURIFY = {
   FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
   FORBID_ATTR: ['style', 'onerror', 'onload'],
@@ -2229,13 +2345,25 @@ let returnToNews = false;
 const newsErrors: Record<string, string> = {};
 const newsHtml = new Map<string, string>();    // full bodies from this session's fetch; too big to persist
 
-const newsAllFeeds = (): NewsFeed[] => [...DEFAULT_FEEDS, ...newsCustom];
+// Edits to built-in feeds (name / URL / category) are kept as overrides so the
+// defaults can still be reset, and so a future update to the list doesn't wipe them.
+type NewsFeedEdit = Partial<Pick<NewsFeed, 'name' | 'url' | 'category'>>;
+const KEY_NEWS_EDITS = 'read.news.edits';
+let newsEdits: Record<string, NewsFeedEdit> = load<Record<string, NewsFeedEdit>>(KEY_NEWS_EDITS, {});
+let newsEditing: string | null = null;
+
+const newsAllFeeds = (): NewsFeed[] => [...DEFAULT_FEEDS.map(f => ({ ...f, ...(newsEdits[f.id] || {}) })), ...newsCustom];
 const newsActiveFeeds = (): NewsFeed[] => newsAllFeeds().filter(f => !newsOff.has(f.id));
 const newsFeedOf = (id: string): NewsFeed | undefined => newsAllFeeds().find(f => f.id === id);
 const newsCategoryOf = (f: NewsFeed): string => f.category || 'My feeds';
+/** Built-in categories in their set order, then any you made up, then "My feeds". */
+function newsCategoryList(): string[] {
+  const extras = [...new Set(newsAllFeeds().map(newsCategoryOf))].filter(c => !CATEGORY_ORDER.includes(c) && c !== 'My feeds').sort();
+  return [...CATEGORY_ORDER, ...extras, 'My feeds'];
+}
 function newsCategories(): string[] {
   const present = new Set(newsActiveFeeds().map(newsCategoryOf));
-  return [...CATEGORY_ORDER, 'My feeds'].filter(c => present.has(c));
+  return newsCategoryList().filter(c => present.has(c));
 }
 const newsSortKey = (i: NewsItem): number => i.published || i.fetchedAt;
 
@@ -2244,6 +2372,7 @@ function persistNews(): void {
     save(KEY_NEWS_ITEMS, newsItems);
     save(KEY_NEWS_READ, [...newsRead].slice(-NEWS_READ_CAP));
     save(KEY_NEWS_CUSTOM, newsCustom);
+    save(KEY_NEWS_EDITS, newsEdits);
     save(KEY_NEWS_OFF, [...newsOff]);
     save(KEY_NEWS_FETCHED, newsLastFetch);
   } catch (err) {
@@ -2677,10 +2806,8 @@ function renderNewsSources(): void {
   if (!wrap) return;
   wrap.innerHTML = '';
   let lastCat = '';
-  const ordered = [...newsAllFeeds()].sort((x, y) => {
-    const order = [...CATEGORY_ORDER, 'My feeds'];
-    return order.indexOf(newsCategoryOf(x)) - order.indexOf(newsCategoryOf(y));
-  });
+  const order = newsCategoryList();
+  const ordered = [...newsAllFeeds()].sort((x, y) => order.indexOf(newsCategoryOf(x)) - order.indexOf(newsCategoryOf(y)));
   for (const feed of ordered) {
     if (newsCategoryOf(feed) !== lastCat) {
       lastCat = newsCategoryOf(feed);
@@ -2713,6 +2840,15 @@ function renderNewsSources(): void {
       err.title = newsErrors[feed.id];
       row.appendChild(err);
     }
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'library-action-btn';
+    edit.textContent = newsEditing === feed.id ? 'Cancel' : 'Edit';
+    edit.addEventListener('click', () => {
+      newsEditing = newsEditing === feed.id ? null : feed.id;
+      renderNewsSources();
+    });
+    row.appendChild(edit);
     if (!feed.builtin) {
       const rm = document.createElement('button');
       rm.type = 'button';
@@ -2730,7 +2866,99 @@ function renderNewsSources(): void {
       row.appendChild(rm);
     }
     wrap.appendChild(row);
+    if (newsEditing === feed.id) wrap.appendChild(buildNewsEditor(feed));
   }
+}
+
+/** Inline editor under a feed's row: name, URL, category. */
+function buildNewsEditor(feed: NewsFeed): HTMLElement {
+  const form = document.createElement('form');
+  form.className = 'news-edit-form';
+  const field = (label: string, value: string, type: string, list?: string): HTMLInputElement => {
+    const l = document.createElement('label');
+    const s = document.createElement('span');
+    s.textContent = label;
+    const input = document.createElement('input');
+    input.type = type;
+    input.value = value;
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    if (list) input.setAttribute('list', list);
+    l.append(s, input);
+    form.appendChild(l);
+    return input;
+  };
+  const nameIn = field('Name', feed.name, 'text');
+  const urlIn = field('Feed URL', feed.url, 'url');
+  const catIn = field('Category', newsCategoryOf(feed), 'text', 'news-cat-options');
+  const dl = document.createElement('datalist');
+  dl.id = 'news-cat-options';
+  for (const c of newsCategoryList()) { const o = document.createElement('option'); o.value = c; dl.appendChild(o); }
+  form.appendChild(dl);
+
+  const msg = document.createElement('p');
+  msg.className = 'news-add-status error';
+  msg.hidden = true;
+  const buttons = document.createElement('div');
+  buttons.className = 'news-edit-actions';
+  const save = document.createElement('button');
+  save.type = 'submit';
+  save.className = 'library-action-btn';
+  save.textContent = 'Save';
+  buttons.appendChild(save);
+  if (feed.builtin && newsEdits[feed.id]) {
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'library-action-btn';
+    reset.textContent = 'Reset to default';
+    reset.addEventListener('click', () => {
+      const urlChanged = DEFAULT_FEEDS.find(f => f.id === feed.id)?.url !== feed.url;
+      delete newsEdits[feed.id];
+      afterNewsFeedEdit(feed.id, urlChanged);
+    });
+    buttons.appendChild(reset);
+  }
+  form.append(msg, buttons);
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const name = nameIn.value.trim();
+    const url = normalizeArticleUrl(urlIn.value.trim());
+    const category = catIn.value.trim();
+    const fail = (m: string) => { msg.hidden = false; msg.textContent = m; };
+    if (!name) { fail('Give the feed a name.'); return; }
+    try { new URL(url); } catch { fail("That doesn't look like a valid URL."); return; }
+    if (newsAllFeeds().some(f => f.id !== feed.id && f.url === url)) { fail('Another feed already uses that URL.'); return; }
+    const urlChanged = url !== feed.url;
+    if (feed.builtin) {
+      const def = DEFAULT_FEEDS.find(f => f.id === feed.id)!;
+      const edit: NewsFeedEdit = {};
+      if (name !== def.name) edit.name = name;
+      if (url !== def.url) edit.url = url;
+      if (category && category !== (def.category || 'My feeds')) edit.category = category;
+      if (Object.keys(edit).length) newsEdits[feed.id] = edit; else delete newsEdits[feed.id];
+    } else {
+      const c = newsCustom.find(x => x.id === feed.id);
+      if (c) { c.name = name; c.url = url; c.category = category && category !== 'My feeds' ? category : undefined; }
+    }
+    afterNewsFeedEdit(feed.id, urlChanged);
+  });
+  return form;
+}
+
+/** Save, redraw, and (if the address changed) drop the old articles and fetch the new feed. */
+function afterNewsFeedEdit(feedId: string, urlChanged: boolean): void {
+  newsEditing = null;
+  if (urlChanged) {
+    newsItems = newsItems.filter(i => i.feedId !== feedId);
+    delete newsErrors[feedId];
+  }
+  if (newsCategory !== 'all' && !newsCategories().includes(newsCategory)) newsCategory = 'all';
+  if (newsSource !== 'all' && !newsActiveFeeds().some(f => f.id === newsSource)) newsSource = 'all';
+  persistNews();
+  renderNews();
+  renderNewsSources();
+  if (urlChanged) void refreshNews(true);
 }
 
 async function addNewsFeed(rawUrl: string): Promise<void> {
@@ -2873,6 +3101,7 @@ function cleanupCurrentReader() {
   pdfTotalPages = 0;
   pdfHasOutline = false;
   pdfPageTextCache = new Map();
+  if (selSpeaking) stopSelSpeak();
   currentTextElement = null;
   try { for (const col of HL_COLORS) (CSS as any).highlights?.delete('hl-' + col); } catch { /* unsupported */ }
   el.viewer.innerHTML = '';
@@ -3241,6 +3470,11 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
     const totalScroll = container.scrollHeight - container.clientHeight;
     if (totalScroll <= 0) return;
     const pct = Math.min(1, Math.max(0, container.scrollTop / totalScroll));
+    // Read-aloud's own follow-scroll: the spoken word sets the bar (ttsReportProgress). A scroll the reader made is handled below.
+    if (ttsOwnsProgress() && performance.now() <= ttsAutoScrollUntil) {
+      scheduleTextSpy(container);
+      return;
+    }
     record.progress = pct;
     const pseudoCfi = `scroll-${pct.toFixed(4)}`;
     record.lastCfi = pseudoCfi;
@@ -3493,11 +3727,13 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
 
   currentRendition.on('relocated', (loc: Location) => {
     if (ttsOn && performance.now() > ttsAutoScrollUntil) ttsUserScrolled = true;
+    const followed = ttsOwnsProgress();   // read-aloud turned the page: its word, not the page start, is the position
+    if (followed) ttsProgressAt = 0;      // let the very next spoken word update the bar at once
     currentLocationCfi = loc.start.cfi;
     updateChapterFromCfi(loc.start.href);
-    updateProgress();
+    if (!followed) updateProgress();
     refreshBookmarkButton();
-    if (currentBookRecord) {
+    if (currentBookRecord && !followed) {
       currentBookRecord.lastCfi = loc.start.cfi;
       currentBookRecord.updatedAt = Date.now();
       const cb = currentBook;
@@ -5458,6 +5694,133 @@ async function pronounceWord(word: string, btn: HTMLButtonElement): Promise<void
     pronounceInFlight = false;
     btn.disabled = false;
     btn.classList.remove('is-busy');
+  }
+}
+
+/* ------------------------------------------------------------------
+   PDF: read selected text aloud. The PDF viewer's own selection can't be
+   reached from JavaScript (see lookupWordFromPdfClipboard), so this works
+   the same way: select + copy in the PDF, then click Speak. It uses the
+   voice, speed and pronunciations chosen for read-aloud; clicking Speak
+   again stops it.
+   ------------------------------------------------------------------ */
+let selSpeaking = false;
+let selSpeakGen = 0;
+let selSpeakAudio: HTMLAudioElement | null = null;
+let selSpeakCancel: (() => void) | null = null;
+
+/** Copied PDF text -> speakable chunks: mend line-end hyphens and line breaks, then split at sentence ends. */
+function splitForSpeech(raw: string): string[] {
+  const text = raw
+    .replace(/([a-z])-\s*\n\s*([a-z])/g, '$1$2')
+    .replace(/\s*\n\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const sentences = text.match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*\s*|$)/g) || [text];
+  const chunks: string[] = [];
+  let cur = '';
+  for (const s of sentences) {
+    if (cur && (cur + s).length > 280) { chunks.push(cur.trim()); cur = ''; }
+    cur += s;
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks.filter(c => /[\p{L}\p{N}]/u.test(c));
+}
+
+function stopSelSpeak(): void {
+  selSpeakGen++;
+  selSpeaking = false;
+  try { if (isTtsSupported()) speechSynthesis.cancel(); } catch { /* ignore */ }
+  if (selSpeakAudio) { selSpeakAudio.pause(); selSpeakAudio = null; }
+  const done = selSpeakCancel;
+  selSpeakCancel = null;
+  done?.();
+  el.pdfSpeakBtn.classList.remove('active');
+  el.pdfSpeakBtn.querySelector('.pdf-speak-label')!.textContent = 'Speak';
+}
+
+async function synthSelChunk(text: string): Promise<string> {
+  let wav: Uint8Array;
+  if (ttsSettings.engine === 'voca') {
+    wav = await vocaSynthesize(text, ttsSettings.vocaVoice, ttsSettings.piperNaturalRate ? ttsSettings.rate : 1);
+  } else {
+    const r = await invoke<number[] | Uint8Array>('piper_synthesize', {
+      text,
+      voicePath: ttsSettings.piperVoicePath,
+      lengthScale: currentPiperLengthScale(),
+      expressiveness: currentExpressiveness(),
+    });
+    wav = r instanceof Uint8Array ? r : new Uint8Array(r);
+  }
+  return URL.createObjectURL(new Blob([wav.buffer as ArrayBuffer], { type: 'audio/wav' }));
+}
+
+function playSelUrl(url: string, gen: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const audio = new Audio(url);
+    audio.playbackRate = currentPiperPlaybackRate();
+    audio.volume = ttsSettings.volume;
+    const finish = () => { URL.revokeObjectURL(url); if (selSpeakAudio === audio) selSpeakAudio = null; selSpeakCancel = null; resolve(); };
+    audio.onended = finish;
+    audio.onerror = finish;
+    selSpeakAudio = audio;
+    selSpeakCancel = finish;
+    if (gen !== selSpeakGen) { finish(); return; }
+    audio.play().catch(finish);
+  });
+}
+
+async function speakPdfSelection(): Promise<void> {
+  if (selSpeaking) { stopSelSpeak(); return; }
+  let clip: string | null = null;
+  try { clip = await readClipboardText(); } catch (err) { console.error('Clipboard read failed:', err); toast("Couldn't read the clipboard."); return; }
+  const raw = (clip || '').trim();
+  if (!raw) { toast('Select text in the PDF and copy it (Ctrl+C), then click Speak.'); return; }
+  const chunks = splitForSpeech(applyPronunciations(raw.slice(0, 30000)));
+  if (chunks.length === 0) { toast('Nothing readable in the copied text.'); return; }
+  if (ttsSettings.engine === 'system' && !isTtsSupported()) { toast('Text-to-speech not supported'); return; }
+  if (ttsSettings.engine === 'piper' && !isPiperReady()) { openPiperSetup(); toast('Piper needs setup — see the panel'); return; }
+  if (isTtsOn()) stopTts();
+  stopPronounce();
+
+  const gen = ++selSpeakGen;
+  selSpeaking = true;
+  el.pdfSpeakBtn.classList.add('active');
+  el.pdfSpeakBtn.querySelector('.pdf-speak-label')!.textContent = 'Stop';
+  const words = raw.split(/\s+/).length;
+  toast(`Reading ${words} word${words === 1 ? '' : 's'} aloud`);
+
+  try {
+    if (isAudioEngine()) {
+      let next: Promise<string> = synthSelChunk(chunks[0]);
+      for (let i = 0; i < chunks.length; i++) {
+        const url = await next;
+        if (gen !== selSpeakGen) { URL.revokeObjectURL(url); return; }
+        if (i + 1 < chunks.length) { next = synthSelChunk(chunks[i + 1]); next.catch(() => { /* surfaced when awaited */ }); }
+        await playSelUrl(url, gen);
+        if (gen !== selSpeakGen) return;
+      }
+    } else {
+      speechSynthesis.cancel();
+      await new Promise<void>((resolve) => {
+        selSpeakCancel = resolve;
+        chunks.forEach((c, i) => {
+          const u = new SpeechSynthesisUtterance(c);
+          u.rate = ttsSettings.rate;
+          u.volume = ttsSettings.volume;
+          u.pitch = ttsSettings.pitch;
+          const voice = getSelectedVoice();
+          if (voice) { u.voice = voice; u.lang = voice.lang; }
+          if (i === chunks.length - 1) { u.onend = () => resolve(); u.onerror = () => resolve(); }
+          speechSynthesis.speak(u);
+        });
+      });
+    }
+  } catch (err) {
+    console.error('speak selection failed:', err);
+    toast(`Couldn't read that aloud: ${(err as Error)?.message || err}`);
+  } finally {
+    if (gen === selSpeakGen) stopSelSpeak();
   }
 }
 
@@ -7437,7 +7800,7 @@ interface TtsSettings {
   rate: number;             // 0.5 – 2.0
   voiceUri: string;         // system engine: SpeechSynthesisVoice.voiceURI; '' = system default
   piperVoicePath: string;   // piper engine: absolute path to .onnx model
-  vocaVoice: VocaVoice;     // Tiny Voca engine: F2 (female) or M2 (male)
+  vocaVoice: VocaVoice;     // Tiny Voca engine: F2 = female, M2 = male (Sinhala text maps to F1 / M1 by itself)
   // Piper-only: when true, rate is achieved by piper's `--length-scale` at
   // synth time (natural pitch, requires re-synth on rate change) instead of
   // HTMLAudioElement.playbackRate (instant, but pitch-shifted — chipmunk
@@ -7466,6 +7829,7 @@ const DEFAULT_TTS: TtsSettings = {
   expressiveness: 1,
 };
 let ttsSettings: TtsSettings = { ...DEFAULT_TTS, ...load<Partial<TtsSettings>>(KEY_TTS, {}) };
+ttsSettings.vocaVoice = normalizeVocaVoice(ttsSettings.vocaVoice);
 const persistTts = () => save(KEY_TTS, ttsSettings);
 
 /* --- Piper engine state ------------------------------------------------ */
@@ -8193,7 +8557,7 @@ function setTtsPiperNaturalRate(on: boolean): void {
 
 function setTtsVoice(value: string): void {
   if (ttsSettings.engine === 'voca') {
-    ttsSettings.vocaVoice = value === 'M2' ? 'M2' : 'F2';
+    ttsSettings.vocaVoice = normalizeVocaVoice(value);
   } else if (ttsSettings.engine === 'piper') {
     ttsSettings.piperVoicePath = value;
   } else {
@@ -9281,10 +9645,13 @@ function syncTypewriterBtn(): void {
 }
 
 let ttsProgressAt = 0;
+/** While read-aloud follows the text, the spoken word alone drives the progress bar. The scroll
+    and page-turn handlers would otherwise overwrite it with the top of the page and make it jump. */
+const ttsOwnsProgress = (): boolean => ttsOn && !ttsUserScrolled;
 /** Reading progress follows the spoken word, not the scroll position: the page only moves when speech reaches its end. */
 function ttsReportProgress(rect: DOMRect | null, range: Range | null | undefined): void {
   const now = performance.now();
-  if (now - ttsProgressAt < (currentTextElement ? 250 : 1500)) return;
+  if (now - ttsProgressAt < (currentTextElement ? 200 : 500)) return;
   const rec = currentBookRecord;
   if (!rec || !rect) return;
   if (currentTextElement) {
@@ -9300,6 +9667,7 @@ function ttsReportProgress(rect: DOMRect | null, range: Range | null | undefined
     currentLocationCfi = rec.lastCfi;
     el.progressPercent.textContent = `${Math.round(pct * 100)}%`;
     el.progressFill.style.width = `${pct * 100}%`;
+    el.progressThumb.style.left = `${pct * 100}%`;
     updateTextProgressMeta(box, pct);
     persistLibrarySoon();
     return;
@@ -10539,6 +10907,11 @@ function wire() {
     e.preventDefault();
     saveArticleFromUrl(el.urlImportInput.value);
   });
+  el.pasteTextBtn.addEventListener('click', openPasteTextModal);
+  el.closePasteTextBtn.addEventListener('click', () => { el.pasteTextModal.hidden = true; });
+  el.pasteTextModal.addEventListener('click', (e) => { if (e.target === el.pasteTextModal) el.pasteTextModal.hidden = true; });
+  el.pasteTextForm.addEventListener('submit', (e) => { e.preventDefault(); void savePastedText(true); });
+  el.pasteTextSave.addEventListener('click', () => { void savePastedText(false); });
   el.openOriginalBtn.addEventListener('click', () => {
     if (currentBookRecord?.sourceUrl) openUrl(currentBookRecord.sourceUrl);
   });
@@ -10735,6 +11108,7 @@ function wire() {
 
   // PDF dictionary (clipboard-driven — see lookupWordFromPdfClipboard)
   el.pdfDictBtn.addEventListener('click', lookupWordFromPdfClipboard);
+  el.pdfSpeakBtn.addEventListener('click', () => { void speakPdfSelection(); });
 
   // Chat
   el.chatBtn.addEventListener('click', openChat);

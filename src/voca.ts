@@ -1,20 +1,31 @@
 /* Client for the Tiny Voca worker: lazy start, request/response by id, and
    WAV encoding so the audio drops into the same <audio> pipeline Piper uses. */
 
-export type VocaVoice = 'F2' | 'M2';
+import { isSinhalaText } from './sinhala';
+
+export type VocaLang = 'en' | 'si';
+/** The user picks female or male. The text's language then decides the voice:
+    English F2/M2, Sinhala F1/M1 (the retrained model). Older saves may hold M1/F1. */
+export type VocaVoice = 'F2' | 'M2' | 'M1' | 'F1';
 export const VOCA_VOICES: Array<{ id: VocaVoice; label: string }> = [
-  { id: 'F2', label: 'Tiny Voca · F2 (female)' },
-  { id: 'M2', label: 'Tiny Voca · M2 (male)' },
+  { id: 'F2', label: 'Tiny Voca · Female (English F2, Sinhala F1)' },
+  { id: 'M2', label: 'Tiny Voca · Male (English M2, Sinhala M1)' },
 ];
+export const isFemaleVoice = (voice: VocaVoice): boolean => voice === 'F2' || voice === 'F1';
+/** Folds any saved voice into the two choices shown in the list. */
+export const normalizeVocaVoice = (voice: string): VocaVoice => (voice === 'M2' || voice === 'M1' ? 'M2' : 'F2');
+
+/** Which engine will read this text. */
+export const vocaLangForText = (text: string): VocaLang => (isSinhalaText(text) ? 'si' : 'en');
 
 let worker: Worker | null = null;
-let readyPromise: Promise<void> | null = null;
+const readyPromises: Partial<Record<VocaLang, Promise<void>>> = {};
 let nextId = 1;
-let ready = false;
+const readyLangs: Partial<Record<VocaLang, boolean>> = {};
 const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
 let onProgress: ((stage: string, step: number, steps: number) => void) | null = null;
 
-export const isVocaReady = (): boolean => ready;
+export const isVocaReady = (lang: VocaLang = 'en'): boolean => !!readyLangs[lang];
 let onReady: (() => void) | null = null;
 export function setVocaReadyListener(fn: (() => void) | null): void { onReady = fn; }
 export function setVocaProgressListener(fn: ((stage: string, step: number, steps: number) => void) | null): void { onProgress = fn; }
@@ -27,9 +38,8 @@ function request<T>(payload: Record<string, unknown>, transfer: Transferable[] =
   });
 }
 
-/** Starts the worker (once) and resolves when Python + the model are loaded. */
-export function startVoca(): Promise<void> {
-  if (readyPromise) return readyPromise;
+function ensureWorker(): void {
+  if (worker) return;
   worker = new Worker(new URL('./voca.worker.ts', import.meta.url), { type: 'module' });
   worker.onmessage = (e: MessageEvent) => {
     const m = e.data;
@@ -44,11 +54,21 @@ export function startVoca(): Promise<void> {
     const err = new Error(e.message || 'voca worker crashed');
     for (const p of pending.values()) p.reject(err);
     pending.clear();
+    worker = null;
+    for (const k of Object.keys(readyPromises) as VocaLang[]) { delete readyPromises[k]; readyLangs[k] = false; }
   };
+}
+
+/** Starts the worker (once) and resolves when that language's engine (Python/eSpeak + model) is loaded. */
+export function startVoca(lang: VocaLang = 'en'): Promise<void> {
+  const existing = readyPromises[lang];
+  if (existing) return existing;
+  ensureWorker();
   const base = new URL('/voca/', location.href).href;
-  readyPromise = request<void>({ type: 'init', base }).then(() => { ready = true; onReady?.(); });
-  readyPromise.catch(() => { onReady?.(); worker?.terminate(); worker = null; readyPromise = null; });
-  return readyPromise;
+  const p = request<void>({ type: 'init', base, lang }).then(() => { readyLangs[lang] = true; onReady?.(); });
+  readyPromises[lang] = p;
+  p.catch(() => { onReady?.(); if (readyPromises[lang] === p) delete readyPromises[lang]; });
+  return p;
 }
 
 export function wavFromFloat32(samples: Float32Array, sampleRate: number): Uint8Array {
@@ -76,8 +96,13 @@ export interface VocaSamples extends Partial<VocaTiming> { audio: Float32Array; 
 
 /** Synthesizes `text` to raw mono samples. `speed` 1 = the voice's natural pace. */
 export async function vocaSynthesizeSamples(text: string, voice: VocaVoice, speed = 1): Promise<VocaSamples> {
-  await startVoca();
-  return request<VocaSamples>({ type: 'synth', text, voice: voice === 'M2' ? 1 : 0, speed });
+  // The text decides the language, the voice argument decides male or female.
+  const lang = vocaLangForText(text);
+  const isFemale = isFemaleVoice(voice);
+  await startVoca(lang);
+  // Sinhala model voices: M1 = 0, F1 = 1. English: F2 = 0, M2 = 1.
+  const index = lang === 'si' ? (isFemale ? 1 : 0) : (isFemale ? 0 : 1);
+  return request<VocaSamples>({ type: 'synth', text, voice: index, speed, lang });
 }
 
 /** Synthesizes `text` and returns a 16-bit mono WAV. */

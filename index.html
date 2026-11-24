@@ -90,6 +90,10 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>
               <span>Save article</span>
             </button>
+            <button id="paste-text-btn" class="library-action-btn" title="Paste any text and have it read aloud">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="M8 12h8M8 16h5"/></svg>
+              <span>Paste text</span>
+            </button>
             <button id="import-btn" class="pill-btn library-add-btn">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
               <span>Add book</span>
@@ -152,6 +156,8 @@
 
           <!-- Subjects -->
           <div id="subject-bar" class="subject-bar" aria-label="Subjects"></div>
+          <!-- Article sources (Articles tab only) -->
+          <div id="source-bar" class="subject-bar" aria-label="Article sources" hidden></div>
 
           <!-- Empty state -->
           <div id="library-empty" class="library-empty">
@@ -274,6 +280,10 @@
             </button>
             <button id="pdf-dict-btn" class="topbar-icon-btn" title="Look up a word (copy it from the PDF first, then click here)">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h5"/></svg>
+            </button>
+            <button id="pdf-speak-btn" class="topbar-icon-btn" title="Read selected text aloud (copy it from the PDF first, then click here)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10v4a1 1 0 0 0 1 1h3l5 4V5L7 9H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/></svg>
+              <span class="pdf-speak-label">Speak</span>
             </button>
             <button id="save-news-btn" class="topbar-icon-btn" title="Save this article to your library" hidden>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>
@@ -1018,6 +1028,34 @@
             </button>
           </form>
           <div id="url-import-status" class="url-import-status" hidden></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Paste text (read aloud) Modal -->
+    <div id="paste-text-modal" class="modal-backdrop" hidden>
+      <div class="modal-container url-import-container paste-text-container">
+        <div class="modal-header">
+          <div class="modal-header-left">
+            <h3>Paste text</h3>
+            <p>Paste or type any text (English or Sinhala). It is saved to your library and can be read aloud right away.</p>
+          </div>
+          <div class="modal-header-right">
+            <button id="close-paste-text-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="modal-body url-import-body">
+          <form id="paste-text-form" class="paste-text-form">
+            <input type="text" id="paste-text-title" class="url-import-input" placeholder="Title (optional)" autocomplete="off" spellcheck="false">
+            <textarea id="paste-text-input" class="url-import-input paste-text-area" placeholder="Paste text here…" spellcheck="false" required></textarea>
+            <div class="paste-text-actions">
+              <button type="button" id="paste-text-save" class="ghost-btn">Save only</button>
+              <button type="submit" id="paste-text-read" class="pill-btn">Save &amp; read aloud</button>
+            </div>
+          </form>
+          <div id="paste-text-status" class="url-import-status" hidden></div>
         </div>
       </div>
     </div>

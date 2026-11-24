@@ -627,6 +627,10 @@ html[data-format="pdf"] .edge-sensor-top {
    unreachable nested context. */
 #pdf-dict-btn { display: none; }
 html[data-format="pdf"] #pdf-dict-btn { display: inline-flex; }
+#pdf-speak-btn { display: none; }
+html[data-format="pdf"] #pdf-speak-btn { display: inline-flex; align-items: center; gap: 5px; width: auto; padding: 0 8px; }
+.pdf-speak-label { font-size: 12px; }
+#pdf-speak-btn.active { background: var(--surface-hover); color: var(--accent, inherit); }
 
 /* Our own zoom controls, standing in for the native toolbar's zoom buttons
    now that the native toolbar is hidden. */
@@ -1694,6 +1698,10 @@ html[data-theme="einkwarm"][data-appearance="dark"] {
   transition: border-color var(--dur-fast);
 }
 .url-import-input:focus { border-color: var(--accent); }
+.paste-text-form { display: flex; flex-direction: column; gap: 10px; }
+.paste-text-container { max-width: 640px; }
+.paste-text-area { min-height: 220px; max-height: 50vh; resize: vertical; font-family: inherit; font-size: 15px; line-height: 1.5; }
+.paste-text-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .url-import-form .pill-btn { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
 .url-import-form .pill-btn svg { animation: aiSpin 1s linear infinite; }
 
@@ -4659,6 +4667,10 @@ html[data-appearance="dark"] ::highlight(hl-purple) { background-color: rgba(196
 .news-source-row label { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .news-source-row small { color: var(--text-muted); }
 .news-source-row .news-source-err { color: #c2410c; font-size: 12px; }
+.news-edit-form { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; margin: -4px 0 4px; border-radius: 8px; background: var(--surface-hover); }
+.news-edit-form label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-muted); }
+.news-edit-form input { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border, rgba(127,127,127,.3)); background: var(--surface); color: var(--text); font-family: inherit; font-size: 14px; }
+.news-edit-actions { display: flex; gap: 8px; }
 .news-add-form { display: flex; gap: 8px; }
 .news-add-form input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border, rgba(127,127,127,.3)); background: var(--surface); color: var(--text); font: inherit; }
 .news-add-status { font-size: 12.5px; color: var(--text-muted); margin: 0; }

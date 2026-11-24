@@ -47,3 +47,19 @@ const files = ['config.json', 'onnx/model.onnx', 'phonemizer/align.json', 'phone
   'phonemizer/LICENSE.homograph-data'];
 for (const f of files) await download(hf + f, join(out, 'model', f));
 console.log('voca assets ready in', out);
+
+// ---- Sinhala voice (optional) -------------------------------------------------
+// eSpeak NG (WebAssembly, GPL-3.0) turns Sinhala text into phonemes; the retrained
+// Tiny Voca model in Sinhala/ turns those into speech.
+mkdirSync(join(out, 'espeak'), { recursive: true });
+const esp = join(nm, '@echogarden', 'espeak-ng-emscripten');
+if (existsSync(esp)) {
+  for (const f of ['espeak-ng.js', 'espeak-ng.data']) copyFileSync(join(esp, f), join(out, 'espeak', f));
+} else console.warn('skipping eSpeak: run `npm install` first');
+const si = join(root, 'Sinhala');
+if (existsSync(join(si, 'tiny-voca-si.onnx')) && existsSync(join(si, 'tiny-voca-si.txt'))) {
+  mkdirSync(join(out, 'model-si'), { recursive: true });
+  copyFileSync(join(si, 'tiny-voca-si.onnx'), join(out, 'model-si', 'model.onnx'));
+  copyFileSync(join(si, 'tiny-voca-si.txt'), join(out, 'model-si', 'meta.json'));
+  console.log('Sinhala voice ready');
+} else console.warn('skipping Sinhala model: Sinhala/tiny-voca-si.onnx and .txt not found');
