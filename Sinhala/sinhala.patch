@@ -1,0 +1,1069 @@
+diff --git a/docs/sinhala.md b/docs/sinhala.md
+new file mode 100644
+index 0000000..2481f98
+--- /dev/null
++++ b/docs/sinhala.md
+@@ -0,0 +1,84 @@
++# Sinhala (සිංහල)
++
++Train and run tiny-voca for Sinhala. Everything is switched on with one
++environment variable, set before Python starts:
++
++```bash
++export TINY_VOCA_LANGUAGE=si
++```
++
++English is untouched when the variable is not set.
++
++## Front end
++
++`src/tiny_voca/sinhala.py`. Sinhala text goes through eSpeak NG's `si` voice
++(the library in the `espeakng-loader` wheel, called through `phonemizer-fork`,
++so the same eSpeak build is used for annotation and inference) with a few
++corrections:
++
++* zero-width joiners are removed (otherwise ශ්‍රී and ක්‍ර are split in two),
++* ශ is read as ෂ (`ʃ`),
++* prenasalised stops ඹ ඳ ඟ become one token each (`ᵐb` `ⁿd` `ᵑɡ`),
++* words in Latin script are read in English and mapped onto Sinhala phones.
++
++73 symbols: 5 specials, 12 punctuation marks, 41 consonants, 15 vowels.
++All 9,686 sentences of both Path Nirvana releases phonemize without an
++unknown phoneme.
++
++Forced alignment still uses `facebook/wav2vec2-lv-60-espeak-cv-ft`. It has no
++labels for the prenasalised stops and `dʒʰ`; for alignment only they use the
++label of their onset (`ᵐb` → `m`, `ⁿd` → `n`, `ᵑɡ` → `ŋ`, `dʒʰ` → `dʒ`).
++
++## Data
++
++`scripts/sinhala_data.py` downloads and converts:
++
++| Source | Voices | Hours | Licence |
++|---|---|---:|---|
++| Path Nirvana v2 | M1 (Ven. Mettananda), F1 (Mrs. Oshadi) | ~13.8 | GPL-3.0; non-obscene, non-offensive use only |
++| Path Nirvana first release | M1 | ~7 | same |
++| OpenSLR-30 (optional) | S&lt;id&gt; | ~3 total | CC BY-SA 4.0 |
++
++The female voice has much less data (~2 h) than the male one, so expect it to
++sound weaker.
++
++```bash
++pip install -e ".[si,prepare,annotate]"
++python scripts/sinhala_data.py download --source pathnirvana --dest raw
++python scripts/sinhala_data.py download --source pathnirvana-old --dest raw
++python scripts/sinhala_data.py build --pathnirvana raw/pathnirvana "raw/pathnirvana-old/old dataset" --output data
++for split in train validation test; do
++  python -m tiny_voca.prepare --inputs data/$split-*.parquet --split $split --output features --config data/config.json
++done
++hf download facebook/wav2vec2-lv-60-espeak-cv-ft
++python -m tiny_voca.annotate --features features --output annotations --dataset-revision pathnirvana-v2 --config data/config.json
++python -m tiny_voca.train --train annotations/train.jsonl --validation annotations/validation.jsonl \
++  --output runs/sinhala --config data/config.json --steps 40000 --gan-start 8000 --gan-ratio 0.7 --teacher-final 0
++```
++
++On Kaggle, use the two notebooks `tiny-voca-sinhala-1-data.ipynb` (CPU) and
++`tiny-voca-sinhala-2-train.ipynb` (GPU) instead; they apply this patch themselves.
++
++## Speaking
++
++```bash
++pip install -e ".[si]"
++TINY_VOCA_LANGUAGE=si python -m tiny_voca.infer --checkpoint tiny-voca-si.pt --voice M1 \
++  --text "ආයුබෝවන්! ඔබට කොහොමද?" --output hello.wav
++```
++
++## Tests
++
++```bash
++TINY_VOCA_LANGUAGE=si PYTHONPATH=src:tests python -m unittest tests.test_frontend_sinhala
++```
++
++## Limits
++
++* eSpeak's Sinhala rules decide the pronunciation. It does not tell ඬ from ණ්ඩ
++  (both `ɳ ɖ`) and reads digits word by word.
++* The aligner was not trained on Sinhala. Check the rejection rate printed by
++  the annotation step.
++* eSpeak NG is GPL-3.0. Fine for training and personal use; check the licence
++  before you ship it in a product. The Path Nirvana recordings are GPL-3.0 too.
++* The browser demo and the plain-JavaScript port are English only.
+diff --git a/pyproject.toml b/pyproject.toml
+index c8aeeb5..ca5e3bf 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -15,6 +15,8 @@ dependencies = ["torch>=2.4,<3", "numpy>=1.24,<3", "soundfile>=0.12,<1"]
+ [project.optional-dependencies]
+ # The "own" front end: text to phonemes without eSpeak.
+ own = ["dizione @ git+https://github.com/n4ze3m/dizione"]
++# The Sinhala front end (TINY_VOCA_LANGUAGE=si): eSpeak NG as a pinned library wheel.
++si = ["phonemizer-fork==3.3.2", "espeakng-loader==0.2.4"]
+ prepare = ["librosa>=0.10.2,<1", "pyarrow>=15", "huggingface-hub>=0.34,<2"]
+ # Annotation only: the pretrained phoneme recogniser used for forced alignment.
+ annotate = ["transformers>=4.40,<5", "torchaudio>=2.1,<3", "scipy>=1.10,<2", "huggingface-hub>=0.34,<2"]
+diff --git a/scripts/sinhala_data.py b/scripts/sinhala_data.py
+new file mode 100644
+index 0000000..cb9a1ac
+--- /dev/null
++++ b/scripts/sinhala_data.py
+@@ -0,0 +1,309 @@
++"""Download Sinhala speech corpora and turn them into tiny-voca Parquet shards.
++
++    python scripts/sinhala_data.py download --source pathnirvana --dest raw
++    python scripts/sinhala_data.py build --pathnirvana raw/pathnirvana --output data
++
++``download`` sources:
++
++* ``pathnirvana``: Path Nirvana Sinhala TTS dataset v2 (github.com/pnfo/sinhala-tts-dataset),
++  about 13.8 hours: Ven. Mettananda (male, ~11.8 h) and Mrs. Oshadi (female, ~2 h).
++  Fetched from the repository's latest GitHub release. Licence: GPL-3.0, and the
++  speakers allow only non-obscene, non-offensive speech generation.
++* ``pathnirvana-old``: the first release (one male voice, ~7 h), stored in the git
++  repository itself. Used automatically if the release cannot be fetched.
++* ``openslr30``: Google's Sinhala TTS corpus (openslr.org/30), multi-speaker,
++  48 kHz. Licence: CC BY-SA 4.0. Optional extra voices.
++
++``build`` resamples to 24 kHz mono, trims edge silence, drops clips outside
++1-15 s, removes the unspoken ``-පෙ-`` marker, splits train/validation/test BY
++SENTENCE (the same sentence never lands in two splits, across all voices), and
++writes ``<output>/{train,validation,test}-NNNNN.parquet`` plus
++``<output>/config.json`` with the voice names for ``--config``.
++"""
++
++import argparse
++from collections import Counter, defaultdict
++import hashlib
++import io
++import json
++from pathlib import Path
++import re
++import shutil
++import subprocess
++import sys
++import tarfile
++import unicodedata
++import urllib.request
++import zipfile
++
++PATHNIRVANA_REPO = "pnfo/sinhala-tts-dataset"
++OPENSLR_MIRRORS = ("https://www.openslr.org/resources/30", "https://us.openslr.org/resources/30",
++                   "https://openslr.elda.org/resources/30", "https://openslr.magicdatatech.com/resources/30")
++SAMPLE_RATE = 24000
++LICENSES = {"pathnirvana": "GPL-3.0 (non-obscene, non-offensive use only)", "openslr30": "CC-BY-SA-4.0"}
++# Short ASCII voice names: they become model voice ids (--voice) and ONNX metadata.
++PATHNIRVANA_VOICES = {"mettananda": "M1", "oshadi": "F1"}
++
++
++# --------------------------------------------------------------------- download
++
++def fetch(url, destination):
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    print(f"downloading {url}", flush=True)
++    request = urllib.request.Request(url, headers={"User-Agent": "tiny-voca-sinhala"})
++    with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as stream:
++        shutil.copyfileobj(response, stream, length=1 << 20)
++    return destination
++
++
++def extract(archive, destination):
++    """Unpack into ``destination`` without letting members escape it."""
++    destination.mkdir(parents=True, exist_ok=True)
++    root = destination.resolve()
++    if zipfile.is_zipfile(archive):
++        with zipfile.ZipFile(archive) as bundle:
++            for member in bundle.namelist():
++                if not (destination / member).resolve().is_relative_to(root):
++                    raise ValueError(f"unsafe path in archive: {member}")
++            bundle.extractall(destination)
++        return
++    with tarfile.open(archive) as bundle:
++        try:
++            bundle.extractall(destination, filter="data")
++        except TypeError:                      # Python without extraction filters
++            for member in bundle.getmembers():
++                if not (destination / member.name).resolve().is_relative_to(root) or member.issym() or member.islnk():
++                    raise ValueError(f"unsafe member in archive: {member.name}")
++            bundle.extractall(destination)
++
++
++def download_pathnirvana(dest):
++    target = dest / "pathnirvana"
++    if any(target.rglob("*.wav")) and any(target.rglob("metadata.csv")):
++        print(f"{target} already has the data")
++        return target
++    request = urllib.request.Request(f"https://api.github.com/repos/{PATHNIRVANA_REPO}/releases/latest",
++                                     headers={"User-Agent": "tiny-voca-sinhala", "Accept": "application/vnd.github+json"})
++    with urllib.request.urlopen(request, timeout=60) as response:
++        release = json.load(response)
++    assets = [a for a in release.get("assets", []) if re.search(r"\.(tar(\.(gz|bz2|xz))?|tgz|zip)$", a["name"])]
++    if not assets:
++        raise RuntimeError(f"release {release.get('tag_name')} has no archive asset")
++    asset = max(assets, key=lambda a: a["size"])
++    print(f"release {release.get('tag_name')}: {asset['name']} ({asset['size'] / 1e9:.2f} GB)")
++    archive = fetch(asset["browser_download_url"], dest / "downloads" / asset["name"])
++    extract(archive, target)
++    archive.unlink()
++    if not any(target.rglob("metadata.csv")):
++        fetch(f"https://raw.githubusercontent.com/{PATHNIRVANA_REPO}/{release.get('target_commitish', 'main')}/metadata.csv",
++              target / "metadata.csv")
++    return target
++
++
++def download_pathnirvana_old(dest):
++    target = dest / "pathnirvana-old"
++    if (target / "old dataset" / "metadata.csv").exists():
++        return target
++    subprocess.run(["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
++                    f"https://github.com/{PATHNIRVANA_REPO}.git", str(target)], check=True)
++    subprocess.run(["git", "-C", str(target), "sparse-checkout", "set", "--no-cone",
++                    "/old dataset/wavs/", "/old dataset/metadata.csv"], check=True)
++    return target
++
++
++def download_openslr30(dest):
++    target = dest / "openslr30"
++    if (target / "si_lk.lines.txt").exists() and any(target.rglob("*.wav")):
++        return target
++    for mirror in OPENSLR_MIRRORS:
++        try:
++            lines = fetch(f"{mirror}/si_lk.lines.txt", target / "si_lk.lines.txt")
++            archive = fetch(f"{mirror}/si_lk.tar.gz", dest / "downloads" / "si_lk.tar.gz")
++            break
++        except OSError as error:
++            print(f"  {mirror} failed: {error}")
++    else:
++        raise RuntimeError("no OpenSLR mirror worked")
++    extract(archive, target)
++    archive.unlink()
++    return target
++
++
++# --------------------------------------------------------------------- reading
++
++def clean_text(text):
++    """Text as the speaker read it. ``-පෙ-`` (peyyāla, "and so on") is written
++    but not spoken; the dataset's own script drops it the same way."""
++    text = unicodedata.normalize("NFC", text)
++    text = re.sub(r"^\s*-පෙ-\s*", "", text)
++    text = re.sub(r"\s?-පෙ-", "…", text)
++    text = re.sub(r"[\[{]\s?", "(", text)
++    text = re.sub(r"\s?[\]}]", ")", text)
++    text = re.sub(r"\(\s?\)", " ", text)
++    return re.sub(r"\s+", " ", text).strip()
++
++
++def wav_index(root):
++    return {path.stem: path for path in root.rglob("*.wav")}
++
++
++def read_pathnirvana(root):
++    """v2: ``id|roman|sinhala|speaker``. First release: ``id|sinhala|roman``."""
++    rows, wavs = [], wav_index(root)
++    for metadata in sorted(root.rglob("metadata.csv")):
++        for line in metadata.read_text(encoding="utf-8").splitlines():
++            parts = line.split("|")
++            if len(parts) == 4:
++                identifier, _, sinhala, speaker = parts
++            elif len(parts) == 3:
++                identifier, sinhala, _ = parts
++                speaker = "mettananda"
++            else:
++                continue
++            if identifier in wavs and speaker in PATHNIRVANA_VOICES:
++                rows.append({"id": f"pn-{identifier}", "audio_path": wavs[identifier], "text": clean_text(sinhala),
++                             "voice": PATHNIRVANA_VOICES[speaker], "origin": "pathnirvana"})
++    return rows
++
++
++def read_openslr30(root):
++    """``si_lk.lines.txt``: Festival ``( sin_2241_0329430812 "text" )`` or TSV."""
++    rows, wavs = [], wav_index(root)
++    for line in (root / "si_lk.lines.txt").read_text(encoding="utf-8").splitlines():
++        match = re.match(r'^\(\s*(\S+)\s+"(.*)"\s*\)\s*$', line) or re.match(r"^(\S+)\t(.+)$", line)
++        if not match or match[1] not in wavs:
++            continue
++        speaker = match[1].split("_")[1] if match[1].count("_") >= 2 else "0"
++        rows.append({"id": f"slr30-{match[1]}", "audio_path": wavs[match[1]], "text": clean_text(match[2]),
++                     "voice": f"S{speaker}", "origin": "openslr30"})
++    return rows
++
++
++# --------------------------------------------------------------------- building
++
++def load_audio(path, top_db):
++    import librosa
++    import numpy as np
++    import soundfile as sf
++    from scipy.signal import resample_poly
++    wave, rate = sf.read(path, dtype="float32", always_2d=True)
++    wave = wave.mean(axis=1)
++    if rate != SAMPLE_RATE:
++        from math import gcd
++        factor = gcd(rate, SAMPLE_RATE)
++        wave = resample_poly(wave, SAMPLE_RATE // factor, rate // factor).astype(np.float32)
++    _, (start, end) = librosa.effects.trim(wave, top_db=top_db, frame_length=1024, hop_length=256)
++    pad = int(0.1 * SAMPLE_RATE)                       # keep 100 ms of room at both edges
++    wave = wave[max(0, start - pad):min(len(wave), end + pad)]
++    peak = float(np.abs(wave).max()) if wave.size else 0.0
++    if peak > 0.95:
++        wave = wave * (0.95 / peak)
++    return wave
++
++
++def split_of(text, validation, test):
++    """Deterministic split by sentence, so every voice reading it stays together."""
++    bucket = int(hashlib.sha256(text.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
++    return "test" if bucket < test else "validation" if bucket < test + validation else "train"
++
++
++def build(args):
++    import numpy as np
++    import pyarrow as pa
++    import pyarrow.parquet as pq
++    import soundfile as sf
++    rows = []
++    for root in args.pathnirvana or []:
++        rows += read_pathnirvana(Path(root))
++    for root in args.openslr30 or []:
++        rows += read_openslr30(Path(root))
++    if not rows:
++        raise SystemExit("no rows found: check the --pathnirvana / --openslr30 directories")
++    seen, unique = set(), []
++    for row in rows:                                    # the old and v2 releases share clips
++        if row["id"] not in seen and row["text"]:
++            seen.add(row["id"])
++            unique.append(row)
++    rows = unique
++    counts = Counter(row["voice"] for row in rows)
++    print("clips per voice:", dict(counts.most_common()))
++    voices = args.voices or [voice for voice, count in counts.most_common() if count >= args.min_clips]
++    rows = [row for row in rows if row["voice"] in voices]
++    if args.max_per_voice:
++        kept = Counter()
++        rows = [row for row in rows if (kept.update([row["voice"]]) or kept[row["voice"]] <= args.max_per_voice)]
++    args.output.mkdir(parents=True, exist_ok=True)
++    writers, buffers, shard = {}, defaultdict(list), Counter()
++    seconds, rejected = defaultdict(float), Counter()
++
++    def flush(split):
++        if not buffers[split]:
++            return
++        table = pa.Table.from_pylist(buffers[split])
++        pq.write_table(table, args.output / f"{split}-{shard[split]:05d}.parquet", compression="zstd")
++        shard[split] += 1
++        buffers[split].clear()
++
++    for count, row in enumerate(rows, 1):
++        try:
++            wave = load_audio(row["audio_path"], args.top_db)
++        except Exception as error:                     # unreadable file: skip, report
++            rejected[f"unreadable: {type(error).__name__}"] += 1
++            continue
++        duration = len(wave) / SAMPLE_RATE
++        if not args.min_seconds <= duration <= args.max_seconds:
++            rejected["duration"] += 1
++            continue
++        stream = io.BytesIO()
++        sf.write(stream, wave, SAMPLE_RATE, format="FLAC", subtype="PCM_16")
++        split = split_of(row["text"], args.validation, args.test)
++        buffers[split].append({"id": row["id"], "text": row["text"], "voice_id": row["voice"], "split": split,
++                               "audio": {"bytes": stream.getvalue(), "path": f"{row['id']}.flac"},
++                               "text_id": hashlib.sha256(row["text"].encode()).hexdigest()[:16],
++                               "origin": row["origin"], "source_license": LICENSES[row["origin"]]})
++        seconds[(split, row["voice"])] += duration
++        if len(buffers[split]) >= args.shard_size:
++            flush(split)
++        if count % 500 == 0:
++            print(f"  {count}/{len(rows)}", flush=True)
++    for split in ("train", "validation", "test"):
++        flush(split)
++    config = {"speakers": voices}
++    (args.output / "config.json").write_text(json.dumps(config, indent=2) + "\n")
++    summary = {split: {voice: round(seconds[(split, voice)] / 3600, 2) for voice in voices} for split in ("train", "validation", "test")}
++    (args.output / "summary.json").write_text(json.dumps({"hours": summary, "rejected": rejected, "voices": voices}, indent=2, ensure_ascii=False) + "\n")
++    print("hours per split and voice:", json.dumps(summary))
++    print("rejected:", dict(rejected))
++    print(f"voices: {voices}; config written to {args.output / 'config.json'}")
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    commands = parser.add_subparsers(dest="command", required=True)
++    get = commands.add_parser("download")
++    get.add_argument("--source", choices=("pathnirvana", "pathnirvana-old", "openslr30"), required=True)
++    get.add_argument("--dest", type=Path, default=Path("raw"))
++    make = commands.add_parser("build")
++    make.add_argument("--pathnirvana", nargs="*", help="Directories of Path Nirvana releases (v2 and/or old)")
++    make.add_argument("--openslr30", nargs="*", help="Directory of OpenSLR-30")
++    make.add_argument("--output", type=Path, required=True)
++    make.add_argument("--voices", nargs="+", help="Voices to keep (default: every voice with --min-clips clips)")
++    make.add_argument("--min-clips", type=int, default=300)
++    make.add_argument("--max-per-voice", type=int, help="Cap clips per voice (quick experiments)")
++    make.add_argument("--validation", type=float, default=0.02)
++    make.add_argument("--test", type=float, default=0.02)
++    make.add_argument("--min-seconds", type=float, default=1.0)
++    make.add_argument("--max-seconds", type=float, default=15.0)
++    make.add_argument("--top-db", type=float, default=40.0, help="Edge-silence trim threshold")
++    make.add_argument("--shard-size", type=int, default=1000)
++    args = parser.parse_args()
++    if args.command == "download":
++        source = {"pathnirvana": download_pathnirvana, "pathnirvana-old": download_pathnirvana_old,
++                  "openslr30": download_openslr30}[args.source]
++        print(source(args.dest))
++    else:
++        build(args)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/src/tiny_voca/align.py b/src/tiny_voca/align.py
+index b0ff756..52efaec 100644
+--- a/src/tiny_voca/align.py
++++ b/src/tiny_voca/align.py
+@@ -33,7 +33,7 @@ from dataclasses import dataclass
+ import math
+ import numpy as np
+ 
+-from .text import PHONE_SET, PUNCTUATION, SP, UNK, VOICELESS, VOWEL_SET
++from .text import PHONE_SET, PUNCTUATION, SP, UNK, VOICELESS, VOWEL_SET, language
+ 
+ ALIGNER_MODEL = "facebook/wav2vec2-lv-60-espeak-cv-ft"
+ ALIGNER_RATE = 16000
+@@ -44,6 +44,9 @@ PAUSING = (",", ".", "?", "!", ";", ":", "—", "…")
+ # Every inventory phone is a label of the recogniser (checked when it loads);
+ # only the unknown-phone token needs a stand-in.
+ ALIGNER_LABEL_FALLBACK = {UNK: "<unk>"}
++if language() == "si":
++    from .sinhala import ALIGNER_LABELS
++    ALIGNER_LABEL_FALLBACK.update(ALIGNER_LABELS)
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/src/tiny_voca/config.py b/src/tiny_voca/config.py
+index 735fe4e..7c4dc01 100644
+--- a/src/tiny_voca/config.py
++++ b/src/tiny_voca/config.py
+@@ -1,4 +1,4 @@
+-from dataclasses import asdict, dataclass
++from dataclasses import asdict, dataclass, field
+ import hashlib
+ import json
+ 
+@@ -6,6 +6,12 @@ CHECKPOINT_FORMAT = 4  # 2-3: byte tokens + learned aligner (rejected explicitly
+ ANNOTATION_VERSION = 3
+ 
+ 
++def _vocab_size():
++    """Size of the active phoneme inventory (76 English; Sinhala with TINY_VOCA_LANGUAGE=si)."""
++    from .text import SYMBOLS
++    return len(SYMBOLS)
++
++
+ def _digest(value):
+     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+ 
+@@ -20,8 +26,8 @@ class Config:
+     f0_min: float = 50.0
+     f0_max: float = 600.0
+     speakers: tuple[str, ...] = ("F2", "M2")
+-    # Phoneme tokens from tiny_voca.text.SYMBOLS (front-end version 3).
+-    vocab_size: int = 76
++    # Phoneme tokens from tiny_voca.text.SYMBOLS (76 for English front-end version 3).
++    vocab_size: int = field(default_factory=_vocab_size)
+     # Text encoder and frame-level transformer.
+     channels: int = 192
+     heads: int = 4
+diff --git a/src/tiny_voca/infer.py b/src/tiny_voca/infer.py
+index b0b7bc4..25a3a02 100644
+--- a/src/tiny_voca/infer.py
++++ b/src/tiny_voca/infer.py
+@@ -5,14 +5,15 @@ import re
+ import torch
+ from .config import CHECKPOINT_FORMAT, Config
+ from .model import TinyVoca, UtteranceTooLong
+-from .text import FRONTEND_VARIABLE, FRONTENDS, NothingToPronounce, frontend_fingerprint, phonemize, set_frontend
++from .text import FRONTEND_VARIABLE, FRONTENDS, NothingToPronounce, frontend_fingerprint, language, phonemize, set_frontend
+ 
+ # The loudest sample of the audio that ``speak_text`` and the command return.
+ PEAK = 0.99
+ # Said when no sentence of a text could be read. The browser demo says the same.
+-ENGLISH_ONLY = "tiny-voca only reads English for now"
++ENGLISH_ONLY = "tiny-voca only reads Sinhala script with this model" if language() == "si" else "tiny-voca only reads English for now"
+ _SPACE = re.compile("[\\s" + chr(0xFEFF) + "]+")    # JavaScript's \s, which the demo uses, takes U+FEFF too
+-_SENTENCE_END = re.compile(r"""(?:(?<=[.!?…])|(?<=[.!?…]["')\]]))\s+(?=["'(\[]?[A-Z0-9])""")
++# A new sentence starts with a capital, a digit or a Sinhala letter (U+0D80-U+0DFF).
++_SENTENCE_END = re.compile(r"""(?:(?<=[.!?…])|(?<=[.!?…]["')\]]))\s+(?=["'(\[]?[A-Z0-9\u0D80-\u0DFF])""")
+ _NOT_AN_END = re.compile(r"(?:\b(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|etc|no|inc|ltd|co|e\.g|i\.e|a\.m|p\.m)|\b[A-Z])\.$",
+                          re.IGNORECASE | re.ASCII)
+ _CLAUSE_END = re.compile(r"(?<=[,;:—])\s+")
+@@ -174,7 +175,7 @@ def main():
+     source = parser.add_mutually_exclusive_group(required=True)
+     source.add_argument("--text", help="Text of any length; it is read sentence by sentence")
+     source.add_argument("--text-file", type=Path, help="Read the text from a file (UTF-8)")
+-    parser.add_argument("--voice", choices=("F2", "M2"), default="F2")
++    parser.add_argument("--voice", help="A voice of the checkpoint (default: its first voice; English: F2 or M2)")
+     parser.add_argument("--output", type=Path, required=True)
+     parser.add_argument("--speed", type=float, default=1)
+     parser.add_argument("--pitch-shift", type=float, default=0, help="Added to log F0 (0.058 is about one semitone)")
+@@ -190,6 +191,9 @@ def main():
+     elif FRONTEND_VARIABLE not in os.environ:
+         match_frontend(args.checkpoint)
+     model = load_model(args.checkpoint, args.device, check_frontend=not args.allow_frontend_mismatch)
++    args.voice = args.voice or model.config.speakers[0]
++    if args.voice not in model.config.speakers:
++        parser.error(f"--voice must be one of {', '.join(model.config.speakers)}")
+     text = args.text if args.text is not None else args.text_file.read_text(encoding="utf-8")
+     try:
+         raw, spoken = speak_text(model, text, args.voice, args.speed, args.pitch_shift, pitch_range=args.pitch_range, peak=None)
+diff --git a/src/tiny_voca/prepare.py b/src/tiny_voca/prepare.py
+index 727f6d4..a870d94 100644
+--- a/src/tiny_voca/prepare.py
++++ b/src/tiny_voca/prepare.py
+@@ -9,6 +9,8 @@ No network access: use the HF CLI separately to obtain a pinned dataset snapshot
+ """
+ 
+ import argparse
++from collections import deque
++from concurrent.futures import ProcessPoolExecutor
+ import fcntl
+ import hashlib
+ import io
+@@ -25,6 +27,16 @@ from .journal import append, atomic_json, file_hash, json_safe, recover
+ MIN_FRAMES = 32
+ 
+ 
++class _Failed:
++    """A row rejected before extraction, kept in the queue so the journal stays in source order."""
++
++    def __init__(self, error):
++        self.error = error
++
++    def result(self):
++        raise self.error
++
++
+ def records(source):
+     if source.suffix == ".jsonl":
+         with source.open(encoding="utf-8") as stream:
+@@ -66,6 +78,27 @@ def extract(wave, config):
+             "prosody": torch.from_numpy(prosody.astype(np.float32))}
+ 
+ 
++def save_features(wave, config, speaker_index, temporary, final):
++    """Extract and durably store one recording's features (runs in a worker with --workers > 1)."""
++    sample = extract(wave, config)
++    sample.update(speaker=speaker_index)
++    with open(temporary, "wb") as stream:
++        torch.save(sample, stream)
++        stream.flush()
++        os.fsync(stream.fileno())
++    os.replace(temporary, final)
++
++
++def _single_thread():
++    """Worker initializer: one math thread per process, so N workers use N cores without oversubscription."""
++    torch.set_num_threads(1)
++    try:
++        from threadpoolctl import threadpool_limits
++        threadpool_limits(1)
++    except ImportError:
++        pass
++
++
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--inputs", nargs="+", type=Path, required=True)
+@@ -75,6 +108,7 @@ def main():
+     parser.add_argument("--config", type=Path)
+     parser.add_argument("--split", choices=("train", "validation", "test"), required=True)
+     parser.add_argument("--resume", action="store_true", help="Skip durably accepted/rejected records from these same inputs")
++    parser.add_argument("--workers", type=int, default=1, help="Processes extracting features in parallel (manifest order is unchanged)")
+     args = parser.parse_args()
+     c = Config.from_dict(json.loads(args.config.read_text())) if args.config else Config()
+     args.output.mkdir(parents=True, exist_ok=True)
+@@ -114,6 +148,28 @@ def prepare_split(args, c):
+         if not (args.output/entry["path"]).is_file():
+             raise ValueError(f"committed feature file is missing: {entry['path']}")
+     accepted_count, rejected_count = len(entries), len(rejected)
++    workers = getattr(args, "workers", 1)
++    pool = ProcessPoolExecutor(workers, initializer=_single_thread) if workers > 1 else None
++    pending = deque()   # (record_key, identifier, source, entry, future) in source order
++
++    def settle(limit):
++        """Journal finished extractions in source order until at most ``limit`` are in flight."""
++        nonlocal accepted_count, rejected_count
++        while len(pending) > limit:
++            record_key, identifier, source, entry, future = pending.popleft()
++            try:
++                if future is not None:
++                    future.result()
++            except Exception as error:
++                if entry is not None:       # it was counted as seen when submitted
++                    seen.discard(identifier)
++                append(rejected_stream, {"record_key":record_key, "id":str(identifier), "source":str(source), "reason":f"{type(error).__name__}: {error}"})
++                rejected_count += 1
++            else:
++                # Journal write failures must abort, not masquerade as bad source rows.
++                append(accepted_stream, entry)
++                accepted_count += 1
++
+     with manifest.open("a", encoding="utf-8") as accepted_stream, rejects.open("a", encoding="utf-8") as rejected_stream:
+         for source_index, source in enumerate(args.inputs):
+             for index, row in enumerate(records(source)):
+@@ -155,22 +211,19 @@ def prepare_split(args, c):
+                              "text_hash":hashlib.sha256(text.strip().encode()).hexdigest(), "text":text,
+                              "speaker":speaker, "source_file":str(source), "frames":frames, "provenance":provenance}
+                     json.dumps(entry, ensure_ascii=False, allow_nan=False)  # Validate before expensive DSP.
+-                    sample = extract(wave, c)
+-                    sample.update(speaker=c.speakers.index(speaker))
+-                    temporary = feature_dir/(name+".tmp")
+-                    with temporary.open("wb") as stream:
+-                        torch.save(sample, stream)
+-                        stream.flush()
+-                        os.fsync(stream.fileno())
+-                    os.replace(temporary, feature_dir/name)
++                    job = (wave, c, c.speakers.index(speaker), feature_dir/(name+".tmp"), feature_dir/name)
++                    future = pool.submit(save_features, *job) if pool else None
++                    if pool is None:
++                        save_features(*job)
+                 except Exception as error:
+-                    append(rejected_stream, {"record_key":record_key, "id":str(identifier), "source":str(source), "reason":f"{type(error).__name__}: {error}"})
+-                    rejected_count += 1
++                    pending.append((record_key, identifier, source, None, _Failed(error)))
+                 else:
+-                    # Journal write failures must abort, not masquerade as bad source rows.
+-                    append(accepted_stream, entry)
+                     seen.add(identifier)
+-                    accepted_count += 1
++                    pending.append((record_key, identifier, source, entry, future))
++                settle(2 * workers if pool else 0)
++        settle(0)
++    if pool:
++        pool.shutdown()
+     atomic_json(metadata_path, {"identity":identity, "complete":True, "accepted":accepted_count, "rejected":rejected_count})
+     print(json.dumps({"accepted":accepted_count, "rejected":rejected_count, "manifest":str(manifest)}))
+     if not accepted_count:
+diff --git a/src/tiny_voca/sinhala.py b/src/tiny_voca/sinhala.py
+new file mode 100644
+index 0000000..dce65d7
+--- /dev/null
++++ b/src/tiny_voca/sinhala.py
+@@ -0,0 +1,198 @@
++"""Sinhala front end: Sinhala text -> eSpeak NG ``si`` phonemes with stress.
++
++Selected with ``TINY_VOCA_LANGUAGE=si``. It follows the token convention of the
++English front end (BOS/EOS, word spaces and punctuation as zero-length-capable
++tokens, stress as a parallel 0/1/2 feature), so training, alignment, inference
++and ONNX export work unchanged.
++
++Phonemes come from the eSpeak NG library shipped in the ``espeakng-loader``
++wheel, called through ``phonemizer-fork``. Using the wheel instead of the
++system ``espeak-ng`` program pins one eSpeak build for annotation (Kaggle) and
++inference (any laptop), so tokens cannot drift between the two. eSpeak NG is
++GPL-3.0: fine for training and personal use, but check the licence before you
++ship it inside a product.
++
++Corrections applied before eSpeak (all measured on eSpeak NG 1.52):
++
++* Zero-width joiners (rakaransaya, yansaya, repaya: ශ්‍රී, ක්‍ර, ද්‍ය) are removed.
++  eSpeak treats the joiner as a word break and splits ශ්‍රී into ``s`` + ``ɹiː``.
++* ශ is read as ෂ. eSpeak gives ``s`` for ශ inside words, but the usual reading
++  is ``ʃ`` (ශ්‍රී = "shree").
++* ෴ (kunddaliya) ends a sentence like a full stop.
++
++Corrections applied to eSpeak's output:
++
++* Prenasalised stops come out as a raised nasal plus a stop (``ᵐ`` ``b``). They
++  are one sound in Sinhala (ඹ ඳ ඬ ඟ), so they are merged into one token
++  (``ᵐb`` ``ⁿd`` ``ⁿɖ`` ``ᵑɡ``).
++* A few isolated letters come out fused with their vowel (``tʃʰə``); units
++  outside the inventory are split into inventory phones where possible.
++* Words in Latin script are read by eSpeak's English voice; their English
++  phones are mapped onto the closest Sinhala ones (``FALLBACK``).
++"""
++
++import hashlib
++import json
++import re
++import threading
++import unicodedata
++
++FRONTEND_VERSION = "si-1"
++ESPEAK_LANGUAGE = "si"
++
++PAD, BOS, EOS, SP, UNK = "<pad>", "<bos>", "<eos>", "<sp>", "<unk>"
++SPECIALS = (PAD, BOS, EOS, SP, UNK)
++PUNCTUATION = (",", ".", "?", "!", ";", ":", '"', "'", "(", ")", "—", "…")
++# Every phone eSpeak NG 1.52 emits for Sinhala script (each consonant with every
++# vowel sign, independent vowels, numbers), after the merges above.
++CONSONANTS = ("p", "pʰ", "b", "bʰ", "t", "tʰ", "d", "dʰ", "ʈ", "ʈʰ", "ɖ", "ɖʰ", "k", "kʰ", "ɡ", "ɡʰ",
++              "tʃ", "tʃʰ", "dʒ", "dʒʰ", "ᵐb", "ⁿd", "ⁿɖ", "ᵑɡ", "m", "n", "ɳ", "ɲ", "ŋ",
++              "s", "ʃ", "ʂ", "h", "f", "v", "l", "ɭ", "ɹ", "r", "j", "w")
++VOWELS = ("ɐ", "ə", "aː", "i", "iː", "u", "uː", "e", "eː", "o", "oː", "æ", "æː", "aɪ", "aʊ")
++PHONES = CONSONANTS + VOWELS
++# Append-only: changing the order or removing a symbol invalidates checkpoints.
++SYMBOLS = SPECIALS + PUNCTUATION + PHONES
++SYMBOL_TO_ID = {symbol: index for index, symbol in enumerate(SYMBOLS)}
++PHONE_SET = frozenset(PHONES)
++PHONE_IDS = frozenset(SYMBOL_TO_ID[p] for p in PHONES) | {SYMBOL_TO_ID[UNK]}
++VOWEL_SET = frozenset(VOWELS)
++VOICELESS = frozenset(("p", "pʰ", "t", "tʰ", "ʈ", "ʈʰ", "k", "kʰ", "tʃ", "tʃʰ", "s", "ʃ", "ʂ", "h", "f"))
++STRESS_MARKS = {"ˈ": 1, "ˌ": 2}
++
++PRENASAL = {("ᵐ", "b"): "ᵐb", ("ⁿ", "d"): "ⁿd", ("ⁿ", "ɖ"): "ⁿɖ", ("ᵑ", "ɡ"): "ᵑɡ"}
++# Phones outside the inventory: a raised nasal on its own, and English phones of
++# words in Latin script. Anything else is split into inventory phones if it can
++# be, otherwise it becomes <unk> and is reported.
++FALLBACK = {
++    "ᵐ": ("m",), "ⁿ": ("n",), "ᵑ": ("ŋ",), "a": ("ɐ",), "ɑ": ("aː",), "ɑː": ("aː",), "ɒ": ("o",), "ɔ": ("o",),
++    "ɔː": ("oː",), "ʌ": ("ɐ",), "ɪ": ("i",), "ɛ": ("e",), "ɜː": ("ə",), "ɜ": ("ə",), "ɚ": ("ə",), "ᵻ": ("i",),
++    "ʊ": ("u",), "oʊ": ("oː",), "əʊ": ("oː",), "eɪ": ("eː",), "ɔɪ": ("o", "i"), "iə": ("i", "ə"),
++    "eə": ("e", "ə"), "ʊə": ("u", "ə"), "ɑːɹ": ("aː", "ɹ"), "ɔːɹ": ("oː", "ɹ"), "oːɹ": ("oː", "ɹ"),
++    "ɪɹ": ("i", "ɹ"), "ɛɹ": ("e", "ɹ"), "ʊɹ": ("u", "ɹ"), "aɪɚ": ("aɪ", "ə"), "aɪə": ("aɪ", "ə"),
++    "əl": ("ə", "l"), "n̩": ("ə", "n"), "l̩": ("ə", "l"), "θ": ("t",), "ð": ("d",), "z": ("s",),
++    "ʒ": ("dʒ",), "ɾ": ("ɹ",), "ʔ": (), "x": ("k",), "ç": ("h",), "ɣ": ("ɡ",), "ʋ": ("w",),
++}
++
++# Labels of the annotation aligner (wav2vec2-lv-60-espeak-cv-ft) for inventory
++# phones it lacks. Annotation only: the TTS model keeps the Sinhala phone. The
++# aligner marks where a phone starts, and a prenasalised stop starts with its nasal.
++ALIGNER_LABELS = {"ᵐb": "m", "ⁿd": "n", "ⁿɖ": "ɳ", "ᵑɡ": "ŋ", "dʒʰ": "dʒ"}
++
++_JOINERS = dict.fromkeys(map(ord, "‍‌­﻿"))
++_LETTERS = str.maketrans({"ශ": "ෂ", "෴": "."})
++
++
++def normalize(text):
++    """Sinhala-specific clean-up, applied before the shared punctuation rules."""
++    text = unicodedata.normalize("NFC", text).translate(_JOINERS).translate(_LETTERS)
++    return text
++
++
++def merge(units):
++    """Merge raised nasal + stop into one prenasalised phone. ``units`` are
++    ``(phone, stress)`` pairs of one word."""
++    merged, index = [], 0
++    while index < len(units):
++        phone, stress = units[index]
++        if index + 1 < len(units) and (phone, units[index + 1][0]) in PRENASAL:
++            merged.append((PRENASAL[phone, units[index + 1][0]], stress or units[index + 1][1]))
++            index += 2
++            continue
++        merged.append((phone, stress))
++        index += 1
++    return merged
++
++
++def split_unit(unit):
++    """Split an out-of-inventory unit into inventory phones, longest first."""
++    pieces, rest = [], unit
++    while rest:
++        for size in range(min(4, len(rest)), 0, -1):
++            if rest[:size] in PHONE_SET:
++                pieces.append(rest[:size])
++                rest = rest[size:]
++                break
++        else:
++            return None
++    return tuple(pieces)
++
++
++def canonical(phone):
++    """Map one eSpeak unit to inventory phones; ``None`` when unknown."""
++    if phone in PHONE_SET:
++        return (phone,)
++    if phone in FALLBACK:
++        return FALLBACK[phone]
++    stripped = "".join(c for c in unicodedata.normalize("NFD", phone) if not unicodedata.combining(c))
++    for candidate in (stripped, stripped.replace("ː", "")):
++        if candidate in PHONE_SET:
++            return (candidate,)
++        if candidate in FALLBACK:
++            return FALLBACK[candidate]
++    return split_unit(phone) or split_unit(stripped)
++
++
++def parse(output):
++    """Words of one eSpeak output line as lists of ``(phone, stress)``."""
++    words = []
++    for word in output.split():
++        units = []
++        for unit in word.split("_"):
++            stress = 0
++            for mark, level in STRESS_MARKS.items():
++                if mark in unit:
++                    stress = stress or level
++                    unit = unit.replace(mark, "")
++            unit = re.sub(r"\([a-z-]+\)", "", unit)
++            unit = "".join(c for c in unit if unicodedata.category(c) != "Cf")
++            if unit:
++                units.append((unit, stress))
++        if units:
++            words.append(merge(units))
++    return words
++
++
++class Espeak:
++    """eSpeak NG from the ``espeakng-loader`` wheel. libespeak-ng is not
++    thread-safe, so calls are serialised."""
++
++    _lock = threading.Lock()
++    _backend = None
++
++    @classmethod
++    def backend(cls):
++        if cls._backend is None:
++            try:
++                import espeakng_loader
++                from phonemizer.backend import EspeakBackend
++                from phonemizer.backend.espeak.wrapper import EspeakWrapper
++            except ImportError as error:
++                raise RuntimeError('the Sinhala front end needs: pip install "phonemizer-fork" "espeakng-loader"') from error
++            EspeakWrapper.set_library(espeakng_loader.get_library_path())
++            EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
++            cls._backend = EspeakBackend(ESPEAK_LANGUAGE, with_stress=True, language_switch="remove-flags",
++                                         words_mismatch="ignore")
++        return cls._backend
++
++    @classmethod
++    def words(cls, pieces):
++        """Phonemize text pieces (no punctuation inside). Returns one word list per piece."""
++        from phonemizer.separator import Separator
++        if not pieces:
++            return []
++        with cls._lock:
++            lines = cls.backend().phonemize(list(pieces), separator=Separator(phone="_", word=" ", syllable=""), strip=True)
++        return [parse(line) for line in lines]
++
++    @classmethod
++    def version(cls):
++        with cls._lock:
++            return ".".join(map(str, cls.backend().version()))
++
++
++def identity():
++    """What decides the tokens: checkpoints and annotations record its hash."""
++    return {"frontend_version": FRONTEND_VERSION, "phonemizer": "espeak-ng-library", "language": "si",
++            "symbols": list(SYMBOLS), "prenasal": sorted(PRENASAL.values()),
++            "fallback": {key: list(value) for key, value in sorted(FALLBACK.items())},
++            "normalize": hashlib.sha256(json.dumps([sorted(_JOINERS), sorted(_LETTERS.items())]).encode()).hexdigest()}
+diff --git a/src/tiny_voca/text.py b/src/tiny_voca/text.py
+index a1f4484..fa615d0 100644
+--- a/src/tiny_voca/text.py
++++ b/src/tiny_voca/text.py
+@@ -76,6 +76,29 @@ FALLBACK = {
+     "əʊ": ("oʊ",), "eə": ("ɛɹ",), "ɪə": ("iə",), "ʊə": ("ʊɹ",), "aʊɚ": ("aʊ", "ɚ"), "l̩": ("əl",), "m̩": ("ə", "m"),
+ }
+ 
++# Language selection. Sinhala has its own inventory and phonemizer
++# (sinhala.py); the rest of tiny-voca reads SYMBOLS, PHONES and friends from
++# this module, so ``TINY_VOCA_LANGUAGE=si`` switches the whole pipeline. English
++# stays the default and keeps its exact behaviour.
++LANGUAGE_VARIABLE = "TINY_VOCA_LANGUAGE"
++LANGUAGES = ("en", "si")
++_language = os.environ.get(LANGUAGE_VARIABLE, "en")
++if _language not in LANGUAGES:
++    raise ValueError(f"{LANGUAGE_VARIABLE} must be one of {LANGUAGES}, not {_language!r}")
++if _language == "si":
++    from . import sinhala as _si
++    FRONTENDS = ("espeak",)
++    _frontend = "espeak"
++    CONSONANTS, VOWELS, PHONES, SYMBOLS = _si.CONSONANTS, _si.VOWELS, _si.PHONES, _si.SYMBOLS
++    SYMBOL_TO_ID, PHONE_SET, PHONE_IDS = _si.SYMBOL_TO_ID, _si.PHONE_SET, _si.PHONE_IDS
++    VOICELESS, VOWEL_SET, FALLBACK = _si.VOICELESS, _si.VOWEL_SET, _si.FALLBACK
++
++
++def language():
++    """``"en"`` or ``"si"``, chosen with TINY_VOCA_LANGUAGE before import."""
++    return _language
++
++
+ _QUOTES = str.maketrans({"‘": "'", "’": "'", "‚": "'", "‛": "'", "`": "'", "´": "'",
+                          "“": '"', "”": '"', "„": '"', "‟": '"', "«": '"', "»": '"',
+                          "–": "—", "―": "—", "[": "(", "{": "(", "]": ")", "}": ")"})
+@@ -124,6 +147,8 @@ def _dizione():
+ 
+ 
+ def frontend_identity():
++    if _language == "si":
++        return _si.identity()
+     if _frontend == "own":
+         phonemizer = _dizione()
+         return {"frontend_version": phonemizer.VERSION, "phonemizer": "dizione", "symbols": list(SYMBOLS)}
+@@ -134,6 +159,9 @@ def frontend_identity():
+ def frontend_runtime():
+     """What an annotation run records about the exact program behind its
+     tokens: the eSpeak version, or the fingerprint of the phonemizer build."""
++    if _language == "si":
++        import importlib.metadata
++        return {"espeak_version": _si.Espeak.version(), "espeakng_loader": importlib.metadata.version("espeakng-loader")}
+     if _frontend == "own":
+         return {"phonemizer": _dizione().identity()["fingerprint"]}
+     return {"espeak_version": espeak_version()}
+@@ -144,6 +172,8 @@ def frontend_fingerprint():
+ 
+ 
+ def normalize_text(text):
++    if _language == "si":
++        text = _si.normalize(text)
+     text = unicodedata.normalize("NFKC", text).translate(_QUOTES)
+     text = re.sub(r"\.{3,}", "…", text)
+     text = re.sub(r"-{2,}|\s-\s", "—", text)
+@@ -221,6 +251,8 @@ def parse_espeak(output):
+ 
+ def canonical(phone):
+     """Map an eSpeak phoneme to inventory phones; ``None`` when unknown."""
++    if _language == "si":
++        return _si.canonical(phone)
+     if phone in PHONE_SET:
+         return (phone,)
+     if phone in FALLBACK:
+@@ -269,6 +301,10 @@ def tokenize(pieces):
+ def phonemize(text):
+     if not isinstance(text, str) or not text.strip():
+         raise ValueError("text must not be empty")
++    if _language == "si":
++        pieces = list(chunks(normalize_text(text)))
++        words = iter(_si.Espeak.words([piece for punctuation, piece in pieces if not punctuation]))
++        return tokenize([(True, piece) if punctuation else (False, next(words)) for punctuation, piece in pieces])
+     if _frontend == "own":
+         return tokenize(_dizione().pieces(text))
+     pieces = []
+diff --git a/src/tiny_voca/train.py b/src/tiny_voca/train.py
+index 552135a..a4df89f 100644
+--- a/src/tiny_voca/train.py
++++ b/src/tiny_voca/train.py
+@@ -308,6 +308,8 @@ def main():
+     parser.add_argument("--recorded-voicing", action="store_true", help="Use the pitch tracker's voicing as it is, "
+                         "without marking vowel frames voiced")
+     parser.add_argument("--no-preload", action="store_true", help="Load feature files lazily instead of before the first step")
++    parser.add_argument("--acoustic-root", type=Path, help="Directory of the acoustic feature files when it has moved since "
++                        "annotation (for example a dataset mounted at another path in a new cloud session)")
+     args = parser.parse_args()
+     if min(args.steps, args.batch_frames, args.max_batch, args.save_every, args.keep_every, args.log_every, args.crops, args.gan_ramp) < 1:
+         parser.error("steps, batch limits and intervals must be positive")
+@@ -337,8 +339,8 @@ def main():
+     torch.manual_seed(args.seed)
+     torch.backends.cuda.matmul.allow_tf32 = True
+     torch.backends.cudnn.allow_tf32 = True
+-    train = AnnotatedDataset(args.train, c, voiced_vowels=not args.recorded_voicing)
+-    validation = AnnotatedDataset(args.validation, c, voiced_vowels=not args.recorded_voicing)
++    train = AnnotatedDataset(args.train, c, args.acoustic_root, voiced_vowels=not args.recorded_voicing)
++    validation = AnnotatedDataset(args.validation, c, args.acoustic_root, voiced_vowels=not args.recorded_voicing)
+     check_leakage(train, validation)
+     if train.annotation != validation.annotation:
+         raise ValueError("train and validation manifests come from different annotation runs")
+diff --git a/tests/test_frontend_sinhala.py b/tests/test_frontend_sinhala.py
+new file mode 100644
+index 0000000..b971f01
+--- /dev/null
++++ b/tests/test_frontend_sinhala.py
+@@ -0,0 +1,108 @@
++"""Sinhala front end. Run with TINY_VOCA_LANGUAGE=si:
++
++    TINY_VOCA_LANGUAGE=si PYTHONPATH=src:tests python -m unittest tests.test_frontend_sinhala
++"""
++
++import os
++import unittest
++
++SINHALA = os.environ.get("TINY_VOCA_LANGUAGE") == "si"
++
++
++@unittest.skipUnless(SINHALA, "set TINY_VOCA_LANGUAGE=si")
++class SinhalaPureTests(unittest.TestCase):
++    """No eSpeak needed."""
++
++    def test_inventory_drives_the_model_vocabulary(self):
++        from tiny_voca.config import Config
++        from tiny_voca.text import SYMBOLS, SYMBOL_TO_ID, language
++        self.assertEqual(language(), "si")
++        self.assertEqual(Config().vocab_size, len(SYMBOLS))
++        self.assertEqual(len(set(SYMBOLS)), len(SYMBOLS))
++        self.assertEqual(SYMBOL_TO_ID["<pad>"], 0)
++
++    def test_prenasal_merge(self):
++        from tiny_voca.sinhala import merge
++        self.assertEqual(merge([("ɐ", 1), ("ᵐ", 0), ("b", 0), ("ə", 0)]), [("ɐ", 1), ("ᵐb", 0), ("ə", 0)])
++        self.assertEqual(merge([("ᵑ", 0), ("ɡ", 2)]), [("ᵑɡ", 2)])
++        self.assertEqual(merge([("ᵐ", 0), ("k", 0)]), [("ᵐ", 0), ("k", 0)])
++
++    def test_canonical_mapping(self):
++        from tiny_voca.sinhala import canonical
++        self.assertEqual(canonical("ʈʰ"), ("ʈʰ",))
++        self.assertEqual(canonical("tʃʰə"), ("tʃʰ", "ə"))   # isolated letter, fused by eSpeak
++        self.assertEqual(canonical("əʊ"), ("oː",))           # English word in Latin script
++        self.assertEqual(canonical("ᵐ"), ("m",))
++        self.assertIsNone(canonical("ʘ"))
++
++    def test_parse_strips_stress_and_language_flags(self):
++        from tiny_voca.sinhala import parse
++        self.assertEqual(parse("ˈaː_j_u_b_ˌoː_w_ə_n s_ˈɐ_ⁿ_d_ə"),
++                         [[("aː", 1), ("j", 0), ("u", 0), ("b", 0), ("oː", 2), ("w", 0), ("ə", 0), ("n", 0)],
++                          [("s", 0), ("ɐ", 1), ("ⁿd", 0), ("ə", 0)]])
++        self.assertEqual(parse("(en)_h_ə_(si)"), [[("h", 0), ("ə", 0)]])
++
++    def test_normalize(self):
++        from tiny_voca.sinhala import normalize
++        self.assertEqual(normalize("ශ්‍රී"), "ෂ්රී")
++        self.assertEqual(normalize("හරි෴"), "හරි.")
++
++    def test_every_phone_has_an_aligner_label(self):
++        from tiny_voca.align import ALIGNER_LABEL_FALLBACK
++        from tiny_voca.sinhala import ALIGNER_LABELS, PHONES
++        for phone, label in ALIGNER_LABELS.items():
++            self.assertIn(phone, PHONES)
++            self.assertEqual(ALIGNER_LABEL_FALLBACK[phone], label)
++
++    def test_sentence_split_on_sinhala(self):
++        from tiny_voca.infer import sentences
++        self.assertEqual(sentences("මම ගෙදර යනවා. ඔයා එනවද? ඔව්!"), ["මම ගෙදර යනවා.", "ඔයා එනවද?", "ඔව්!"])
++
++
++def _has_espeak():
++    try:
++        import espeakng_loader, phonemizer  # noqa: F401
++        return True
++    except ImportError:
++        return False
++
++
++@unittest.skipUnless(SINHALA and _has_espeak(), "needs TINY_VOCA_LANGUAGE=si, phonemizer-fork and espeakng-loader")
++class SinhalaEspeakTests(unittest.TestCase):
++
++    def phones(self, text):
++        from tiny_voca.text import phonemize
++        result = phonemize(text)
++        self.assertEqual(result.unknown, ())
++        return " ".join(result.symbols)
++
++    def test_words(self):
++        self.assertEqual(self.phones("ආයුබෝවන්"), "<bos> aː j u b oː w ə n <eos>")
++        self.assertEqual(self.phones("මම ගෙදර යනවා."), "<bos> m ɐ m ə <sp> ɡ e d ə ɹ ə <sp> j ɐ n ə w aː . <eos>")
++
++    def test_retroflex_and_aspirates_stay_distinct(self):
++        self.assertIn("ʈ", self.phones("ටොපි"))
++        self.assertIn("ɖ", self.phones("ඩබල්"))
++        self.assertIn("dʰ", self.phones("ඖෂධ"))
++
++    def test_prenasalised_stops_are_one_token(self):
++        self.assertEqual(self.phones("අඹ"), "<bos> ɐ ᵐb ə <eos>")
++        self.assertEqual(self.phones("සඳ"), "<bos> s ɐ ⁿd ə <eos>")
++        self.assertEqual(self.phones("ගඟ"), "<bos> ɡ ɐ ᵑɡ ə <eos>")
++
++    def test_joiner_does_not_split_words(self):
++        self.assertEqual(self.phones("ශ්‍රී ලංකාව"), "<bos> ʃ ɹ iː <sp> l ɐ ŋ k aː w <eos>")
++        self.assertEqual(self.phones("ක්‍රමය"), self.phones("ක්රමය"))
++
++    def test_punctuation_and_numbers(self):
++        self.assertEqual(self.phones("ඔයා එනවද?"), "<bos> o j aː <sp> e n ə w ə d ə ? <eos>")
++        self.assertIn("e k ə", self.phones("1"))
++
++    def test_identity_is_stable(self):
++        from tiny_voca.text import frontend_fingerprint, frontend_identity
++        self.assertEqual(frontend_identity()["language"], "si")
++        self.assertEqual(frontend_fingerprint(), frontend_fingerprint())
++
++
++if __name__ == "__main__":
++    unittest.main()
