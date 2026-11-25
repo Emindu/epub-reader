@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+#[cfg(embedded_llm)]
+mod llm_embedded;
+
 // Progress counters for the currently-running (or most recently finished)
 // piper_batch_synthesize call. There's only ever one batch cache job in
 // flight at a time (the JS side gates on `cachingInFlight`), so a couple of
@@ -279,19 +282,19 @@ async fn piper_synthesize(
     Ok(wrap_wav(&pcm, sample_rate))
 }
 
-/// Download `url` to `<root>/<rel_path>` via the system `curl`. Shared by
+/// Download `url` to `<root>/<rel_path>` over HTTP (ureq). Shared by
 /// both the Piper (TTS) and local-LLM download flows — the only thing that
 /// differs between them is which root directory they land in.
 ///
-/// **Async on purpose:** the curl subprocess can run for 10–30 seconds on
+/// **Async on purpose:** a download can run for 10–30 seconds on
 /// a 30 MB download, and Tauri sync commands (`fn`) run on the main
 /// thread — which would freeze the whole window ("Not Responding" in Task
 /// Manager). We wrap the blocking subprocess work in `spawn_blocking` so
 /// the async runtime can keep servicing other commands (in particular the
-/// file-size progress poll) while curl runs.
+/// file-size progress poll) while the download runs.
 ///
-/// curl handles the GitHub → S3 redirect chain transparently, doesn't care
-/// about CORS, and ships with Windows 10 1803+ / macOS / Linux.
+/// Doing it in Rust rather than the webview sidesteps CORS, and unlike the
+/// system `curl` this used to shell out to, it also works on iOS.
 async fn download_file_into(root: &Path, url: &str, rel_path: &str) -> Result<u64, String> {
     let dest = root.join(rel_path);
     if let Some(parent) = dest.parent() {
@@ -303,38 +306,38 @@ async fn download_file_into(root: &Path, url: &str, rel_path: &str) -> Result<u6
 
     let dest_for_task = dest.clone();
     let url_for_task = url.to_string();
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        let mut cmd = Command::new("curl");
-        cmd.arg("-L")                    // follow redirects (GitHub → S3)
-            .arg("--fail")               // exit non-zero on HTTP errors
-            .arg("--silent")             // don't clutter stderr with progress
-            .arg("--show-error")         // ...but do print the error itself
-            .arg("--connect-timeout").arg("30")
-            .arg("--retry").arg("2")
-            .arg("--output").arg(&dest_for_task)
-            .arg(&url_for_task);
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        // Redirects (GitHub -> S3, Hugging Face -> CDN) are followed by ureq.
+        // Streams straight to disk so `*_file_size` polling sees progress.
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(30))
+            .build();
+        let mut last_err = String::new();
+        for _attempt in 0..3 {
+            let resp = match agent.get(&url_for_task).call() {
+                Ok(r) => r,
+                Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
+                Err(e) => { last_err = e.to_string(); continue; }
+            };
+            let copied = fs::File::create(&dest_for_task)
+                .map_err(|e| format!("create file: {e}"))
+                .and_then(|mut f| {
+                    std::io::copy(&mut resp.into_reader(), &mut f).map_err(|e| format!("download: {e}"))
+                });
+            match copied {
+                Ok(_) => return Ok(()),
+                Err(e) => last_err = e,
+            }
         }
-
-        cmd.output()
+        Err(last_err)
     })
     .await
-    .map_err(|e| format!("task join: {e}"))?
-    .map_err(|e| format!("failed to spawn curl (is it installed?): {e}"))?;
+    .map_err(|e| format!("task join: {e}"))?;
 
-    if !output.status.success() {
+    if let Err(e) = result {
         // Drop any partial file so a retry starts clean.
         let _ = fs::remove_file(&dest);
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(format!(
-            "curl exit {}: {}",
-            output.status.code().unwrap_or(-1),
-            if stderr.trim().is_empty() { "no output" } else { stderr.trim() }
-        ));
+        return Err(e);
     }
 
     let size = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
@@ -348,7 +351,7 @@ async fn download_file_into(root: &Path, url: &str, rel_path: &str) -> Result<u6
 /// Report the size of a file inside `root` — used by the JS side to poll
 /// progress while a download command is in flight. Returns 0 (not an
 /// error) if the file doesn't exist yet, since that's the normal state
-/// right before curl writes its first bytes.
+/// right before the first bytes are written.
 fn file_size_in(root: &Path, rel_path: &str) -> Result<u64, String> {
     let path = root.join(rel_path);
     if !path.exists() {
@@ -704,7 +707,7 @@ fn piper_cache_delete_book(app: tauri::AppHandle, book_id: String) -> Result<(),
 /// command looks for it. llama.cpp's release archives extract flat with no
 /// wrapping folder, so its caller passes `None` and this step is a no-op.
 /// Async so tar's extraction (~1-2s on the piper zip) doesn't block the
-/// main thread the same way curl would.
+/// main thread.
 async fn extract_downloaded_archive(
     root: &Path,
     archive_name: &str,
@@ -842,6 +845,8 @@ pub struct LlmModel {
 #[derive(Serialize)]
 pub struct LlmStatus {
     binary_exists: bool,
+    /// llama.cpp is linked into the app — there's no llama-cli to install.
+    embedded: bool,
     binary_path: String,
     models_dir: String,
     models: Vec<LlmModel>,
@@ -861,7 +866,8 @@ fn llm_status(app: tauri::AppHandle) -> Result<LlmStatus, String> {
     }
 
     let binary_path = llm_binary(&root);
-    let binary_exists = binary_path.exists();
+    let embedded = cfg!(embedded_llm);
+    let binary_exists = embedded || binary_path.exists();
 
     let mut models: Vec<LlmModel> = Vec::new();
     if let Ok(read) = fs::read_dir(&models_dir) {
@@ -887,6 +893,7 @@ fn llm_status(app: tauri::AppHandle) -> Result<LlmStatus, String> {
 
     Ok(LlmStatus {
         binary_exists,
+        embedded,
         binary_path: binary_path.to_string_lossy().into_owned(),
         models_dir: models_dir.to_string_lossy().into_owned(),
         models,
@@ -901,6 +908,7 @@ fn llm_status(app: tauri::AppHandle) -> Result<LlmStatus, String> {
 /// we sent, the reply is reliably the text *after* the last echo of that
 /// prompt and *before* the footer — that boundary survives banner changes
 /// across llama.cpp builds far better than trying to blocklist banner lines.
+#[cfg_attr(embedded_llm, allow(dead_code))] // only the llama-cli path uses it
 fn clean_llm_output(raw: &str, prompt: &str) -> String {
     // 1. Drop everything up to and including the echoed prompt, if present.
     //    Fall back to the last interactive `> ` marker, then to the raw text.
@@ -940,6 +948,7 @@ fn clean_llm_output(raw: &str, prompt: &str) -> String {
 /// `-st` gets EOF and exits rather than hanging forever waiting for
 /// interactive input. Shared by every local-LLM feature (explain, usage
 /// examples, …); callers own prompt-building and output-cleaning.
+#[cfg_attr(embedded_llm, allow(dead_code))] // only the llama-cli path uses it
 fn run_llama_cli(
     binary: &Path,
     model: &Path,
@@ -984,6 +993,31 @@ fn run_llama_cli(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Run one prompt through the local model and return the cleaned reply —
+/// via the linked-in engine when there is one, else the `llama-cli` binary.
+/// Async + spawn_blocking: a 1-2B model takes a few seconds to answer, and we
+/// can't block the UI thread that long.
+async fn complete(binary: PathBuf, model: PathBuf, root: PathBuf, prompt: String, n_predict: u32) -> Result<String, String> {
+    let cleaned = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(embedded_llm)]
+        {
+            let _ = (&binary, &root);
+            llm_embedded::generate(&model, &prompt, n_predict)
+        }
+        #[cfg(not(embedded_llm))]
+        {
+            run_llama_cli(&binary, &model, &root, &prompt, n_predict)
+                .map(|raw| clean_llm_output(&raw, &prompt))
+        }
+    })
+    .await
+    .map_err(|e| format!("task join: {e}"))??;
+    if cleaned.is_empty() {
+        return Err("model returned an empty answer".into());
+    }
+    Ok(cleaned)
+}
+
 /// Validates the llama-cli binary + model exist and the word isn't blank —
 /// shared precondition for every local-LLM word command.
 fn llm_preflight(
@@ -993,7 +1027,7 @@ fn llm_preflight(
 ) -> Result<(PathBuf, PathBuf, PathBuf, String), String> {
     let root = llm_root(app)?;
     let binary = llm_binary(&root);
-    if !binary.exists() {
+    if !cfg!(embedded_llm) && !binary.exists() {
         return Err(format!(
             "llama-cli not found at {}",
             binary.to_string_lossy()
@@ -1049,22 +1083,7 @@ Sentence: {sentence_flat}"
         )
     };
 
-    let binary_for_task = binary.clone();
-    let model_for_task = model.clone();
-    let root_for_task = root.clone();
-    let prompt_for_task = prompt.clone(); // keep `prompt` for clean_llm_output below
-
-    let raw = tauri::async_runtime::spawn_blocking(move || {
-        run_llama_cli(&binary_for_task, &model_for_task, &root_for_task, &prompt_for_task, n_predict)
-    })
-    .await
-    .map_err(|e| format!("task join: {e}"))??;
-
-    let cleaned = clean_llm_output(&raw, &prompt);
-    if cleaned.is_empty() {
-        return Err("model returned an empty answer".into());
-    }
-    Ok(cleaned)
+    complete(binary, model, root, prompt, n_predict).await
 }
 
 /// Ask the local model for a few example sentences that use `word` in
@@ -1096,22 +1115,7 @@ different context or sense than the others, to help a reader learn how it's used
 1-3, one sentence per line, with no extra commentary before or after.{avoid}"
     );
 
-    let binary_for_task = binary.clone();
-    let model_for_task = model.clone();
-    let root_for_task = root.clone();
-    let prompt_for_task = prompt.clone();
-
-    let raw = tauri::async_runtime::spawn_blocking(move || {
-        run_llama_cli(&binary_for_task, &model_for_task, &root_for_task, &prompt_for_task, n_predict)
-    })
-    .await
-    .map_err(|e| format!("task join: {e}"))??;
-
-    let cleaned = clean_llm_output(&raw, &prompt);
-    if cleaned.is_empty() {
-        return Err("model returned an empty answer".into());
-    }
-    Ok(cleaned)
+    complete(binary, model, root, prompt, n_predict).await
 }
 
 /// One turn of prior conversation, sent back to the model as plain-text
@@ -1175,22 +1179,7 @@ say so briefly. Be concise.\n\nPassage: {passage_capped}\n\n{convo}Reader: {ques
     // fragile multi-line fallback.
     let prompt = prompt_readable.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    let binary_for_task = binary.clone();
-    let model_for_task = model.clone();
-    let root_for_task = root.clone();
-    let prompt_for_task = prompt.clone();
-
-    let raw = tauri::async_runtime::spawn_blocking(move || {
-        run_llama_cli(&binary_for_task, &model_for_task, &root_for_task, &prompt_for_task, n_predict)
-    })
-    .await
-    .map_err(|e| format!("task join: {e}"))??;
-
-    let cleaned = clean_llm_output(&raw, &prompt);
-    if cleaned.is_empty() {
-        return Err("model returned an empty answer".into());
-    }
-    Ok(cleaned)
+    complete(binary, model, root, prompt, n_predict).await
 }
 
 /// Build a minimal PCM/WAV header around raw 16-bit mono samples.
@@ -1218,53 +1207,44 @@ fn wrap_wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
 
 /// Fetch a web page's raw HTML for the "Save article" reader-mode importer.
 /// Runs in Rust (not the webview) so we sidestep CORS entirely — the same
-/// reason piper_download_file shells out to curl rather than using the
-/// webview's fetch(). A desktop-browser User-Agent is set because many sites
+/// reason downloads go through Rust rather than the webview's fetch(). A desktop-browser User-Agent is set because many sites
 /// serve a stripped/blocked page to unrecognized clients.
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const PLAIN_UA: &str = "Read/1.0 (RSS reader)";
 
-/// One curl GET with a given User-Agent. Some sites (e.g. economynext.com) answer
+/// One GET with a given User-Agent. Some sites (e.g. economynext.com) answer
 /// a browser-looking UA with an error but serve a plain client fine, so callers
 /// try more than one.
-fn curl_get(url: &str, ua: &str, accept: &str) -> Result<String, String> {
-    let mut cmd = Command::new("curl");
-    cmd.arg("-L")                    // follow redirects
-        .arg("--fail")               // exit non-zero on HTTP errors (404, 403, ...)
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--compressed")         // request + auto-decode gzip/deflate/br
-        .arg("--connect-timeout").arg("15")
-        .arg("--max-time").arg("30")
-        .arg("--max-filesize").arg("20000000") // 20MB safety cap
-        .arg("-A").arg(ua)
-        .arg("-H").arg(format!("Accept: {accept}"))
-        .arg(url);
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+fn http_get(url: &str, ua: &str, accept: &str) -> Result<String, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(ua)
+        .build();
+    let resp = agent
+        .get(url)
+        .set("Accept", accept)
+        .call()
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("HTTP {code} — the site refused the request"),
+            other => format!("no response — check the URL ({other})"),
+        })?;
+    // 20 MB safety cap; ureq decodes gzip/brotli itself.
+    let mut body = Vec::new();
+    resp.into_reader()
+        .take(20_000_001)
+        .read_to_end(&mut body)
+        .map_err(|e| format!("read body: {e}"))?;
+    if body.len() > 20_000_000 {
+        return Err("the page is larger than 20 MB".into());
     }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to spawn curl (is it installed?): {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(format!(
-            "curl exit {}: {}",
-            output.status.code().unwrap_or(-1),
-            if stderr.trim().is_empty() { "no response — check the URL" } else { stderr.trim() }
-        ));
-    }
-    if output.stdout.is_empty() {
+    if body.is_empty() {
         return Err("the page returned no content".into());
     }
     // Lossy UTF-8 decode. Good enough for the vast majority of modern pages
     // (UTF-8 is close to universal); a page served in a legacy 8-bit charset
     // may show mangled characters rather than a hard failure.
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 async fn fetch_with_fallback(url: String, uas: [&'static str; 2], accept: &'static str) -> Result<String, String> {
@@ -1273,9 +1253,9 @@ async fn fetch_with_fallback(url: String, uas: [&'static str; 2], accept: &'stat
         return Err("Only http:// and https:// URLs are supported".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let first = curl_get(&trimmed, uas[0], accept);
+        let first = http_get(&trimmed, uas[0], accept);
         if first.is_ok() { return first; }
-        curl_get(&trimmed, uas[1], accept).or(first)
+        http_get(&trimmed, uas[1], accept).or(first)
     })
     .await
     .map_err(|e| format!("task join: {e}"))?
@@ -1296,6 +1276,85 @@ async fn fetch_feed_xml(url: String) -> Result<String, String> {
     fetch_with_fallback(url, [PLAIN_UA, BROWSER_UA], "application/rss+xml, application/atom+xml, application/xml, text/xml, */*").await
 }
 
+/// Put the app's audio session in "playback" mode. WKWebView's default
+/// session goes silent when the screen locks or the ring/silent switch is
+/// on; with this plus `UIBackgroundModes: audio` (Info.ios.plist) read-aloud
+/// keeps going like an audiobook app.
+#[cfg(target_os = "ios")]
+fn enable_background_audio() {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    #[link(name = "AVFAudio", kind = "framework")]
+    extern "C" {}
+
+    // The AVAudioSessionCategoryPlayback constant's value is its own name.
+    let category = NSString::from_str("AVAudioSessionCategoryPlayback");
+    let no_error = std::ptr::null_mut::<*mut AnyObject>();
+    unsafe {
+        let session: *mut AnyObject = msg_send![class!(AVAudioSession), sharedInstance];
+        let set: bool = msg_send![session, setCategory: &*category, error: no_error];
+        let active: bool = msg_send![session, setActive: true, error: no_error];
+        if !set || !active {
+            eprintln!("AVAudioSession setup failed (category {set}, active {active})");
+        }
+    }
+}
+
+/// Files shared to Read from other apps (iOS "Share → Read", macOS "Open
+/// With"), copied into `<AppData>/incoming/` and waiting for the frontend.
+/// Paths are AppData-relative so the frontend's fs scope covers them.
+static OPENED_FILES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Copy each opened file into AppData/incoming and queue it. iOS hands us a
+/// copy in Documents/Inbox, which is ours to delete; anywhere else (macOS) the
+/// original is the user's file and stays put.
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+fn stash_opened_files(app: &tauri::AppHandle, urls: &[tauri::Url]) -> usize {
+    let Ok(base) = app.path().app_data_dir() else { return 0 };
+    let incoming = base.join("incoming");
+    if fs::create_dir_all(&incoming).is_err() {
+        return 0;
+    }
+    let mut queued = Vec::new();
+    for url in urls {
+        let Ok(src) = url.to_file_path() else { continue };
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else { continue };
+        // A timestamp prefix keeps two shares of "book.epub" apart; the
+        // frontend strips it to recover the original name.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let file = format!("{stamp}-{name}");
+        if fs::copy(&src, incoming.join(&file)).is_ok() {
+            queued.push(format!("incoming/{file}"));
+            if src.components().any(|c| c.as_os_str() == "Inbox") {
+                let _ = fs::remove_file(&src);
+            }
+        }
+    }
+    let n = queued.len();
+    if let Ok(mut pending) = OPENED_FILES.lock() {
+        pending.extend(queued);
+    }
+    n
+}
+
+/// Hand the frontend every queued shared file (and clear the queue).
+#[tauri::command]
+fn take_opened_files() -> Vec<String> {
+    OPENED_FILES.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+}
+
+/// CPU architecture the app was built for ("aarch64", "x86_64"). The webview
+/// can't tell: WebKit reports "Intel Mac OS X" on Apple Silicon too.
+#[tauri::command]
+fn host_arch() -> &'static str {
+    std::env::consts::ARCH
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -1311,6 +1370,8 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             greet,
+            host_arch,
+            take_opened_files,
             fetch_url_html,
             fetch_feed_xml,
             piper_status,
@@ -1330,8 +1391,28 @@ pub fn run() {
             llm_file_size,
             llm_extract_downloaded_archive
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .setup(|_app| {
+            #[cfg(target_os = "ios")]
+            enable_background_audio();
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // A file shared from another app: queue it and tell the page.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            if let tauri::RunEvent::Opened { urls } = &_event {
+                if stash_opened_files(_app, urls) > 0 {
+                    use tauri::Emitter;
+                    let _ = _app.emit("files-opened", ());
+                }
+            }
+            // Free the linked-in model before exit; see llm_embedded::unload.
+            #[cfg(embedded_llm)]
+            if let tauri::RunEvent::Exit = _event {
+                llm_embedded::unload();
+            }
+        });
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 import { open } from '@tauri-apps/plugin-dialog';
 import { readFile, writeFile, mkdir, remove, exists, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { readText as readClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import ePub, { Book, Rendition, Location, NavItem } from 'epubjs';
@@ -12,6 +13,7 @@ import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
 import { CATEGORY_ORDER, DEFAULT_FEEDS, NewsFeed, NewsItem, parseFeed, timeAgo } from './news';
+import { piperWasmStored, piperWasmDownload, piperWasmSynthesize, parseWav, wrapWav } from './piper-wasm';
 import { VOCA_VOICES, VocaVoice, normalizeVocaVoice, isVocaReady, startVoca, vocaSynthesize, vocaSynthesizeTimed, vocaSynthesizeSamples, wavFromFloat32, VocaTiming, setVocaProgressListener, setVocaReadyListener } from './voca';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -850,7 +852,14 @@ function requestReflow(): void {
     const isFirstObservation = lastReflowW === 0 && lastReflowH === 0;
     lastReflowW = w;
     lastReflowH = h;
-    if (isFirstObservation) return;
+    if (isFirstObservation) {
+      // Usually the book was just laid out at this size — but not if the
+      // padding changed between render and now (e.g. the read-aloud panel
+      // closed), which left a short page with a clipped last line.
+      const frame = el.viewer.querySelector('iframe')?.getBoundingClientRect();
+      // (Height only: paginated epub.js can size the iframe as a wide column strip.)
+      if (!frame || Math.abs(frame.height - h) < 8) return;
+    }
 
     try {
       // Note: we do NOT stop focus mode / TTS here even though their word
@@ -1681,7 +1690,11 @@ function renderContinueReading(): void {
   el.continueTitle.textContent = book.title;
   el.continueAuthor.textContent = book.author || 'Unknown';
   el.continueHeading.textContent = book.title;
-  el.continueMeta.textContent = `${book.author || 'Unknown'} · ${pct}% read${book.lastCfi ? '' : ''}`;
+  // Phones show the percentage once, beside the bar (as in the design).
+  el.continueMeta.textContent = IS_PHONE ? (book.author || 'Unknown') : `${book.author || 'Unknown'} · ${pct}% read`;
+  // Real cover art when the book has it (phones; desktop keeps the typeset cover).
+  el.continueCover.classList.toggle('has-image', IS_PHONE && !!book.coverDataUrl);
+  el.continueCover.style.backgroundImage = IS_PHONE && book.coverDataUrl ? `url("${book.coverDataUrl}")` : '';
   el.continueQuote.hidden = true;
   el.continueProgressFill.style.width = `${Math.max(2, pct)}%`;
   el.continueProgressChapter.textContent = `${pct}% complete`;
@@ -2001,13 +2014,25 @@ async function importBook() {
 
     const filePath = selected;
     // Fast path: exact filePath match. Skip reading bytes if we already have this file.
-    let existing = library.find(b => b.filePath === filePath);
+    const existing = library.find(b => b.filePath === filePath);
     if (existing) {
       openFromLibrary(existing);
       return;
     }
 
     const fileData = await readFile(filePath);            // dialog scope-grant is valid here
+    await importFileBytes(fileData, filePath);
+  } catch (err) {
+    console.error(err);
+    toast('Could not open that file');
+  }
+}
+
+/** Add a book from its bytes (file picker, or a file shared from another app)
+    and open it. An EPUB already in the library is just opened. */
+async function importFileBytes(fileData: Uint8Array, filePath: string): Promise<void> {
+  {
+    let existing: BookRecord | undefined;
     const format = getBookFormat(filePath);
     const id = safeUuid();
 
@@ -2098,10 +2123,31 @@ async function importBook() {
     library.push(record);
     persistLibrary();
 
+    // A file shared in while a news article was open: Back goes to the library.
+    returnToNews = false;
+    returnToMarks = null;
     openFromLibrary(record);
-  } catch (err) {
-    console.error(err);
-    toast('Could not open that file');
+  }
+}
+
+/* Files shared to Read from other apps (iOS "Share → Read", macOS "Open With").
+   Rust copies each into AppData/incoming/ and queues its path; we drain the
+   queue at startup and whenever Rust says more arrived. */
+async function importOpenedFiles(): Promise<void> {
+  let paths: string[] = [];
+  try { paths = await invoke<string[]>('take_opened_files'); } catch { return; }
+  for (const rel of paths) {
+    const name = rel.split('/').pop()!.replace(/^\d+-/, '');   // drop the uniqueness prefix
+    try {
+      const bytes = await readFile(rel, { baseDir: BaseDirectory.AppData });
+      await importFileBytes(bytes, name);
+      toast(`Added ${name}`);
+    } catch (err) {
+      console.error('shared file import failed:', err);
+      toast(`Could not add ${name}`);
+    } finally {
+      remove(rel, { baseDir: BaseDirectory.AppData }).catch(() => {});
+    }
   }
 }
 
@@ -2336,7 +2382,14 @@ const NEWS_READ_CAP = 2000;
 let newsItems: NewsItem[] = load<NewsItem[]>(KEY_NEWS_ITEMS, []);
 let newsRead = new Set<string>(load<string[]>(KEY_NEWS_READ, []));
 let newsCustom: NewsFeed[] = load<NewsFeed[]>(KEY_NEWS_CUSTOM, []);
-let newsOff = new Set<string>(load<string[]>(KEY_NEWS_OFF, []));
+let newsOff = new Set<string>(load<string[]>(KEY_NEWS_OFF, ['elakiri']));
+// ElaKiri (forum threads, not articles) is off by default; switch it off once
+// for installs that saved their source list before that default.
+if (!load<boolean>('read.news.elakiriOffV1', false)) {
+  newsOff.add('elakiri');
+  save(KEY_NEWS_OFF, [...newsOff]);
+  save('read.news.elakiriOffV1', true);
+}
 let newsLastFetch = load<number>(KEY_NEWS_FETCHED, 0);
 let newsSource = 'all';
 let newsCategory = 'all';
@@ -2588,7 +2641,9 @@ function renderNewsStatus(): void {
   if (refresh) { refresh.disabled = newsRefreshing; refresh.classList.toggle('busy', newsRefreshing); }
   if (newsRefreshing) { status.textContent = 'Refreshing…'; return; }
   const when = newsLastFetch ? `Updated ${timeAgo(newsLastFetch)}` : 'Not refreshed yet';
-  status.textContent = failed ? `${when} · ${failed} source${failed === 1 ? '' : 's'} could not be reached` : when;
+  const unread = newsUnread();
+  const base = unread ? `${when} · ${unread} unread` : when;
+  status.textContent = failed ? `${base} · ${failed} source${failed === 1 ? '' : 's'} could not be reached` : base;
 }
 
 function renderNews(): void {
@@ -2680,6 +2735,14 @@ function renderNews(): void {
   }
 }
 
+/** Mark every article from the active sources as read. */
+function markAllNewsRead(): void {
+  const active = new Set(newsActiveFeeds().map(f => f.id));
+  for (const i of newsItems) if (active.has(i.feedId)) newsRead.add(i.id);
+  persistNews();
+  renderNews();
+}
+
 async function refreshNews(force: boolean): Promise<void> {
   if (newsRefreshing) return;
   if (!force && newsItems.length > 0 && Date.now() - newsLastFetch < NEWS_STALE_MS) return;
@@ -2738,11 +2801,14 @@ async function openNewsItem(item: NewsItem): Promise<void> {
   }
 
   const existing = library.find(b => b.sourceUrl === item.link);
-  if (existing) {
+  if (existing && !existing.newsTemp) {
     returnToNews = true;
     void openFromLibrary(existing);
     return;
   }
+  // An unsaved read is only a cache: rebuild it so fixes to extraction (and a
+  // stale or wrong body) don't stick around for 30 days.
+  if (existing) removeBook(existing.id, true);
 
   toast('Opening article…');
   const feed = newsFeedOf(item.feedId);
@@ -2751,14 +2817,25 @@ async function openNewsItem(item: NewsItem): Promise<void> {
   let title = item.title;
   let markdown: string | null = null;
 
-  const feedBody = newsHtml.get(item.id);
+  let feedBody = newsHtml.get(item.id);
+  if (!feedBody && feed) {
+    // Full bodies only live for the session; re-read this one feed rather than
+    // trusting page extraction, which can grab a neighbouring story.
+    try {
+      const xml = await invoke<string>('fetch_feed_xml', { url: feed.url });
+      for (const it of parseFeed(xml.replace(/^\uFEFF/, '').trimStart(), feed)) {
+        if (it.html) newsHtml.set(it.id, it.html);
+      }
+      feedBody = newsHtml.get(item.id);
+    } catch { /* fall through to the page */ }
+  }
   if (feedBody) {
     const body = htmlToMarkdown(DOMPurify.sanitize(feedBody, ARTICLE_PURIFY));
     markdown = `# ${title}\n\n*${source} — [${host}](${item.link})*\n\n${body}\n`;
   } else {
     try {
       const art = await fetchArticleMarkdown(item.link);
-      if (art) { markdown = art.markdown; title = art.title || title; }
+      if (art && sameStory(art.markdown, item.summary)) { markdown = art.markdown; title = art.title || title; }
     } catch (err) {
       console.warn('openNewsItem: page fetch failed', err);
     }
@@ -2779,6 +2856,17 @@ async function openNewsItem(item: NewsItem): Promise<void> {
   }
 }
 
+/** Does extracted page text belong to the feed item? Readability can pick a
+    longer neighbouring story on short-article pages; most of the summary's
+    words should appear in the real one. */
+function sameStory(markdown: string, summary: string | undefined): boolean {
+  const words = (t: string) => t.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) || [];
+  const want = [...new Set(words(summary || ''))].slice(0, 20);
+  if (want.length < 4) return true;
+  const have = new Set(words(markdown));
+  return want.filter(w => have.has(w)).length / want.length >= 0.5;
+}
+
 /** Keep a News read: it joins the library permanently. */
 function saveNewsRecord(record: BookRecord): void {
   record.newsTemp = undefined;
@@ -2792,6 +2880,36 @@ function saveNewsRecord(record: BookRecord): void {
 
 function refreshNewsSaveButton(): void {
   $<HTMLButtonElement>('save-news-btn').hidden = !currentBookRecord?.newsTemp;
+  // Phones show news articles with their own chrome (mobile.css): "‹ News",
+  // a Save pill and the Listen · Summarise · Display · Share tools.
+  if (returnToNews && currentBookRecord) {
+    el.html.dataset.newsArticle = currentBookRecord.newsTemp ? 'temp' : 'saved';
+    const pill = document.getElementById('m-news-save');
+    if (pill) {
+      const saved = !currentBookRecord.newsTemp;
+      pill.classList.toggle('saved', saved);
+      pill.querySelector('span')!.textContent = saved ? 'In library' : 'Save';
+      pill.querySelector('path')!.setAttribute('d', saved ? 'M5 12l5 5 9-10' : 'M12 5v14M5 12h14');
+    }
+  } else {
+    delete el.html.dataset.newsArticle;
+  }
+  syncNewsNote();
+}
+
+/** Phones: "Not in your library…" sits in the article above the headline,
+    so it scrolls away instead of covering the text. */
+function syncNewsNote(): void {
+  const box = currentTextElement;
+  const existing = box?.querySelector('.m-news-note-inline');
+  const want = IS_PHONE && !!box && !!currentBookRecord?.newsTemp && returnToNews;
+  if (!want) { existing?.remove(); return; }
+  if (existing || !box) return;
+  const note = document.createElement('p');
+  note.className = 'm-news-note-inline';
+  note.dataset.notText = '';   // not read aloud, not part of focus mode
+  note.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Not in your library. Cleared in 30 days unless you save it.</span>';
+  box.prepend(note);
 }
 
 function purgeExpiredNews(): void {
@@ -2805,6 +2923,9 @@ function renderNewsSources(): void {
   const wrap = document.getElementById('news-source-list');
   if (!wrap) return;
   wrap.innerHTML = '';
+  const all = newsAllFeeds();
+  const summary = document.getElementById('m-sources-summary');
+  if (summary) summary.textContent = `${all.length - all.filter(f => newsOff.has(f.id)).length} of ${all.length} sources on`;
   let lastCat = '';
   const order = newsCategoryList();
   const ordered = [...newsAllFeeds()].sort((x, y) => order.indexOf(newsCategoryOf(x)) - order.indexOf(newsCategoryOf(y)));
@@ -3080,6 +3201,7 @@ async function openFromLibrary(record: BookRecord) {
 }
 
 function cleanupCurrentReader() {
+  currentSectionFile = '';
   if (currentBook) {
     try { currentBook.destroy(); } catch {}
     currentBook = null;
@@ -3136,6 +3258,7 @@ interface TocTreeNode {
 // as flat leaves, so this also replaces the old flat-only renderer.
 function renderTocTree(nodes: TocTreeNode[] | NavItem[]) {
   el.tocList.innerHTML = '';
+  queueMicrotask(markCurrentTocItem);   // after the rows below exist
   const build = (items: TocTreeNode[] | NavItem[], parent: HTMLElement) => {
     for (const item of items) {
       const li = document.createElement('li');
@@ -3152,7 +3275,7 @@ function renderTocTree(nodes: TocTreeNode[] | NavItem[]) {
         if (item.href.startsWith('pdf-page-')) {
           navigateToPdfPage(parseInt(item.href.slice('pdf-page-'.length), 10));
         } else if (currentRendition) {
-          currentRendition.display(item.href);
+          currentRendition.display(resolveSpineHref(item.href)).catch(err => console.warn('toc jump failed:', err));
         } else {
           const targetEl = document.getElementById(item.href);
           if (targetEl) targetEl.scrollIntoView({ behavior: 'smooth' });
@@ -3420,6 +3543,7 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
   }
 
   container.innerHTML = renderedHtml;
+  syncNewsNote();
   container.dataset.words = String((container.textContent || '').split(/\s+/).filter(Boolean).length);
   // Frame + syntax-colour code blocks (async; never changes the text itself).
   void enhanceCodeBlocks(container).finally(() => applyTextHighlights());
@@ -3708,8 +3832,36 @@ function updatePageStrip(loc: any): void {
   strip.hidden = false;
 }
 
+/** Phones, single-page paginated: keep the scroll on a whole page. A resize
+    racing epub.js's position restore could leave it part-way between two
+    pages (half of each showing), and every later turn kept that offset. */
+function snapToPage(): void {
+  if (!IS_PHONE || settings.layout !== 'paginated') return;
+  const c = el.viewer.querySelector<HTMLElement>('.epub-container');
+  if (!c || !c.clientWidth) return;
+  const w = c.clientWidth;
+  const off = c.scrollLeft % w;
+  if (off > 2 && w - off > 2) c.scrollLeft = Math.round(c.scrollLeft / w) * w;
+}
+
 async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
   currentBook = ePub(buffer as any);
+  // Book content never runs code: strip scripts, inline handlers and
+  // javascript: links from each chapter before it's shown. That's what lets
+  // the frame allow scripts below — WebKit (iOS, macOS) drops every event
+  // listener in a frame sandboxed without allow-scripts, including ours, so
+  // taps, selection and footnotes inside the page silently stopped working.
+  (currentBook.spine as any).hooks.content.register((doc: Document) => {
+    doc.querySelectorAll('script').forEach(n => n.remove());
+    doc.querySelectorAll('*').forEach(n => {
+      for (const attr of [...n.attributes]) {
+        const name = attr.name.toLowerCase();
+        if (name.startsWith('on')) n.removeAttribute(attr.name);
+        else if ((name === 'href' || name.endsWith(':href') || name === 'src' || name === 'action')
+          && /^\s*javascript:/i.test(attr.value)) n.removeAttribute(attr.name);
+      }
+    });
+  });
 
   let flow = 'paginated';
   let spread = 'none';
@@ -3722,7 +3874,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
     spread: spread,
     manager: 'continuous',
     flow: flow,
-    allowScriptedContent: false,
+    allowScriptedContent: true,   // safe: chapters are scrubbed of scripts above
   });
 
   currentRendition.on('relocated', (loc: Location) => {
@@ -3751,7 +3903,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
 
   currentRendition.on('selected', onSelected);
   currentRendition.on('click', () => hideSelectionPopover());
-  currentRendition.on('relocated', () => { hideSelectionPopover(); decorateTocProgress(); });
+  currentRendition.on('relocated', () => { hideSelectionPopover(); decorateTocProgress(); snapToPage(); });
   currentRendition.hooks.content.register((contents: any) => {
     const doc: Document = contents.document;
     injectReaderFonts(doc);
@@ -3824,6 +3976,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
     }, true);
 
     installFocusTracker(contents.document, contents.window?.frameElement ?? null);
+    doc.addEventListener('click', (e: MouseEvent) => onReaderTap(e, contents.window?.frameElement ?? null));
 
     // Underline any saved-vocab words on the freshly-loaded section. The
     // overlay is body-relative so paginated column turns within the
@@ -3881,6 +4034,10 @@ function openExternalLink(href: string): void {
 }
 
 async function openReader(record: BookRecord, buffer: ArrayBuffer) {
+  // Opening another book (e.g. one shared in from another app) ends the old
+  // book's read-aloud / focus session; only Back used to.
+  if (isTtsOn()) stopTts();
+  if (isFocusModeOn()) stopFocusMode();
   cleanupCurrentReader();
 
   currentBookRecord = record;
@@ -3964,15 +4121,44 @@ function syncReaderChapterTitle() {
     : '';
 }
 
+/** A TOC href is relative to the navigation document ("Preface.xhtml#x"),
+    but rendition.display() looks hrefs up in the spine ("Text/Preface.xhtml").
+    Books that keep chapters in a subfolder silently failed to jump. */
+function resolveSpineHref(href: string): string {
+  const [file, hash] = href.split('#');
+  const items: Array<{ href: string }> = (currentBook?.spine as any)?.spineItems || [];
+  const hit = items.find(s => s.href === file) || items.find(s => s.href.endsWith('/' + file));
+  return hit ? hit.href + (hash ? '#' + hash : '') : href;
+}
+
+/** Same chapter file? TOC hrefs are relative to the nav document while
+    locations carry the package path (e.g. "OEBPS/Preface.xhtml"). */
+function sameSectionFile(a: string | undefined, b: string): boolean {
+  if (!a) return false;
+  const x = a.split('#')[0], y = b.split('#')[0];
+  return x === y || x.endsWith('/' + y) || y.endsWith('/' + x);
+}
+
 function updateChapterFromCfi(href: string) {
   const clean = href.split('#')[0];
-  const match = flatToc.find(t => t.href.split('#')[0] === clean) || flatToc[0];
+  const match = flatToc.find(t => sameSectionFile(t.href, clean)) || flatToc[0];
   currentChapterLabel = match?.label || '';
   el.progressChapter.textContent = currentChapterLabel;
   syncReaderChapterTitle();
 
+  currentSectionFile = clean;
+  markCurrentTocItem();
+}
+
+/** Chapter file being read; kept so a TOC built after the first relocation
+    (navigation loads asynchronously) still marks it. */
+let currentSectionFile = '';
+// Read-only peek for debugging in Web Inspector / the simulator harness.
+(window as any).__read = { get sectionFile() { return currentSectionFile; } };
+function markCurrentTocItem(): void {
+  if (!currentSectionFile) return;
   document.querySelectorAll<HTMLAnchorElement>('#toc-list .toc-item').forEach(a => {
-    a.classList.toggle('current', a.dataset.href?.split('#')[0] === clean);
+    a.classList.toggle('current', sameSectionFile(a.dataset.href, currentSectionFile));
   });
 }
 
@@ -4419,6 +4605,7 @@ function installFocusTracker(doc: Document, frameEl: HTMLIFrameElement | null) {
   };
 
   doc.addEventListener('mousemove', (e: MouseEvent) => {
+    if (IS_TOUCH) return;   // hover tracking; on touch it would eat taps
     if (settings.focusTracker === 'off' || !inScope(e.target)) { hide(); return; }
     lastEvent = e;
     if (!rafId) rafId = requestAnimationFrame(paint);
@@ -4509,7 +4696,7 @@ const parseTextAnchor = (cfi: string): [number, number] | null => {
   const m = /^txt:(\d+)-(\d+)$/.exec(cfi);
   return m ? [Number(m[1]), Number(m[2])] : null;
 };
-const TEXT_SKIP = '.code-block-head, [data-focus-word], [data-focus-sentence], [data-focus-overlay], [data-vocab-highlights], script, style, svg';
+const TEXT_SKIP = '[data-not-text], .code-block-head, [data-focus-word], [data-focus-sentence], [data-focus-overlay], [data-vocab-highlights], script, style, svg';
 
 function textNodesOf(root: HTMLElement): Text[] {
   const out: Text[] = [];
@@ -5670,12 +5857,7 @@ async function pronounceWord(word: string, btn: HTMLButtonElement): Promise<void
     if (useVoca) {
       wavBytes = await vocaSynthesize(text, ttsSettings.vocaVoice, 1);
     } else {
-      const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
-        text,
-        voicePath: ttsSettings.piperVoicePath,
-        lengthScale: 1.0,
-      });
-      wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+      wavBytes = await synthPiper(text, ttsSettings.piperVoicePath, 1.0);
     }
     const blob = new Blob([wavBytes.buffer as ArrayBuffer], { type: 'audio/wav' });
     const url = URL.createObjectURL(blob);
@@ -5744,13 +5926,7 @@ async function synthSelChunk(text: string): Promise<string> {
   if (ttsSettings.engine === 'voca') {
     wav = await vocaSynthesize(text, ttsSettings.vocaVoice, ttsSettings.piperNaturalRate ? ttsSettings.rate : 1);
   } else {
-    const r = await invoke<number[] | Uint8Array>('piper_synthesize', {
-      text,
-      voicePath: ttsSettings.piperVoicePath,
-      lengthScale: currentPiperLengthScale(),
-      expressiveness: currentExpressiveness(),
-    });
-    wav = r instanceof Uint8Array ? r : new Uint8Array(r);
+    wav = await synthPiper(text, ttsSettings.piperVoicePath, currentPiperLengthScale(), currentExpressiveness());
   }
   return URL.createObjectURL(new Blob([wav.buffer as ArrayBuffer], { type: 'audio/wav' }));
 }
@@ -5929,10 +6105,21 @@ function reapplyHighlights() {
    ============================================================ */
 function startChromeAutoHide() {
   el.html.dataset.chrome = 'hidden';
+  if (IS_TOUCH) {
+    // No hover on touch screens: show the bars briefly so readers see them,
+    // then a tap in the middle of the page brings them back (onReaderTap).
+    el.html.dataset.chrome = 'visible';
+    clearTimeout(hideChromeTimer);
+    hideChromeTimer = window.setTimeout(() => {
+      if (el.tocDrawer.hidden && el.typographyDrawer.hidden) el.html.dataset.chrome = 'hidden';
+    }, 3000);
+  }
   // Remove first in case a previous openReader() left one behind — otherwise
   // each book-open would stack another mousemove handler on document.
   document.removeEventListener('mousemove', onReaderMouseMove);
-  document.addEventListener('mousemove', onReaderMouseMove);
+  // On touch screens iOS fakes a mousemove before each tap; showing chrome in
+  // response counts as a hover change and iOS then drops the tap's click.
+  if (!IS_TOUCH) document.addEventListener('mousemove', onReaderMouseMove);
 }
 
 function onReaderMouseMove(e: MouseEvent) {
@@ -5948,6 +6135,255 @@ function onReaderMouseMove(e: MouseEvent) {
       }
     }, 2500);
   }
+}
+
+// Touch screens (iPhone/iPad): taps stand in for hover and arrow keys.
+// Left/right thirds turn the page (paginated layouts); the middle toggles the bars.
+const IS_TOUCH = matchMedia('(pointer: coarse)').matches;
+
+function onReaderTap(e: MouseEvent, frame: Element | null) {
+  if (!IS_TOUCH || el.html.dataset.screen !== 'reader') return;
+  const target = e.target as Element | null;
+  if (target?.closest('a, button, input, textarea, select, label, [role="button"]')) return;
+  const sel = target?.ownerDocument?.getSelection();
+  if (sel && !sel.isCollapsed) return;   // finishing a text selection, not a tap
+  const x = e.clientX + (frame?.getBoundingClientRect().left ?? 0);
+  const w = window.innerWidth;
+  const paged = !!currentRendition && settings.layout !== 'scroll';
+  clearTimeout(hideChromeTimer);
+  if (paged && (x < w * 0.3 || x > w * 0.7)) {
+    vimPageNav(x < w * 0.3 ? 'prev' : 'next');
+    el.html.dataset.chrome = 'hidden';
+    return;
+  }
+  el.html.dataset.chrome = el.html.dataset.chrome === 'visible' ? 'hidden' : 'visible';
+}
+
+/* ============================================================
+   Phone layout (iPhone redesign). Phones get their own chrome —
+   bottom tab bar, reader tool bar, bottom sheets — styled in
+   mobile.css under html[data-device="phone"]. The controls here only
+   drive the existing desktop buttons, so behaviour stays in one place.
+   ============================================================ */
+const IS_PHONE = IS_TOUCH && Math.min(screen.width, screen.height) < 600;
+if (IS_PHONE) document.documentElement.dataset.device = 'phone';
+
+interface SheetItem { label: string; detail?: string; danger?: boolean; checked?: boolean; action: () => void; }
+
+function openMSheet(title: string, items: SheetItem[], extra?: HTMLElement): void {
+  const sheet = $<HTMLDivElement>('m-sheet');
+  $<HTMLHeadingElement>('m-sheet-title').textContent = title;
+  const list = $<HTMLDivElement>('m-sheet-list');
+  list.innerHTML = '';
+  if (extra) list.appendChild(extra);
+  for (const item of items) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'm-sheet-item' + (item.danger ? ' danger' : '') + (item.checked ? ' checked' : '');
+    b.textContent = item.label;
+    if (item.detail) {
+      const d = document.createElement('span');
+      d.className = 'm-sheet-detail';
+      d.textContent = item.detail;
+      b.appendChild(d);
+    }
+    b.addEventListener('click', () => { closeMSheet(); item.action(); });
+    list.appendChild(b);
+  }
+  sheet.hidden = false;
+}
+
+function closeMSheet(): void { $<HTMLDivElement>('m-sheet').hidden = true; }
+
+/** A desktop toolbar button that is showing right now (not hidden by format). */
+const isShown = (b: HTMLElement | null): b is HTMLElement => !!b && !b.hidden && b.offsetParent !== null;
+
+function wirePhone(): void {
+  $<HTMLButtonElement>('m-sheet-cancel').addEventListener('click', closeMSheet);
+  $<HTMLDivElement>('m-sheet').addEventListener('click', e => { if (e.target === e.currentTarget) closeMSheet(); });
+  if (!IS_PHONE) return;
+
+  // Library: + and "Sort and view"
+  $<HTMLButtonElement>('m-add-btn').addEventListener('click', () => openMSheet('Add to library', [
+    { label: 'Book or document', detail: 'EPUB, PDF, TXT, Markdown', action: () => el.importBtn.click() },
+    { label: 'Save a web article', action: () => el.importUrlBtn.click() },
+    { label: 'Paste text', action: () => el.pasteTextBtn.click() },
+  ]));
+  $<HTMLButtonElement>('m-sort-btn').addEventListener('click', () => {
+    const sortTo = (to: LibrarySort) => () => {
+      while (librarySort !== to) el.librarySortBtn.click();   // the desktop button cycles
+    };
+    const nav = (kind: string) => () =>
+      document.querySelector<HTMLButtonElement>(`.sidebar-nav-item[data-library-nav="${kind}"]`)?.click();
+    openMSheet('Sort and view', [
+      { label: 'Recently opened', checked: librarySort === 'recent', action: sortTo('recent') },
+      { label: 'Title A–Z', checked: librarySort === 'title', action: sortTo('title') },
+      { label: 'Author A–Z', checked: librarySort === 'author', action: sortTo('author') },
+      { label: 'Highlights', detail: 'Across all books', action: nav('highlights') },
+      { label: 'Bookmarks', detail: 'Across all books', action: nav('bookmarks') },
+    ]);
+  });
+  // The whole "Continue reading" card resumes.
+  el.continueReading.addEventListener('click', e => {
+    if (!(e.target as Element).closest('button')) el.continueResumeBtn.click();
+  });
+
+  // Bottom tab bar
+  const tabs = document.querySelectorAll<HTMLButtonElement>('.m-tab');
+  tabs.forEach(tab => tab.addEventListener('click', () => {
+    switch (tab.dataset.mTab) {
+      case 'library':
+        document.querySelector<HTMLButtonElement>('.sidebar-nav-item[data-library-nav="library"]')?.click();
+        break;
+      case 'news':
+        document.querySelector<HTMLButtonElement>('.sidebar-nav-item[data-library-nav="news"]')?.click();
+        break;
+      case 'review': el.libraryVocabReviewBtn.click(); break;
+      case 'settings': el.librarySettingsBtn.click(); break;
+      case 'stats': {
+        const streak = document.querySelector<HTMLElement>('.sidebar-streak')?.cloneNode(true) as HTMLElement | undefined;
+        streak?.classList.add('m-stats');
+        openMSheet('Reading stats', [], streak);
+        break;
+      }
+    }
+  }));
+  // Library and News are the two "places"; highlight whichever is showing.
+  const newsView = $<HTMLElement>('news-view');
+  const syncTabs = () => tabs.forEach(t => {
+    const on = t.dataset.mTab === (newsView.hidden ? 'library' : 'news');
+    if (on) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
+  });
+  new MutationObserver(syncTabs).observe(newsView, { attributes: true, attributeFilter: ['hidden'] });
+  syncTabs();
+  // News badge mirrors the sidebar's unread count.
+  const newsCount = $<HTMLSpanElement>('nav-news-count');
+  const newsBadge = $<HTMLSpanElement>('m-news-badge');
+  const syncNewsBadge = () => {
+    newsBadge.hidden = newsCount.hidden || !newsCount.textContent || newsCount.textContent === '0';
+    newsBadge.textContent = newsCount.textContent || '';
+  };
+  new MutationObserver(syncNewsBadge).observe(newsCount, { attributes: true, childList: true, characterData: true, subtree: true });
+  syncNewsBadge();
+  // Review badge mirrors the sidebar's "N due".
+  const badge = $<HTMLSpanElement>('m-review-badge');
+  const syncBadge = () => {
+    const n = parseInt(el.libraryVocabCount.textContent || '0', 10) || 0;
+    badge.hidden = el.libraryVocabCount.hidden || n === 0;
+    badge.textContent = String(n);
+  };
+  new MutationObserver(syncBadge).observe(el.libraryVocabCount, { attributes: true, childList: true, characterData: true, subtree: true });
+  syncBadge();
+
+  // Reader bottom tools
+  const tool = (name: string) => document.querySelector<HTMLButtonElement>(`[data-m-tool="${name}"]`)!;
+  tool('contents').addEventListener('click', () => el.tocBtn.click());
+  tool('listen').addEventListener('click', () => el.ttsBtn.click());
+  tool('bookmark').addEventListener('click', () => el.bookmarkBtn.click());
+  tool('focus').addEventListener('click', () => el.focusModeBtn.click());
+  tool('ask').addEventListener('click', () => {
+    if (!el.chatBtn.hidden) el.chatBtn.click();
+    else toast('Install a model in Settings → Local AI to ask about the page');
+  });
+  new MutationObserver(() => tool('bookmark').classList.toggle('active', el.bookmarkBtn.classList.contains('active')))
+    .observe(el.bookmarkBtn, { attributes: true, attributeFilter: ['class'] });
+
+  // Reader ⋯: whatever toolbar buttons this format shows that the tool bar doesn't.
+  $<HTMLButtonElement>('m-more-btn').addEventListener('click', () => {
+    const extras = [el.themeBtn, el.markReadBtn, el.aiExportBtn, el.openOriginalBtn, $<HTMLButtonElement>('save-news-btn'), el.pdfDictBtn, el.pdfSpeakBtn];
+    openMSheet('More', extras.filter(isShown).map(b => ({
+      label: (b.title || b.getAttribute('aria-label') || '').replace(/\s*\([A-Z]\)$/, '').replace(/ —.*$/, ''),
+      action: () => b.click(),
+    })));
+  });
+
+  // News: round buttons, Sources page, pull to refresh
+  $<HTMLButtonElement>('m-news-read-all').addEventListener('click', () => { markAllNewsRead(); toast('All caught up'); });
+  const sourcesBtn = $<HTMLButtonElement>('news-sources-btn');
+  $<HTMLButtonElement>('m-news-sources').addEventListener('click', () => sourcesBtn.click());
+  $<HTMLButtonElement>('m-sources-back').addEventListener('click', () => sourcesBtn.click());
+  const scroller = document.querySelector<HTMLElement>('.library-main')!;
+  let pullStart = -1;
+  scroller.addEventListener('touchstart', e => {
+    pullStart = isNewsViewOpen() && scroller.scrollTop <= 0 ? e.touches[0].clientY : -1;
+  }, { passive: true });
+  scroller.addEventListener('touchend', e => {
+    if (pullStart >= 0 && e.changedTouches[0].clientY - pullStart > 90) void refreshNews(true);
+    pullStart = -1;
+  });
+
+  // News article: Save pill and its tools
+  $<HTMLButtonElement>('m-news-save').addEventListener('click', () => {
+    if (currentBookRecord?.newsTemp) saveNewsRecord(currentBookRecord);
+  });
+  tool('display').addEventListener('click', () => $<HTMLButtonElement>('typography-btn').click());
+  tool('summarise').addEventListener('click', () => {
+    if (el.chatBtn.hidden) { toast('Install a model in Settings → Local AI to summarise'); return; }
+    el.chatBtn.click();
+    window.setTimeout(() => { el.chatInput.value = 'Summarise this article.'; el.chatSendBtn.click(); }, 150);
+  });
+  tool('share').addEventListener('click', async () => {
+    const url = currentBookRecord?.sourceUrl;
+    if (!url) return;
+    try {
+      if (navigator.share) await navigator.share({ title: currentBookRecord?.title, url });
+      else { await navigator.clipboard.writeText(url); toast('Link copied'); }
+    } catch { /* share sheet dismissed */ }
+  });
+
+  // Listen: tapping the speed cycles common rates; "More" (tune) shows the
+  // full controls, otherwise the player stays a compact bar.
+  const rateLabel = $<HTMLSpanElement>('tts-rate-label');
+  rateLabel.setAttribute('role', 'button');
+  rateLabel.addEventListener('click', () => {
+    const steps = [0.8, 1, 1.25, 1.5, 2];
+    const cur = parseFloat(el.ttsRateSlider.value) || 1;
+    el.ttsRateSlider.value = String(steps.find(r => r > cur + 0.01) ?? steps[0]);
+    el.ttsRateSlider.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const tune = $<HTMLDivElement>('tts-tune');
+  const syncListen = () => { el.html.dataset.mListen = tune.hidden ? 'mini' : 'full'; };
+  new MutationObserver(syncListen).observe(tune, { attributes: true, attributeFilter: ['hidden'] });
+  syncListen();
+
+  // Ask: the design's title, then suggestion chips that send a ready-made question
+  const reviewTitle = document.querySelector<HTMLHeadingElement>('#vocab-review-modal h3');
+  if (reviewTitle) reviewTitle.textContent = 'Review';
+  const displayTitle = document.querySelector<HTMLHeadingElement>('#typography-drawer h3');
+  if (displayTitle) displayTitle.textContent = 'Display';
+  const chatTitle = document.querySelector<HTMLHeadingElement>('#chat-modal h3');
+  if (chatTitle) chatTitle.textContent = 'Ask about this page';
+  // Ask: suggestion chips send a ready-made question
+  document.querySelectorAll<HTMLButtonElement>('[data-chat-prompt]').forEach(chip => chip.addEventListener('click', () => {
+    el.chatInput.value = chip.dataset.chatPrompt!;
+    el.chatSendBtn.click();
+  }));
+
+  // Long-press a book for the actions desktop shows on hover.
+  let pressTimer = 0;
+  let longPressed = false;
+  el.libraryGrid.addEventListener('touchstart', e => {
+    const card = (e.target as Element).closest<HTMLElement>('.book-card');
+    if (!card) return;
+    longPressed = false;
+    pressTimer = window.setTimeout(() => {
+      longPressed = true;
+      const title = card.querySelector('.book-title')?.textContent || 'Book';
+      const read = card.querySelector<HTMLButtonElement>('.book-read-toggle');
+      openMSheet(title, [
+        { label: read?.title || 'Mark as read', action: () => read?.click() },
+        { label: 'Subjects…', action: () => card.querySelector<HTMLButtonElement>('.book-subject-btn')?.click() },
+        { label: 'Remove from library', danger: true, action: () => card.querySelector<HTMLButtonElement>('.book-remove')?.click() },
+      ]);
+    }, 500);
+  }, { passive: true });
+  const cancelPress = () => clearTimeout(pressTimer);
+  el.libraryGrid.addEventListener('touchend', cancelPress);
+  el.libraryGrid.addEventListener('touchmove', cancelPress, { passive: true });
+  // The click that follows a long-press must not open the book.
+  el.libraryGrid.addEventListener('click', e => {
+    if (longPressed) { e.stopPropagation(); e.preventDefault(); longPressed = false; }
+  }, true);
 }
 
 /* ============================================================
@@ -7000,6 +7436,8 @@ function walkFocusWords(doc: Document, root: Node): FocusWord[] {
       if (tag === 'script' || tag === 'style' || tag === 'noscript') return NodeFilter.FILTER_REJECT;
       // Code isn't read aloud / flashed in focus mode, and highlight spans would shred it into thousands of tokens.
       if (parent.closest('pre')) return NodeFilter.FILTER_REJECT;
+      // App UI placed inside the page (e.g. the news "not in your library" note).
+      if (parent.closest('[data-not-text]')) return NodeFilter.FILTER_REJECT;
       if (isNoteRefNode(parent)) return NodeFilter.FILTER_REJECT;
       const style = win?.getComputedStyle(parent);
       if (style && (style.display === 'none' || style.visibility === 'hidden')) return NodeFilter.FILTER_REJECT;
@@ -7254,8 +7692,8 @@ function renderVocabHighlightsForDoc(doc: Document): void {
       if (!parent) return NodeFilter.FILTER_REJECT;
       const tag = parent.tagName.toLowerCase();
       if (tag === 'script' || tag === 'style' || tag === 'noscript') return NodeFilter.FILTER_REJECT;
-      // Skip our own overlay tree.
-      if (parent.closest('[data-vocab-highlights]')) return NodeFilter.FILTER_REJECT;
+      // Skip our own overlay tree, and app UI placed inside the page.
+      if (parent.closest('[data-vocab-highlights], [data-not-text]')) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
   });
@@ -7332,7 +7770,7 @@ function classifyWord(fw: FocusWord): { pos: WordPos; range: Range | null; rect:
   if (currentTextElement) {
     const box = currentTextElement.getBoundingClientRect();
     if (rect.bottom <= box.top + 4) return { pos: 'before', range, rect };
-    if (rect.top >= box.bottom - 4) return { pos: 'after', range, rect };
+    if (rect.top >= textVisibleBottom() - 4) return { pos: 'after', range, rect };
     return { pos: 'visible', range, rect };
   }
 
@@ -7847,6 +8285,8 @@ let piperStatus: PiperStatus | null = null;
 interface LlmModel { path: string; name: string; size_bytes: number; }
 interface LlmStatus {
   binary_exists: boolean;
+  /** llama.cpp is compiled into the app (iOS): no llama-cli to install. */
+  embedded?: boolean;
   binary_path: string;
   models_dir: string;
   models: LlmModel[];
@@ -8018,8 +8458,27 @@ function isPiperReady(): boolean {
   return !!piperStatus && piperStatus.binary_exists && piperStatus.voices.length > 0;
 }
 
+/** One Piper sentence as WAV bytes. iOS runs Piper in a WASM worker, which
+    can't change synthesis length, so speed there comes from playbackRate. */
+async function synthPiper(text: string, voicePath: string, lengthScale: number, expressiveness: number | null = null): Promise<Uint8Array> {
+  if (IS_IOS) return piperWasmSynthesize(text, voicePath);
+  const r = await invoke<number[] | Uint8Array>('piper_synthesize', { text, voicePath, lengthScale, expressiveness });
+  return r instanceof Uint8Array ? r : new Uint8Array(r);
+}
+
 async function refreshPiperStatus(): Promise<PiperStatus | null> {
   try {
+    if (IS_IOS) {
+      // The worker keeps voices in its own storage; a voice's "path" is its id.
+      const ids = await piperWasmStored();
+      piperStatus = {
+        binary_exists: true,
+        binary_path: '',
+        voices_dir: '',
+        voices: ids.map(id => ({ path: id, name: id, lang: id.split('-')[0], sample_rate: 22050 })),
+      };
+      return piperStatus;
+    }
     piperStatus = await invoke<PiperStatus>('piper_status');
     return piperStatus;
   } catch (err) {
@@ -8108,18 +8567,18 @@ function renderVoiceList() {
   }
 }
 
+// CPU architecture of the running app ("aarch64", "x86_64"), from Rust —
+// the webview's user agent can't tell Apple Silicon from Intel.
+let HOST_ARCH = '';
+invoke<string>('host_arch').then(a => { HOST_ARCH = a; }).catch(() => {});
+
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 function updateEngineUi() {
-  // iOS can't run the Piper helper process; offer System and Tiny Voca only.
-  if (IS_IOS) {
-    el.ttsEngineSelect.querySelector('option[value="piper"]')?.remove();
-    if (ttsSettings.engine === 'piper') ttsSettings.engine = 'voca';
-  }
   el.ttsEngineSelect.value = ttsSettings.engine;
   // Setup button and natural-rate toggle only make sense for Piper.
   el.ttsSetupBtn.hidden = ttsSettings.engine !== 'piper';
-  el.ttsNaturalRateLabel.hidden = !isAudioEngine();
+  el.ttsNaturalRateLabel.hidden = !isAudioEngine() || (IS_IOS && ttsSettings.engine === 'piper');
   el.ttsNaturalRate.checked = ttsSettings.piperNaturalRate;
   el.ttsPitchRow.hidden = isAudioEngine();
   renderVoiceList();
@@ -8523,7 +8982,7 @@ function setTtsRate(rate: number): void {
   if (!ttsOn) return;
 
   if (isAudioEngine()) {
-    if (ttsSettings.piperNaturalRate) {
+    if (naturalRate()) {
       // Natural-rate mode: rate is baked into the audio at synth time
       // (length_scale). Old audio has the wrong duration — re-synth from
       // the current position. There will be a small stutter here; that's
@@ -8598,7 +9057,11 @@ function renderPiperSetupModal(): void {
 
   el.piperPath.textContent = s.voices_dir.replace(/\\voices$/i, '').replace(/\/voices$/, '');
 
-  if (s.binary_exists) {
+  el.piperInstallBinaryBtn.hidden = IS_IOS;
+  if (IS_IOS) {
+    el.piperBinaryStatus.textContent = 'Built-in engine';
+    el.piperBinaryStatus.className = 'piper-status ok';
+  } else if (s.binary_exists) {
     el.piperBinaryStatus.textContent = 'Binary installed';
     el.piperBinaryStatus.className = 'piper-status ok';
     el.piperInstallBinaryBtn.textContent = 'Re-install';
@@ -8710,9 +9173,9 @@ function piperBinaryUrl(): { url: string; archiveName: string } | null {
     };
   }
   if (isMac) {
-    // Chromium/WebView2 doesn't reliably surface arm64 in UA; default to
-    // universal-if-available, else x64. If wrong, user can hand-download.
-    const isArm = /arm64|aarch64/i.test(ua) || /Mac.*ARM/i.test(platform);
+    // WebKit reports "Intel Mac OS X" even on Apple Silicon, so trust Rust's
+    // HOST_ARCH first; the UA checks are a fallback.
+    const isArm = HOST_ARCH === 'aarch64' || /arm64|aarch64/i.test(ua) || /Mac.*ARM/i.test(platform);
     const asset = isArm ? 'piper_macos_aarch64.tar.gz' : 'piper_macos_x64.tar.gz';
     return {
       url: `https://github.com/rhasspy/piper/releases/latest/download/${asset}`,
@@ -8751,7 +9214,7 @@ async function llamaBinaryUrl(): Promise<{ url: string; archiveName: string } | 
     suffix = 'win-cpu-x64';
     ext = 'zip';
   } else if (isMac) {
-    const isArm = /arm64|aarch64/i.test(ua) || /Mac.*ARM/i.test(platform);
+    const isArm = HOST_ARCH === 'aarch64' || /arm64|aarch64/i.test(ua) || /Mac.*ARM/i.test(platform);
     suffix = isArm ? 'macos-arm64' : 'macos-x64';
     ext = 'tar.gz';
   } else if (isLinux) {
@@ -8940,6 +9403,13 @@ async function installPiperVoice(voice: CatalogVoice, row: HTMLElement): Promise
   }
 
   try {
+    if (IS_IOS) {
+      await piperWasmDownload(voice.id, (loaded, total) =>
+        progress && paintProgress(progress, loaded, total || voice.sizeMb * 1024 * 1024, 'Model'));
+      if (progress) paintProgress(progress, 1, 1, 'Done');
+      toast(`Installed ${voice.label}`);
+      return;
+    }
     await ensurePiperDirs();
 
     // Paths are piper-root-relative (Rust joins onto piper_root()), so no
@@ -9012,7 +9482,11 @@ function renderLlmSetupSection(): void {
 
   el.llmPath.textContent = s.models_dir.replace(/\\models$/i, '').replace(/\/models$/, '');
 
-  if (s.binary_exists) {
+  el.llmInstallBinaryBtn.hidden = !!s.embedded;
+  if (s.embedded) {
+    el.llmBinaryStatus.textContent = 'Built-in engine';
+    el.llmBinaryStatus.className = 'piper-status ok';
+  } else if (s.binary_exists) {
     el.llmBinaryStatus.textContent = 'Binary installed';
     el.llmBinaryStatus.className = 'piper-status ok';
     el.llmInstallBinaryBtn.textContent = 'Re-install';
@@ -9272,6 +9746,9 @@ function renderLlmModelCatalog(): void {
   );
   el.llmModelCatalog.innerHTML = '';
   for (const model of LLM_CATALOG) {
+    // iOS kills apps that use too much memory; a ~2 GB model on a 4 GB phone
+    // (iPhone 12-class) won't survive generation.
+    if (IS_IOS && model.sizeMb > 1500) continue;
     const li = document.createElement('li');
     li.className = 'piper-voice-row' + (installedIds.has(model.id) ? ' installed' : '');
     li.innerHTML = `
@@ -9685,6 +10162,14 @@ function ttsReportProgress(rect: DOMRect | null, range: Range | null | undefined
   } catch { /* range not mappable right now */ }
 }
 
+/** Bottom of the readable part of the text view: the read-aloud / focus
+    panel covers the bottom padding (--reader-bottom-pad), so words under it
+    count as off-screen. */
+function textVisibleBottom(): number {
+  const box = currentTextElement!;
+  return box.getBoundingClientRect().bottom - (parseFloat(getComputedStyle(box).paddingBottom) || 0);
+}
+
 function ttsFollow(pos: WordPos, rect: DOMRect | null, range?: Range | null): void {
   if (pos === 'visible') ttsReportProgress(rect, range);
   if (!currentTextElement) {
@@ -9709,7 +10194,8 @@ function ttsFollow(pos: WordPos, rect: DOMRect | null, range?: Range | null): vo
     }
     return;
   }
-  const nearBottom = rect.top > b.bottom - b.height * 0.15;
+  const visBottom = textVisibleBottom();
+  const nearBottom = rect.top > visBottom - (visBottom - b.top) * 0.15;
   if (pos !== 'after' && !(pos === 'visible' && nearBottom)) return;
   ttsAutoScrollUntil = performance.now() + 700;
   box.scrollTop += rect.top - b.top - b.height * 0.3;
@@ -10213,11 +10699,15 @@ function startPiperPaintLoop(): void {
 // preserved because the model actually synthesizes the longer duration.
 // Otherwise, length_scale stays at 1.0 and we speed/slow via HTMLAudioElement
 // playbackRate — instant, but pitch-shifted.
+// Piper on iOS (WASM) can't change synthesis length, so it always uses playbackRate.
+function naturalRate(): boolean {
+  return ttsSettings.piperNaturalRate && !(IS_IOS && ttsSettings.engine === 'piper');
+}
 function currentPiperLengthScale(): number {
-  return ttsSettings.piperNaturalRate ? (1 / ttsSettings.rate) : 1.0;
+  return naturalRate() ? (1 / ttsSettings.rate) : 1.0;
 }
 function currentPiperPlaybackRate(): number {
-  return ttsSettings.piperNaturalRate ? 1.0 : ttsSettings.rate;
+  return naturalRate() ? 1.0 : ttsSettings.rate;
 }
 
 async function synthesizePiperChunk(
@@ -10237,13 +10727,7 @@ async function synthesizePiperChunk(
       wavBytes = r.wav;
       timing = r.timing;
     } else {
-      const result = await invoke<number[] | Uint8Array>('piper_synthesize', {
-        text,
-        voicePath: voice,
-        lengthScale: currentPiperLengthScale(),
-        expressiveness: currentExpressiveness(),
-      });
-      wavBytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+      wavBytes = await synthPiper(text, voice, currentPiperLengthScale(), currentExpressiveness());
     }
   } catch (err) {
     console.error(useVoca ? 'voca synth failed:' : 'piper_synthesize failed:', err);
@@ -10697,10 +11181,13 @@ async function cacheCurrentChapter(): Promise<void> {
   // counter on the Rust side — poll it the same way downloadFileWithProgress
   // polls piper_file_size.
   const useVoca = ttsSettings.engine === 'voca';
+  // Engines that synthesize in a worker (Tiny Voca, Piper on iOS) build the
+  // chapter here and count progress locally.
+  const jsBatch = useVoca || IS_IOS;
   let vocaDone = 0;
   const progressPoll = window.setInterval(async () => {
     try {
-      const [done, total] = useVoca ? [vocaDone, texts.length] : await invoke<[number, number]>('piper_batch_progress');
+      const [done, total] = jsBatch ? [vocaDone, texts.length] : await invoke<[number, number]>('piper_batch_progress');
       if (total > 0) {
         const pct = Math.round((done / total) * 100);
         const label = `Caching… ${pct}% (${done}/${total})`;
@@ -10740,6 +11227,33 @@ async function cacheCurrentChapter(): Promise<void> {
       await writeFile(`${stem}.json`, new TextEncoder().encode(JSON.stringify({
         voice, section: key, sentence_starts: starts, total_duration: samples / rate, sample_rate: rate,
       })), { baseDir: BaseDirectory.AppData });
+    } else if (IS_IOS) {
+      // Same file layout as the Rust batch cache, so piper_cache_lookup finds it.
+      const chunks: Uint8Array[] = [];
+      const starts: number[] = [];
+      let rate = 0;
+      let bytes = 0;
+      for (let i = 0; i < texts.length; i++) {
+        const { sampleRate, pcm } = parseWav(await piperWasmSynthesize(texts[i], ttsSettings.piperVoicePath));
+        rate ||= sampleRate;
+        starts.push(bytes / (rate * 2));
+        chunks.push(pcm);
+        bytes += pcm.byteLength;
+        const gap = new Uint8Array(Math.round(rate * Math.min(5000, pausesMs[i] ?? 0) / 1000) * 2);
+        chunks.push(gap);
+        bytes += gap.byteLength;
+        vocaDone = i + 1;
+      }
+      const pcm = new Uint8Array(bytes);
+      let at = 0;
+      for (const c of chunks) { pcm.set(c, at); at += c.byteLength; }
+      const dir = `piper/cache/${currentBookRecord.id}`;
+      const stem = `${dir}/${key}_${voice}`;
+      await mkdir(dir, { baseDir: BaseDirectory.AppData, recursive: true });
+      await writeFile(`${stem}.wav`, wrapWav(pcm, rate), { baseDir: BaseDirectory.AppData });
+      await writeFile(`${stem}.json`, new TextEncoder().encode(JSON.stringify({
+        voice, section: key, sentence_starts: starts, total_duration: bytes / (rate * 2), sample_rate: rate,
+      })), { baseDir: BaseDirectory.AppData });
     } else {
     await invoke('piper_batch_synthesize', {
       bookId: currentBookRecord.id,
@@ -10763,6 +11277,10 @@ async function cacheCurrentChapter(): Promise<void> {
 }
 
 function wire() {
+  wirePhone();
+  // Taps on Markdown / text / PDF pages and the page margins. EPUB pages are
+  // iframes whose clicks don't bubble here; the content hook handles those.
+  el.viewer.addEventListener('click', (e) => onReaderTap(e, null));
   // Links inside Markdown / article / PDF text live in the main document (EPUB
   // pages are handled in their own frames, see the content hook).
   document.addEventListener('click', (e) => {
@@ -11027,6 +11545,9 @@ function wire() {
   el.piperSetupModal.addEventListener('click', (e) => {
     if (e.target === el.piperSetupModal) closePiperSetup();
   });
+  // iOS has no file manager to open app folders in.
+  el.piperOpenFolderBtn.hidden = IS_IOS;
+  el.llmOpenFolderBtn.hidden = IS_IOS;
   el.piperOpenFolderBtn.addEventListener('click', async () => {
     if (!piperStatus) return;
     const folder = piperStatus.voices_dir.replace(/[\\/]voices$/i, '');
@@ -11197,7 +11718,7 @@ function wire() {
   // Reading ruler follows the cursor. Content in the main document (text/MD
   // readers, the general window) is tracked here; epub content lives in
   // iframes and is tracked from installFocusTracker with translated coords.
-  document.addEventListener('mousemove', (e) => moveRuler(e.clientY));
+  if (!IS_TOUCH) document.addEventListener('mousemove', (e) => moveRuler(e.clientY));
   document.addEventListener('mouseleave', () => { el.readingRuler.style.opacity = '0'; });
 
   el.returnPill.addEventListener('click', () => {
@@ -11643,6 +12164,10 @@ function boot() {
   installFocusTracker(document, null);
   goToScreen('library');
   updateStatsUI();
+  // Listen first, then drain: a file shared before the page loaded is queued in Rust.
+  listen('files-opened', () => { void importOpenedFiles(); })
+    .catch(() => {})
+    .finally(() => { void importOpenedFiles(); });
   document.querySelectorAll<HTMLElement>('.theme-card').forEach(c => {
     c.classList.toggle('active', c.dataset.themeVal === settings.theme);
   });

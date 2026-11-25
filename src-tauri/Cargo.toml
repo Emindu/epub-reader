@@ -25,4 +25,26 @@ serde_json = "1"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-clipboard-manager = "2"
+# HTTP for article import, news feeds and model downloads. Pure Rust (rustls),
+# so it also works on iOS where there is no curl to shell out to.
+ureq = { version = "2", features = ["gzip", "brotli"] }
 
+# llama.cpp compiled into the app (Metal GPU). iOS can't spawn `llama-cli`, so
+# it always gets this; on desktop it's opt-in (`--features embedded-llm`).
+# Default features are off: no OpenMP (not in Apple clang), and no `common`
+# (~14 MB of grammar helpers we don't use).
+llama-cpp-2 = { version = "0.1.161", optional = true, default-features = false, features = ["metal"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["metal"] }
+# AVAudioSession, so read-aloud keeps playing with the screen locked.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+
+[features]
+embedded-llm = ["dep:llama-cpp-2"]
+
+# tao 0.35.3 returns a freed UISceneConfiguration when the app uses UIScene
+# (required by iOS 27), crashing at launch. Patched copy until upstream fixes it.
+[patch.crates-io]
+tao = { path = "vendor/tao" }

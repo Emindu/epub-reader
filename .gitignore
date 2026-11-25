@@ -33,3 +33,4 @@ public/voca/model-si/
 # Sinhala: stale checkpoint and old-model backup stay local
 Sinhala/old-step39425/
 Sinhala/*.zip
+public/voca/piper/

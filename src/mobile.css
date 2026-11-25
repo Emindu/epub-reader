@@ -1,0 +1,1031 @@
+/* ==========================================================================
+   Phone layout — the iPhone redesign.
+   Everything here is scoped to html[data-device="phone"] (set in main.ts for
+   touch screens narrower than 600pt), so desktop and Mac are untouched.
+   Colours come from the theme tokens; only the Default theme is remapped to
+   the design's warm palette, so all other themes keep working.
+   ========================================================================== */
+
+/* Phone-only elements stay out of the desktop layout. */
+.m-tabbar,
+.m-title-actions,
+.m-reader-tools,
+.m-only { display: none; }
+
+html[data-device="phone"] {
+  --m-fill: color-mix(in srgb, var(--text) 6%, var(--bg));
+  --m-track: color-mix(in srgb, var(--text) 9%, var(--bg));
+  --m-hairline: color-mix(in srgb, var(--text) 8%, transparent);
+  --m-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --m-safe-top: env(safe-area-inset-top, 0px);
+  --m-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --m-tabbar-h: calc(49px + max(var(--m-safe-bottom), 8px));
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+html[data-device="phone"][data-theme="default"][data-appearance="light"] {
+  --bg: #fbfaf7; --surface: #ffffff; --surface-hover: #f2efe9;
+  --text: #1a1a1a; --text-muted: #6b6960; --text-faint: #a8a49a;
+  --border: rgba(0, 0, 0, 0.08); --border-strong: rgba(0, 0, 0, 0.12);
+  --chrome-bg: rgba(251, 250, 247, 0.94); --accent: #b45309;
+  --accent-soft: #faf3ea;
+}
+html[data-device="phone"][data-theme="default"][data-appearance="dark"] {
+  --bg: #111111; --surface: #1c1c1c; --surface-hover: #242424;
+  --text: #e6e6e6; --text-muted: #a3a3a3; --text-faint: #6b6b6b;
+  --border: rgba(255, 255, 255, 0.1); --border-strong: rgba(255, 255, 255, 0.16);
+  --chrome-bg: rgba(17, 17, 17, 0.94); --accent: #d97706;
+  --accent-soft: rgba(217, 119, 6, 0.14);
+}
+html[data-device="phone"] body { background: var(--bg); }
+
+/* Edge to edge: backgrounds run under the status bar and home indicator;
+   content and controls are inset instead (overrides the generic safe-area
+   inset in styles.css). */
+html[data-device="phone"] .screen { inset: 0; }
+html[data-device="phone"] .m-only { display: flex; }
+
+/* Round icon buttons (44pt touch targets) */
+html[data-device="phone"] .m-round-btn {
+  width: 44px; height: 44px; border-radius: 22px;
+  border: none; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--m-fill); color: var(--text);
+}
+html[data-device="phone"] .m-round-btn-primary { background: var(--text); color: var(--bg); }
+
+/* ---------------------------------------------------------------- Library */
+html[data-device="phone"] .library-screen { display: block; }
+html[data-device="phone"] .library-sidebar,
+html[data-device="phone"] .min-library-head,
+html[data-device="phone"] .min-library-foot { display: none; }
+
+html[data-device="phone"] .library-main {
+  height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: calc(var(--m-safe-top) + 10px) 20px calc(var(--m-tabbar-h) + 28px);
+  gap: 14px;
+}
+html[data-device="phone"] .library-header {
+  display: flex; flex-direction: column; align-items: stretch; gap: 14px;
+  padding: 0; position: static;
+}
+html[data-device="phone"] .library-header .library-heading {
+  display: flex; flex-direction: row; align-items: flex-end; justify-content: space-between; gap: 12px;
+  padding-top: 10px;
+}
+html[data-device="phone"] .library-title {
+  margin: 0;
+  font-family: var(--font-serif); font-weight: 500;
+  font-size: 34px; letter-spacing: -0.5px; line-height: 1.1;
+}
+html[data-device="phone"] .library-subtitle { display: none; }
+html[data-device="phone"] .m-title-actions { display: flex; gap: 8px; }
+
+html[data-device="phone"] .library-header .library-actions { display: block; }
+html[data-device="phone"] .library-header .library-actions > :not(.library-search) { display: none; }
+/* News / Highlights headers keep their buttons, in a scrolling row. */
+html[data-device="phone"] .news-head .library-actions { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+html[data-device="phone"] .news-head .library-action-btn { flex: none; height: 36px; border-radius: 18px; }
+html[data-device="phone"] #news-back-btn,
+html[data-device="phone"] #marks-back-btn { display: none; } /* the tab bar does this */
+html[data-device="phone"] .library-search {
+  width: 100%; height: 40px; padding: 0 12px; gap: 8px;
+  border: none; border-radius: 12px;
+  background: var(--m-fill); color: var(--text-muted);
+  box-shadow: none;
+}
+html[data-device="phone"] .library-search input {
+  font-size: 16px; /* 16px stops iOS zooming in on focus */
+  color: var(--text);
+}
+html[data-device="phone"] .library-search kbd { display: none; }
+
+/* Continue reading: one compact card with a label above it */
+html[data-device="phone"] .continue-reading {
+  position: relative;
+  flex-wrap: nowrap; gap: 14px;
+  margin-top: 30px; padding: 14px;
+  border: none; border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--m-card-shadow);
+}
+html[data-device="phone"] .continue-reading::before {
+  content: 'Continue reading';
+  position: absolute; left: 0; top: -26px;
+  font-size: 13px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase;
+  color: var(--text-muted);
+}
+html[data-device="phone"] .continue-cover {
+  width: 74px; height: 110px; padding: 8px;
+  border-radius: 6px;
+  justify-content: flex-end;
+  box-shadow: inset -3px 0 0 rgba(0, 0, 0, 0.18);
+}
+html[data-device="phone"] .continue-cover-format,
+html[data-device="phone"] .continue-cover-author { display: none; }
+html[data-device="phone"] .continue-cover-title {
+  font-family: var(--font-ui) !important;
+  font-size: 12px; font-weight: 800; line-height: 1.05; letter-spacing: -0.2px;
+}
+html[data-device="phone"] .continue-main { flex: 1 1 auto; gap: 4px; }
+html[data-device="phone"] .continue-main .eyebrow,
+html[data-device="phone"] .continue-quote,
+html[data-device="phone"] .continue-actions,
+html[data-device="phone"] .continue-up-next { display: none !important; }
+html[data-device="phone"] .continue-title-block { gap: 4px; }
+html[data-device="phone"] .continue-title-block h2 {
+  font-family: var(--font-serif); font-size: 20px; font-weight: 500; line-height: 1.15;
+}
+html[data-device="phone"] .continue-title-block p { font-size: 13px; }
+html[data-device="phone"] .continue-progress { margin-top: auto; gap: 6px; }
+html[data-device="phone"] .continue-progress-track { height: 4px; background: var(--m-track); }
+html[data-device="phone"] .continue-progress-meta { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+html[data-device="phone"] .continue-progress-meta span:last-child { font-family: inherit; }
+
+/* Format chips, scrolling sideways */
+html[data-device="phone"] .library-titles { display: flex; flex-direction: column; gap: 14px; }
+html[data-device="phone"] .library-toolbar {
+  flex-wrap: nowrap; overflow-x: auto;
+  margin: 4px -20px 0; padding: 0 20px;
+  scrollbar-width: none;
+}
+html[data-device="phone"] .library-toolbar::-webkit-scrollbar { display: none; }
+html[data-device="phone"] .library-sort-btn { display: none; }
+html[data-device="phone"] .format-tabs {
+  display: flex; flex-wrap: nowrap; gap: 8px;
+  padding: 0; border: none; background: none; box-shadow: none;
+}
+html[data-device="phone"] .format-tab {
+  flex: none; height: 34px; padding: 0 14px;
+  border-radius: 17px; border: 1px solid var(--border-strong);
+  background: transparent; color: var(--text);
+  font-size: 14px; font-weight: 500; box-shadow: none;
+}
+html[data-device="phone"] .format-tab span { display: none; }
+html[data-device="phone"] .format-tab.active {
+  background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600;
+}
+
+/* Book grid: three covers across */
+html[data-device="phone"] .library-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px 14px;
+}
+html[data-device="phone"] .book-card { gap: 6px; }
+html[data-device="phone"] .book-card:hover { transform: none; }
+html[data-device="phone"] .book-cover {
+  order: 0;
+  padding: 8px; border-radius: 5px;
+  box-shadow: inset -3px 0 0 rgba(0, 0, 0, 0.15), 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+html[data-device="phone"] .book-card:hover .book-cover { box-shadow: inset -3px 0 0 rgba(0, 0, 0, 0.15), 0 2px 8px rgba(0, 0, 0, 0.08); }
+html[data-device="phone"] .book-cover-format { font-size: 9px; font-weight: 700; letter-spacing: 0.8px; opacity: 0.75; }
+html[data-device="phone"] .book-cover-title { font-size: 13px; font-weight: 700; line-height: 1.1; letter-spacing: -0.2px; }
+html[data-device="phone"] .book-cover-author,
+html[data-device="phone"] .book-progress-ring,
+html[data-device="phone"] .book-remove,
+html[data-device="phone"] .book-subject-btn,
+html[data-device="phone"] .book-read-toggle,
+html[data-device="phone"] .book-subject-tags,
+html[data-device="phone"] .book-min-meta { display: none !important; }
+/* Long-press opens the actions desktop shows on hover (main.ts). */
+html[data-device="phone"] .book-card { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+html[data-device="phone"] .book-progress-bar { order: 1; display: block; height: 3px; margin: 0; background: var(--m-track); }
+html[data-device="phone"] .book-progress-bar > span { display: block; height: 100%; background: var(--accent); }
+html[data-device="phone"] .book-meta { order: 2; gap: 2px; }
+html[data-device="phone"] .book-title {
+  font-family: var(--font-ui); font-size: 13px; font-weight: 500; line-height: 1.25;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+html[data-device="phone"] .book-author { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* News / Highlights views reached from "Sort and view" */
+html[data-device="phone"] .news-head { flex-direction: column; align-items: stretch; gap: 12px; padding-top: 10px; }
+
+/* Bottom tab bar */
+html[data-device="phone"] .m-tabbar {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 25;
+  height: var(--m-tabbar-h); box-sizing: border-box;
+  padding: 6px 8px max(var(--m-safe-bottom), 8px);
+  background: var(--chrome-bg);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid var(--border);
+}
+.m-tab {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 0; border: none; background: none;
+  color: var(--text-muted); font: 500 10px var(--font-ui);
+}
+.m-tab[aria-current="page"] { color: var(--accent); font-weight: 600; }
+.m-tab-badge {
+  position: absolute; top: -3px; left: 52%;
+  min-width: 18px; height: 18px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 9px; background: var(--accent); color: #fff;
+  font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.m-tab-badge[hidden] { display: none; }
+
+/* ----------------------------------------------------------------- Reader */
+html[data-device="phone"] .reader-topbar {
+  height: auto; min-height: calc(52px + var(--m-safe-top));
+  padding: var(--m-safe-top) 6px 0;
+  grid-template-columns: auto minmax(0, 1fr) auto; gap: 0;
+  background: var(--chrome-bg);
+}
+html[data-device="phone"] #toc-btn,
+html[data-device="phone"] .pdf-zoom-group,
+html[data-device="phone"] .reader-stats,
+html[data-device="phone"] .reader-format-badge,
+html[data-device="phone"] .reader-toolbar-sep,
+html[data-device="phone"] .reader-toolbar > .topbar-icon-btn:not(#typography-btn):not(#m-more-btn):not(#open-original-btn),
+html[data-device="phone"]:not([data-news-article]) #open-original-btn { display: none !important; }
+html[data-device="phone"] .reader-topbar .topbar-right { gap: 0; }
+html[data-device="phone"] .reader-toolbar { gap: 0; }
+html[data-device="phone"] .reader-topbar .topbar-icon-btn {
+  width: 44px; height: 44px; border-radius: 22px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text); background: transparent;
+}
+html[data-device="phone"] #typography-btn .aa-label { font-family: var(--font-serif); font-size: 20px; font-weight: 500; }
+html[data-device="phone"] .topbar-center { align-items: center; text-align: center; min-width: 0; gap: 1px; }
+html[data-device="phone"] .reader-book-title {
+  font-family: var(--font-serif); font-size: 16px; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+html[data-device="phone"] .reader-chapter-title { font-size: 12px; color: var(--text-muted); }
+
+/* Page area: clear the status bar and home indicator; side zones turn pages. */
+html[data-device="phone"] .viewer {
+  padding-top: calc(var(--m-safe-top) + 64px);
+  padding-bottom: calc(var(--m-safe-bottom) + var(--reader-bottom-pad, 24px));
+  padding-left: clamp(16px, calc(var(--reader-margin) * 0.3), 36px);
+  padding-right: clamp(16px, calc(var(--reader-margin) * 0.3), 36px);
+}
+html[data-device="phone"] .edge-nav,
+html[data-device="phone"] .edge-sensor,
+html[data-device="phone"] .page-outline { display: none !important; }
+
+/* Bottom bar: progress + the five reader tools */
+html[data-device="phone"] .reader-bottombar {
+  padding: 12px 20px max(var(--m-safe-bottom), 10px);
+  display: flex; flex-direction: column; gap: 7px;
+  background: var(--chrome-bg);
+}
+html[data-device="phone"] .progress-track { height: 3px; border-radius: 2px; background: var(--m-track); }
+html[data-device="phone"] .progress-thumb { display: none; }
+html[data-device="phone"] .progress-meta {
+  display: flex; align-items: baseline; gap: 4px; margin: 0;
+  font-size: 12px; color: var(--text-muted);
+}
+html[data-device="phone"] #progress-chapter { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-device="phone"] .progress-meta > .dot-sep:first-of-type { display: none; }
+html[data-device="phone"] .m-reader-tools {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 3px -12px 0;
+}
+.m-reader-tools button {
+  height: 52px; padding: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  border: none; background: transparent;
+  color: var(--text-muted); font: 400 11px var(--font-ui);
+}
+.m-reader-tools svg { color: var(--text); }
+.m-reader-tools button.active svg { color: var(--accent); fill: currentColor; }
+
+/* ---------------------------------------------------------- Action sheet */
+.m-sheet-backdrop {
+  position: fixed; inset: 0; z-index: 200;
+  display: flex; align-items: flex-end;
+  background: rgba(20, 18, 14, 0.28);
+}
+.m-sheet-backdrop[hidden] { display: none; }
+.m-sheet {
+  width: 100%; box-sizing: border-box;
+  max-height: 85vh; overflow-y: auto;
+  padding: 8px 20px max(env(safe-area-inset-bottom, 0px), 16px);
+  border-radius: 22px 22px 0 0;
+  background: var(--surface); color: var(--text);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.12);
+  display: flex; flex-direction: column; gap: 6px;
+  animation: m-sheet-up var(--dur-med) var(--ease-out);
+}
+@keyframes m-sheet-up { from { transform: translateY(40px); opacity: 0; } }
+.m-grabber { width: 36px; height: 5px; border-radius: 3px; background: var(--border-strong); align-self: center; margin-bottom: 6px; }
+.m-sheet-title { margin: 0 0 4px; font: 600 17px var(--font-ui); }
+.m-sheet-list {
+  display: flex; flex-direction: column;
+  border-radius: 14px; overflow: hidden;
+  background: color-mix(in srgb, var(--text) 4%, var(--surface));
+}
+.m-sheet-item {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 50px; padding: 0 14px;
+  border: none; border-bottom: 1px solid var(--m-hairline, var(--border));
+  background: transparent; color: var(--text);
+  font: 400 16px var(--font-ui); text-align: left;
+}
+.m-sheet-item:last-child { border-bottom: none; }
+.m-sheet-item.danger { color: #c2410c; }
+.m-sheet-item.checked::after { content: '✓'; margin-left: auto; color: var(--accent); font-weight: 600; }
+.m-sheet-detail { margin-left: auto; font-size: 13px; color: var(--text-muted); }
+.m-sheet-item.checked .m-sheet-detail { margin-left: 8px; }
+.m-sheet-cancel {
+  height: 50px; margin-top: 6px;
+  border: none; border-radius: 14px;
+  background: color-mix(in srgb, var(--text) 4%, var(--surface));
+  color: var(--accent); font: 600 16px var(--font-ui);
+}
+.m-sheet-list .m-stats { padding: 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+
+/* ==========================================================================
+   Phase 2 — sheets. Drawers, popovers and modals become bottom sheets.
+   ========================================================================== */
+html[data-device="phone"] {
+  --m-sheet-shadow: 0 -8px 30px rgba(0, 0, 0, 0.12);
+  --m-scrim: 0 0 0 100vmax rgba(20, 18, 14, 0.28);
+}
+
+/* ------------------------------------------- Modals → bottom sheets */
+html[data-device="phone"] .modal-backdrop {
+  align-items: flex-end;
+  background: rgba(20, 18, 14, 0.28);
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+html[data-device="phone"] .modal-container {
+  width: 100%; max-width: none;
+  max-height: calc(100% - var(--m-safe-top) - 10px);
+  border: none; border-radius: 22px 22px 0 0;
+  background: var(--bg);
+  box-shadow: var(--m-sheet-shadow);
+  padding-bottom: var(--m-safe-bottom);
+  transform: none;
+}
+html[data-device="phone"] .modal-container::before {
+  content: ''; display: block;
+  width: 36px; height: 5px; border-radius: 3px;
+  margin: 8px auto 0;
+  background: var(--border-strong);
+}
+html[data-device="phone"] .modal-header { padding: 10px 20px 12px; gap: 10px; border-bottom: 1px solid var(--border); }
+html[data-device="phone"] .modal-header-left h3 { font: 600 17px var(--font-ui); margin: 0; }
+html[data-device="phone"] .modal-header .ghost-btn {
+  width: 36px; height: 36px; border-radius: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--m-fill); color: var(--text-muted);
+}
+html[data-device="phone"] .modal-body { padding: 16px 20px; }
+html[data-device="phone"] .modal-container input,
+html[data-device="phone"] .modal-container textarea,
+html[data-device="phone"] .modal-container select { font-size: 16px; }
+
+/* ------------------------------------------------- Drawers → sheets */
+html[data-device="phone"] .drawer {
+  left: 0; right: 0; bottom: 0;
+  top: calc(var(--m-safe-top) + 10px);
+  width: auto; max-width: none;
+  padding: 8px 0 var(--m-safe-bottom);
+  border: none; border-radius: 22px 22px 0 0;
+  background: var(--bg);
+  transform: translateY(105%);
+  box-shadow: var(--m-sheet-shadow);
+  transition: transform var(--dur-med) var(--ease-out), box-shadow var(--dur-med);
+}
+html[data-device="phone"] .drawer.open { transform: translateY(0); box-shadow: var(--m-sheet-shadow), var(--m-scrim); }
+html[data-device="phone"] .drawer::before {
+  content: ''; flex: none; align-self: center;
+  width: 36px; height: 5px; border-radius: 3px;
+  background: var(--border-strong);
+}
+html[data-device="phone"] .drawer-header { height: auto; padding: 10px 20px 12px; border: none; }
+html[data-device="phone"] .drawer-header h3 { font-family: var(--font-serif); font-size: 24px; font-weight: 500; }
+html[data-device="phone"] .drawer-header .ghost-btn {
+  width: 36px; height: 36px; border-radius: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--m-fill); color: var(--text-muted);
+}
+
+/* Contents: segmented tabs, roomy rows */
+html[data-device="phone"] .drawer-tabs {
+  margin: 0 20px 8px; padding: 3px; gap: 4px;
+  border: none; border-radius: 11px;
+  background: var(--m-fill);
+}
+html[data-device="phone"] .tab-btn {
+  flex: 1; height: 34px; padding: 0;
+  border-radius: 9px;
+  font-size: 14px; font-weight: 500; color: var(--text-muted);
+}
+html[data-device="phone"] .tab-btn.active {
+  background: var(--surface); color: var(--text); font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+html[data-device="phone"] .drawer-body { -webkit-overflow-scrolling: touch; }
+html[data-device="phone"] .toc-item {
+  min-height: 46px; padding: 8px 20px;
+  display: flex; align-items: center; gap: 10px;
+  border-radius: 0; border-bottom: 1px solid var(--m-hairline);
+  font-size: 15px;
+}
+html[data-device="phone"] .toc-item.current { color: var(--accent); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Display (typography): a shorter sheet */
+html[data-device="phone"] #typography-drawer { top: auto; max-height: 78vh; }
+html[data-device="phone"] .typography-body { padding: 0 20px 16px; gap: 16px; }
+html[data-device="phone"] .control-label {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
+  color: var(--text-muted);
+}
+html[data-device="phone"] .typography-body .segment {
+  display: flex; gap: 3px; padding: 3px;
+  border: none; border-radius: 12px; background: var(--m-fill);
+}
+html[data-device="phone"] .typography-body .segment button {
+  flex: 1; height: 36px; border-radius: 9px; border: none;
+  font-size: 14px; color: var(--text-muted); background: transparent;
+}
+html[data-device="phone"] .typography-body .segment button.active {
+  background: var(--surface); color: var(--text); font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+/* Fonts: a sideways row of pills set in each typeface */
+html[data-device="phone"] .typography-body .segment-fonts {
+  overflow-x: auto; margin: 0 -20px; padding: 0 20px;
+  background: none; gap: 8px; scrollbar-width: none;
+}
+html[data-device="phone"] .typography-body .segment-fonts::-webkit-scrollbar { display: none; }
+html[data-device="phone"] .typography-body .segment-fonts button {
+  flex: none; height: 40px; padding: 0 16px;
+  border-radius: 20px; border: 1px solid var(--border-strong);
+  background: var(--surface); color: var(--text); font-size: 16px;
+}
+html[data-device="phone"] .typography-body .segment-fonts button.active { border: 2px solid var(--text); box-shadow: none; }
+/* Theme: round "Aa" swatches */
+html[data-device="phone"] .theme-quick { display: flex; gap: 14px; }
+html[data-device="phone"] .theme-quick button {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  border: none; background: none; padding: 0;
+  font-size: 11px; color: var(--text-muted);
+}
+html[data-device="phone"] .theme-quick .theme-quick-dot { width: 50px; height: 50px; border-radius: 25px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); }
+html[data-device="phone"] .theme-quick button.active { color: var(--text); font-weight: 600; }
+html[data-device="phone"] .theme-quick button.active .theme-quick-dot { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+html[data-device="phone"] .stepper {
+  display: flex; align-items: center; height: 44px;
+  border: none; border-radius: 12px; background: var(--m-fill);
+}
+html[data-device="phone"] .stepper button { width: 52px; height: 44px; border: none; background: transparent; font-family: var(--font-serif); color: var(--text); }
+html[data-device="phone"] .stepper button[data-action="dec"] { font-size: 15px; }
+html[data-device="phone"] .stepper button[data-action="inc"] { font-size: 22px; }
+html[data-device="phone"] .stepper span { flex: 1; text-align: center; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* Hover-only aids that don't apply to touch */
+html[data-device="phone"] .typography-body .control-group:has([data-control="ruler"]),
+html[data-device="phone"] .typography-body .control-group:has([data-control="measure"]) { display: none; }
+
+/* ------------------------------------------- Word lookup (dictionary) */
+html[data-device="phone"] .dict-popover,
+html[data-device="phone"] .footnote-popover {
+  position: fixed !important;
+  left: 0 !important; right: 0 !important; bottom: 0 !important; top: auto !important;
+  width: auto !important; max-width: none !important; max-height: 72vh;
+  padding: 26px 20px calc(var(--m-safe-bottom) + 20px);
+  border: none; border-radius: 22px 22px 0 0;
+  background: var(--surface);
+  box-shadow: var(--m-sheet-shadow), var(--m-scrim);
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+  transform: none;
+  z-index: 150;
+}
+html[data-device="phone"] .dict-popover[hidden],
+html[data-device="phone"] .footnote-popover[hidden] { display: none !important; }
+html[data-device="phone"] .dict-popover::before,
+html[data-device="phone"] .footnote-popover::before {
+  content: ''; position: absolute; top: 8px; left: 50%; margin-left: -18px;
+  width: 36px; height: 5px; border-radius: 3px; background: var(--border-strong);
+}
+html[data-device="phone"] .dict-popover .popover-close,
+html[data-device="phone"] .footnote-popover .popover-close {
+  top: 20px; right: 20px;
+  width: 36px; height: 36px; border-radius: 18px;
+  background: var(--m-fill); color: var(--text-muted);
+}
+html[data-device="phone"] .dict-header h4 { font-family: var(--font-serif); font-size: 30px; font-weight: 500; letter-spacing: -0.3px; }
+html[data-device="phone"] .dict-header .pronounce-btn {
+  width: 36px; height: 36px; border-radius: 18px;
+  background: var(--m-fill); color: var(--accent);
+}
+html[data-device="phone"] .dict-phonetic { font-size: 14px; color: var(--text-muted); }
+html[data-device="phone"] .dict-meanings { font-size: 15px; line-height: 1.45; }
+html[data-device="phone"] .dict-vocab-btn {
+  height: 36px; padding: 0 14px; border-radius: 18px;
+  border: 1px solid var(--border-strong); background: var(--surface);
+  font-size: 14px; font-weight: 600;
+}
+html[data-device="phone"] .dict-ai-btn {
+  width: 100%; height: 48px; border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft, var(--m-fill)); color: var(--accent);
+  font-size: 15px; font-weight: 600;
+  justify-content: center;
+}
+html[data-device="phone"] .dict-ai-output {
+  border: none; border-radius: 16px; padding: 14px 16px;
+  background: var(--accent-soft, var(--m-fill));
+  font-size: 15px; line-height: 1.5;
+}
+html[data-device="phone"] .dict-ai-retry {
+  width: 34px; height: 34px; border-radius: 17px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  background: var(--surface); color: var(--accent);
+}
+
+/* ------------------------------------------------ Listen (read-aloud) */
+html[data-device="phone"] #tts-panel {
+  position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+  width: auto; max-width: none; transform: none;
+  padding: 18px 20px calc(var(--m-safe-bottom) + 14px);
+  border: none; border-radius: 22px 22px 0 0;
+  background: var(--surface);
+  box-shadow: var(--m-sheet-shadow);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 14px 8px;
+  z-index: 40;
+}
+html[data-device="phone"] #tts-panel[hidden] { display: none !important; }
+html[data-device="phone"] #tts-panel .focus-sep { display: none; }
+html[data-device="phone"] #tts-heard { order: 0; flex: 0 0 100%; height: 4px; border-radius: 2px; background: var(--m-track); }
+html[data-device="phone"] #tts-loading,
+html[data-device="phone"] #tts-time-left { order: 1; flex: 0 0 100%; text-align: center; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+html[data-device="phone"] #tts-time-left:empty,
+html[data-device="phone"] #tts-loading[hidden] { display: none; }
+html[data-device="phone"] #tts-prev,
+html[data-device="phone"] #tts-next {
+  order: 2; width: 48px; height: 48px; margin: 0 10px;
+  border: none; background: transparent; color: var(--text);
+}
+html[data-device="phone"] #tts-prev svg,
+html[data-device="phone"] #tts-next svg { width: 26px; height: 26px; }
+html[data-device="phone"] #tts-toggle {
+  order: 2; width: 72px; height: 72px; border-radius: 36px;
+  border: none; background: var(--text); color: var(--bg);
+}
+html[data-device="phone"] #tts-toggle svg { width: 28px; height: 28px; }
+html[data-device="phone"] #tts-panel .focus-speed {
+  order: 3; flex: 0 0 100%;
+  display: flex; align-items: center; gap: 12px;
+  height: 44px; padding: 0 14px; box-sizing: border-box;
+  border-radius: 14px; background: var(--m-fill);
+}
+html[data-device="phone"] #tts-rate-slider { flex: 1; accent-color: var(--accent); }
+html[data-device="phone"] #tts-rate-label { font-size: 14px; font-weight: 600; min-width: 3em; text-align: right; }
+html[data-device="phone"] #tts-engine,
+html[data-device="phone"] #tts-voice {
+  order: 4; flex: 1 1 40%; min-width: 0;
+  height: 44px; padding: 0 12px;
+  border: none; border-radius: 12px;
+  background: var(--m-fill); color: var(--text);
+  font-size: 15px;
+}
+html[data-device="phone"] #tts-setup,
+html[data-device="phone"] #tts-natural-rate-label,
+html[data-device="phone"] #tts-hl-btn,
+html[data-device="phone"] #tts-tw-btn,
+html[data-device="phone"] #tts-cache-btn,
+html[data-device="phone"] #tts-tune-btn,
+html[data-device="phone"] #tts-close { order: 5; }
+html[data-device="phone"] #tts-panel .focus-btn:not(#tts-prev):not(#tts-next):not(#tts-toggle) {
+  width: 44px; height: 44px; border-radius: 22px;
+  background: var(--m-fill); color: var(--text);
+}
+html[data-device="phone"] #tts-panel [hidden] { display: none !important; }
+html[data-device="phone"] #tts-tune {
+  order: 6; flex: 0 0 100%;
+  position: static; width: auto; box-shadow: none; border: none;
+  padding: 12px 14px; border-radius: 14px; background: var(--m-fill);
+}
+
+/* Focus mode panel sits above the home indicator */
+html[data-device="phone"] #focus-panel { bottom: calc(var(--m-safe-bottom) + 16px); }
+
+/* --------------------------------------------------- Review (flashcards) */
+html[data-device="phone"] #vocab-review-modal .modal-container,
+html[data-device="phone"] #chat-modal .modal-container {
+  height: calc(100% - var(--m-safe-top) - 10px);
+  display: flex; flex-direction: column;
+}
+html[data-device="phone"] #vocab-review-modal .modal-header-left h3 {
+  font-family: var(--font-serif); font-size: 28px; font-weight: 500; letter-spacing: -0.4px;
+}
+html[data-device="phone"] .vocab-review-body { flex: 1; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+html[data-device="phone"] .vocab-card {
+  flex: 1; overflow-y: auto;
+  border: none; border-radius: 22px;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(0, 0, 0, 0.07);
+  padding: 28px 24px;
+}
+html[data-device="phone"] .vocab-card-front { align-items: center; text-align: center; gap: 18px; }
+html[data-device="phone"] .vocab-card-front h2 { font-family: var(--font-serif); font-size: 38px; font-weight: 500; letter-spacing: -0.4px; }
+html[data-device="phone"] .vocab-card-context {
+  border: none; padding: 0; background: none;
+  font-family: var(--font-serif); font-style: italic; font-size: 18px; line-height: 1.55;
+  text-align: center;
+}
+html[data-device="phone"] .vocab-card-chapter { font-size: 11px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-muted); }
+html[data-device="phone"] .vocab-card-back { border-top: 1px solid var(--border); padding-top: 16px; font-size: 16px; line-height: 1.5; }
+html[data-device="phone"] .vocab-review-actions[hidden] { display: none !important; }
+html[data-device="phone"] .vocab-reveal-btn {
+  width: 100%; height: 56px; border: none; border-radius: 16px;
+  background: var(--text); color: var(--bg);
+  font-size: 17px; font-weight: 600;
+}
+html[data-device="phone"] .vocab-review-actions.rate { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+html[data-device="phone"] .vocab-rate-btn {
+  height: 64px; border: none; border-radius: 16px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+}
+html[data-device="phone"] .vocab-rate-btn .rate-label { font-size: 16px; font-weight: 600; }
+html[data-device="phone"] .vocab-rate-btn .rate-hint { font-size: 12px; color: inherit; opacity: 0.8; }
+html[data-device="phone"] .vocab-rate-btn.again { background: #fbe4df; color: #8f2a1a; }
+html[data-device="phone"] .vocab-rate-btn.good { background: var(--text); color: var(--bg); }
+html[data-device="phone"] .vocab-rate-btn.easy { background: #e2efe2; color: #24562c; }
+
+/* -------------------------------------------------- Ask about this page */
+html[data-device="phone"] #chat-modal .modal-header { flex-wrap: wrap; }
+html[data-device="phone"] #chat-modal .modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }
+html[data-device="phone"] .chat-messages { flex: 1; overflow-y: auto; padding: 16px 20px; -webkit-overflow-scrolling: touch; }
+html[data-device="phone"] .chat-input-row { display: flex; align-items: flex-end; gap: 8px; padding: 10px 16px; }
+html[data-device="phone"] .chat-input {
+  flex: 1; min-height: 44px; box-sizing: border-box;
+  padding: 11px 16px; border-radius: 22px;
+  border: 1px solid var(--border-strong); background: var(--surface);
+  font-size: 16px; resize: none;
+}
+html[data-device="phone"] .chat-send-btn {
+  height: 44px; padding: 0 18px; border: none; border-radius: 22px;
+  background: var(--accent); color: #fff; font-weight: 600;
+}
+
+/* ==========================================================================
+   Phase 3 — News, Feed sources, News article, Ask details
+   ========================================================================== */
+.m-subpage-head,
+.m-sources-summary,
+.m-news-save,
+.m-news-note,
+.m-chat-chips { display: none; }
+
+/* ------------------------------------------------------------------ News */
+html[data-device="phone"] .news-view { gap: 12px; }
+html[data-device="phone"] .news-head {
+  flex-direction: row; align-items: flex-end; justify-content: space-between; gap: 12px;
+  padding-top: 10px;
+}
+html[data-device="phone"] .news-head .library-heading { flex: 1; min-width: 0; align-items: flex-start; text-align: left; }
+html[data-device="phone"] .news-head .library-title { font-family: var(--font-serif); font-weight: 500; font-size: 34px; letter-spacing: -0.5px; line-height: 1.1; margin: 0; }
+html[data-device="phone"] .news-head .library-subtitle { display: block; margin-top: 3px; font-size: 13px; color: var(--text-muted); }
+html[data-device="phone"] .news-head .m-title-actions { display: flex; gap: 8px; flex: none; }
+/* Refresh is pull-to-refresh; Sources and the back button have round/tab equivalents. */
+html[data-device="phone"] #news-view .news-head .library-actions { display: none; }
+
+/* Category chips with counts, scrolling sideways */
+html[data-device="phone"] #news-chips { margin: 0 -20px; padding: 2px 20px 4px; gap: 8px; display: flex; flex-direction: column; }
+html[data-device="phone"] .news-chip-row { flex-wrap: nowrap; overflow-x: auto; gap: 8px; scrollbar-width: none; margin: 0 -20px; padding: 0 20px; }
+html[data-device="phone"] .news-chip-row::-webkit-scrollbar { display: none; }
+html[data-device="phone"] #news-chips .subject-chip {
+  flex: none; height: 34px; padding: 0 12px; gap: 6px;
+  border-radius: 17px; border: 1px solid var(--border-strong);
+  background: transparent; color: var(--text);
+  font-size: 14px; font-weight: 500;
+}
+html[data-device="phone"] #news-chips .subject-chip.active { border: none; background: var(--text); color: var(--bg); font-weight: 600; }
+html[data-device="phone"] #news-chips .subject-chip-count { font-family: var(--font-ui); font-size: 12px; font-weight: 600; color: var(--accent); }
+html[data-device="phone"] #news-chips .subject-chip.active .subject-chip-count { color: color-mix(in srgb, var(--accent) 45%, var(--bg)); }
+html[data-device="phone"] .news-chip-sources .subject-chip { height: 30px; font-size: 13px; }
+
+/* Articles: edge-to-edge rows */
+html[data-device="phone"] .news-list { margin: 0 -20px; border-top: 1px solid var(--m-hairline); }
+html[data-device="phone"] .news-item {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 14px 20px; border: none; border-radius: 0;
+  border-bottom: 1px solid var(--m-hairline);
+  background: transparent; text-align: left; color: var(--text);
+}
+html[data-device="phone"] .news-item:hover { background: transparent; }
+html[data-device="phone"] .news-item-meta { gap: 7px; margin: 0; font-size: 12px; flex-wrap: nowrap; }
+html[data-device="phone"] .news-item-meta > span:nth-child(2) { font-weight: 600; color: color-mix(in srgb, var(--text) 75%, var(--bg)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-device="phone"] .news-item-meta > span:nth-child(3)::before { content: '· '; }
+html[data-device="phone"] .news-dot { width: 7px; height: 7px; border-radius: 4px; flex: none; background: var(--accent); }
+html[data-device="phone"] .news-tag { padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border-strong); font-size: 11px; white-space: nowrap; }
+html[data-device="phone"] .news-item-title { font-size: 18px; line-height: 1.3; font-weight: 500; }
+html[data-device="phone"] .news-item-summary { margin: 0; font-size: 14px; line-height: 1.45; }
+html[data-device="phone"] .news-empty { padding: 24px 20px; color: var(--text-muted); }
+
+/* --------------------------------------------- Feed sources (full page) */
+html[data-device="phone"] .news-sources:not([hidden]) {
+  position: fixed; inset: 0; z-index: 30;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: var(--m-safe-top) 16px calc(var(--m-safe-bottom) + 24px);
+  border: none; border-radius: 0;
+  background: color-mix(in srgb, var(--text) 3.5%, var(--bg));
+  display: flex; flex-direction: column; gap: 8px;
+}
+html[data-device="phone"] .m-subpage-head {
+  order: 0; display: grid; grid-template-columns: 90px 1fr 90px; align-items: center;
+  height: 52px; margin: 0 -8px 0 -12px;
+}
+html[data-device="phone"] .m-subpage-head h1 { margin: 0; text-align: center; font: 600 17px var(--font-ui); }
+html[data-device="phone"] .m-back-link {
+  height: 44px; display: flex; align-items: center; gap: 2px; padding: 0;
+  border: none; background: none; color: var(--accent); font: 500 16px var(--font-ui);
+}
+html[data-device="phone"] .news-add-form { order: 1; gap: 8px; }
+html[data-device="phone"] .news-add-form input {
+  height: 44px; padding: 0 12px; border: none; border-radius: 12px;
+  background: var(--surface); font-size: 16px;
+}
+html[data-device="phone"] .news-add-form .library-action-btn {
+  height: 44px; padding: 0 16px; border: none; border-radius: 12px;
+  background: var(--text); color: var(--bg); font-size: 15px; font-weight: 600;
+}
+html[data-device="phone"] .news-add-status { order: 2; padding: 0 4px; font-size: 13px; }
+html[data-device="phone"] .m-sources-summary { order: 2; display: block; margin: 0; padding: 0 4px; font-size: 12px; color: var(--text-muted); }
+html[data-device="phone"] #news-source-list { order: 3; display: flex; flex-direction: column; }
+html[data-device="phone"] .news-source-cat {
+  margin: 16px 0 6px; padding: 0 4px;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-muted);
+}
+/* Rows sit on white cards, one card per category */
+html[data-device="phone"] .news-source-row {
+  flex-wrap: wrap; gap: 4px 12px;
+  min-height: 58px; padding: 8px 14px; box-sizing: border-box;
+  background: var(--surface);
+  border-top: 1px solid var(--m-hairline);
+}
+html[data-device="phone"] .news-source-cat + .news-source-row { border-top: none; border-radius: 14px 14px 0 0; }
+html[data-device="phone"] .news-source-row:has(+ .news-source-cat),
+html[data-device="phone"] .news-source-row:last-child { border-radius: 0 0 14px 14px; }
+html[data-device="phone"] .news-source-cat + .news-source-row:has(+ .news-source-cat),
+html[data-device="phone"] .news-source-cat + .news-source-row:last-child { border-radius: 14px; }
+html[data-device="phone"] .news-source-row label {
+  flex: 1 1 100%;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name sw" "note sw";
+  align-items: center; column-gap: 12px; row-gap: 2px;
+}
+html[data-device="phone"] .news-source-row label span { grid-area: name; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-device="phone"] .news-source-row label small { grid-area: note; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-device="phone"] .news-source-row label:has(input:not(:checked)) span { color: var(--text-muted); }
+/* iOS-style switch */
+html[data-device="phone"] .news-source-row input[type="checkbox"] {
+  grid-area: sw; -webkit-appearance: none; appearance: none;
+  width: 51px; height: 31px; margin: 0; border-radius: 16px; cursor: pointer;
+  background: radial-gradient(circle at 15.5px 50%, #fff 12.5px, transparent 13.5px), #d9d5cc;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  transition: background-color var(--dur-fast);
+}
+html[data-device="phone"] .news-source-row input[type="checkbox"]:checked {
+  background: radial-gradient(circle at 35.5px 50%, #fff 12.5px, transparent 13.5px), var(--accent);
+}
+html[data-device="phone"] .news-source-row .news-source-err { font-size: 13px; color: #b4310f; }
+html[data-device="phone"] .news-source-row .library-action-btn {
+  height: 28px; padding: 0; border: none; background: none;
+  color: var(--accent); font-size: 13px; font-weight: 500;
+}
+
+/* --------------------------------------- News article (reader, from News) */
+html[data-device="phone"][data-news-article] #back-to-library-btn { width: auto; padding: 0 8px 0 2px; gap: 2px; color: var(--accent); }
+html[data-device="phone"][data-news-article] #back-to-library-btn::after { content: 'News'; font: 500 16px var(--font-ui); }
+html[data-device="phone"][data-news-article] .topbar-center { visibility: hidden; }
+html[data-device="phone"][data-news-article] #typography-btn,
+html[data-device="phone"][data-news-article] #m-more-btn { display: none !important; }
+
+html[data-device="phone"][data-news-article] .m-news-save {
+  display: flex; align-items: center; gap: 6px;
+  height: 36px; padding: 0 14px; margin-right: 2px;
+  border: none; border-radius: 18px;
+  background: var(--text); color: var(--bg);
+  font: 600 14px var(--font-ui);
+}
+html[data-device="phone"][data-news-article] .m-news-save.saved { background: var(--m-fill); color: var(--text); }
+html[data-device="phone"][data-news-article="temp"] .m-news-note {
+  display: flex; align-items: center; gap: 8px;
+  position: absolute; z-index: 19;
+  top: calc(var(--m-safe-top) + 62px); left: 16px; right: 16px;
+  padding: 9px 12px; border-radius: 12px;
+  background: var(--m-fill); color: color-mix(in srgb, var(--text) 75%, var(--bg));
+  font-size: 13px; line-height: 1.35;
+  transition: opacity var(--dur-med) var(--ease-out);
+}
+html[data-device="phone"][data-news-article="temp"][data-chrome="hidden"] .m-news-note { opacity: 0; pointer-events: none; }
+.m-reader-tools .m-tool-aa { height: 23px; display: flex; align-items: center; font: 500 19px var(--font-serif); color: var(--text); }
+html[data-device="phone"] [data-m-tool="summarise"],
+html[data-device="phone"] [data-m-tool="display"],
+html[data-device="phone"] [data-m-tool="share"] { display: none; }
+html[data-device="phone"][data-news-article] .m-reader-tools { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+html[data-device="phone"][data-news-article] [data-m-tool="summarise"],
+html[data-device="phone"][data-news-article] [data-m-tool="display"],
+html[data-device="phone"][data-news-article] [data-m-tool="share"] { display: flex; }
+html[data-device="phone"][data-news-article] [data-m-tool="contents"],
+html[data-device="phone"][data-news-article] [data-m-tool="ask"],
+html[data-device="phone"][data-news-article] [data-m-tool="bookmark"],
+html[data-device="phone"][data-news-article] [data-m-tool="focus"] { display: none; }
+
+/* -------------------------------------------------------- Ask details */
+html[data-device="phone"] .m-chat-chips {
+  display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
+  padding: 0 20px 10px;
+}
+html[data-device="phone"] .m-chat-chips::-webkit-scrollbar { display: none; }
+html[data-device="phone"] .m-chat-chips button {
+  flex: none; height: 34px; padding: 0 12px; border-radius: 17px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft, var(--m-fill)); color: var(--accent);
+  font-size: 13px; font-weight: 500;
+}
+html[data-device="phone"] .chat-msg { font-size: 15px; line-height: 1.55; margin-bottom: 14px; }
+html[data-device="phone"] .chat-msg.user {
+  align-self: flex-end; max-width: 80%; margin-left: auto;
+  padding: 10px 14px; border-radius: 18px 18px 4px 18px;
+  background: var(--text); color: var(--bg);
+}
+html[data-device="phone"] .chat-msg.assistant { max-width: 92%; background: none; border: none; padding: 0; }
+html[data-device="phone"] .chat-messages { display: flex; flex-direction: column; }
+
+/* ----------------------------------------- Articles / Markdown / text pages
+   Same page geometry as EPUB on phones: the desktop margins (2–8rem a side)
+   and the centred line-width column left a narrow strip on a 390pt screen. */
+html[data-device="phone"] .text-reader-container {
+  padding-top: calc(var(--m-safe-top) + 64px);
+  padding-left: clamp(16px, calc(var(--reader-margin) * 0.3), 36px);
+  padding-right: clamp(16px, calc(var(--reader-margin) * 0.3), 36px);
+  padding-bottom: calc(var(--m-safe-bottom) + var(--reader-bottom-pad, 32px));
+  max-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+html[data-device="phone"] .text-reader-container > * { max-width: none !important; margin-left: 0; margin-right: 0; }
+/* Article header as in the design: big serif title, quiet source line */
+html[data-device="phone"] .text-reader-container > h1:first-child,
+html[data-device="phone"] .text-reader-container > .m-news-note-inline + h1 {
+  margin: 0 0 10px;
+  font-family: var(--font-serif); font-size: 28px; font-weight: 500;
+  line-height: 1.2; letter-spacing: -0.3px;
+}
+html[data-device="phone"] .text-reader-container > h1:first-child + p:has(> em:only-child),
+html[data-device="phone"] .text-reader-container > .m-news-note-inline + h1 + p:has(> em:only-child) {
+  margin-bottom: 18px;
+  font-family: var(--font-ui); font-size: 13px; line-height: 1.4; color: var(--text-muted);
+}
+html[data-device="phone"] .text-reader-container > h1:first-child + p > em:only-child,
+html[data-device="phone"] .text-reader-container > .m-news-note-inline + h1 + p > em:only-child { font-style: normal; }
+html[data-device="phone"] .text-reader-container img { max-width: 100%; height: auto; border-radius: 8px; }
+
+
+/* ==========================================================================
+   Fix batch 1 (simulator walkthrough)
+   ========================================================================== */
+/* The floating note covered the headline; it now sits in the article (main.ts syncNewsNote). */
+html[data-device="phone"][data-news-article="temp"] .m-news-note { display: none; }
+.m-news-note-inline { display: none; }
+html[data-device="phone"] .m-news-note-inline {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 18px !important; padding: 9px 12px; border-radius: 12px;
+  background: var(--m-fill); color: color-mix(in srgb, var(--text) 75%, var(--bg));
+  font: 400 13px/1.35 var(--font-ui);
+}
+html[data-device="phone"] .m-news-note-inline svg { flex: none; }
+
+/* Save pill: no inherited border / focus ring */
+html[data-device="phone"] .m-news-save { border: none !important; outline: none; box-shadow: none; -webkit-appearance: none; appearance: none; }
+
+/* News: the source chips start at the left edge like the category chips */
+html[data-device="phone"] .news-chip-row { justify-content: flex-start; }
+
+/* ---------------- Listen: compact mini-player; "More" opens the full sheet */
+html[data-device="phone"] { --m-listen-mini: 118px; }
+html[data-device="phone"][data-tts-mode="on"] { --reader-bottom-pad: calc(var(--m-listen-mini) + 12px); }
+html[data-device="phone"] #tts-panel { gap: 10px 6px; padding-top: 12px; }
+html[data-device="phone"][data-m-listen="mini"] #tts-panel {
+  flex-wrap: nowrap; justify-content: flex-start;
+  min-height: calc(var(--m-listen-mini) + var(--m-safe-bottom)); box-sizing: border-box;
+  padding-top: 22px;
+}
+html[data-device="phone"][data-m-listen="mini"] #tts-heard { position: absolute; left: 20px; right: 20px; top: 10px; }
+html[data-device="phone"][data-m-listen="mini"] #tts-loading,
+html[data-device="phone"][data-m-listen="mini"] #tts-time-left { position: absolute; left: 20px; right: 20px; top: 16px; text-align: left; }
+html[data-device="phone"][data-m-listen="mini"] #tts-prev,
+html[data-device="phone"][data-m-listen="mini"] #tts-next { margin: 0; width: 44px; }
+html[data-device="phone"][data-m-listen="mini"] #tts-toggle { width: 56px; height: 56px; border-radius: 28px; }
+html[data-device="phone"][data-m-listen="mini"] #tts-panel .focus-speed { flex: none; width: auto; padding: 0; background: none; height: 44px; margin-left: auto; }
+html[data-device="phone"][data-m-listen="mini"] #tts-rate-slider,
+html[data-device="phone"][data-m-listen="mini"] #tts-engine,
+html[data-device="phone"][data-m-listen="mini"] #tts-voice,
+html[data-device="phone"][data-m-listen="mini"] #tts-setup,
+html[data-device="phone"][data-m-listen="mini"] #tts-natural-rate-label,
+html[data-device="phone"][data-m-listen="mini"] #tts-hl-btn,
+html[data-device="phone"][data-m-listen="mini"] #tts-tw-btn,
+html[data-device="phone"][data-m-listen="mini"] #tts-cache-btn { display: none !important; }
+html[data-device="phone"] #tts-rate-label {
+  min-width: 52px; height: 36px; padding: 0 10px; box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 18px; background: var(--m-fill); cursor: pointer;
+}
+html[data-device="phone"][data-m-listen="full"] #tts-panel { max-height: 72vh; overflow-y: auto; }
+
+/* The desktop toolbar is a rounded, bordered group; on phones its buttons sit straight on the bar. */
+html[data-device="phone"] .reader-toolbar { background: none; border: none; box-shadow: none; padding: 0; border-radius: 0; }
+
+/* ---------------- Library fixes (walkthrough with books) */
+/* Continue reading: cover on the left, details beside it */
+html[data-device="phone"] .continue-reading { display: flex; flex-direction: row; align-items: stretch; }
+html[data-device="phone"] .continue-main { display: flex; flex-direction: column; min-width: 0; }
+html[data-device="phone"] .continue-cover.has-image { background-size: cover; background-position: center; }
+html[data-device="phone"] .continue-cover.has-image > * { display: none; }
+html[data-device="phone"] .continue-progress { flex-direction: row; align-items: center; gap: 10px; max-width: none; }
+html[data-device="phone"] .continue-progress-track { flex: 1; }
+html[data-device="phone"] #continue-progress-chapter { display: none; }
+/* Image covers fill the card; padding is only for typeset covers */
+html[data-device="phone"] .book-cover.has-image { padding: 0; }
+/* Blurred strip behind the status bar so scrolled content doesn't run under the clock */
+html[data-device="phone"] .library-screen::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; z-index: 24;
+  height: var(--m-safe-top);
+  background: var(--chrome-bg);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  pointer-events: none;
+}
+/* The news Save pill is phone-only (.m-only) but belongs to news articles only. */
+html[data-device="phone"]:not([data-news-article]) .m-news-save { display: none !important; }
+/* styles.css hides the title in narrow windows; the phone bar is laid out for it. */
+html[data-device="phone"] .reader-topbar .topbar-center { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+html[data-device="phone"] .reader-chapter-title { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+html[data-device="phone"] .reader-topbar .topbar-right { overflow: visible; justify-content: flex-end; }
+html[data-device="phone"] .reader-book-title { display: block; }
+html[data-device="phone"] .reader-title-row { justify-content: center; max-width: 100%; min-width: 0; }
+
+/* ---------------- Display sheet fixes */
+html[data-device="phone"] .typography-body .control-group:has(#open-settings-btn) { display: none; }
+html[data-device="phone"] [data-control="layout"] button[data-value="spread"] { display: none; }
+html[data-device="phone"] #size-value { font-family: var(--font-ui); }
+
+/* Every modal is a full-width bottom sheet on phones (desktop modals set their own max-widths). */
+html[data-device="phone"] .modal-backdrop > .modal-container { width: 100% !important; max-width: none !important; margin: 0 !important; }
+html[data-device="phone"] .modal-backdrop { padding: 0 !important; }
+html[data-device="phone"] .modal-header-left { min-width: 0; }
+
+/* Selection popover: fit the screen — colours on one row, actions on the next */
+html[data-device="phone"] .selection-popover {
+  max-width: calc(100vw - 16px); box-sizing: border-box;
+  flex-wrap: wrap; justify-content: center; row-gap: 6px;
+  border-radius: 16px; padding: 8px;
+}
+html[data-device="phone"] .selection-popover .popover-sep { display: none; }
+html[data-device="phone"] .selection-popover .popover-action { min-height: 36px; }
+html[data-device="phone"] .dict-header h4 { color: var(--text); }
+html[data-device="phone"] .vocab-reveal-btn { justify-content: center; text-align: center; }
+html[data-device="phone"] .vocab-rate-btn .rate-hint { font-family: var(--font-ui); }
+
+/* ---------------- Settings: the section menu becomes a row of chips */
+html[data-device="phone"] .settings-container {
+  display: flex; flex-direction: column;
+  height: calc(100% - var(--m-safe-top) - 10px);
+}
+html[data-device="phone"] .settings-nav {
+  flex: none; flex-direction: row; align-items: center; gap: 8px;
+  width: auto; height: auto; padding: 6px 20px 10px; margin: 0;
+  overflow-x: auto; scrollbar-width: none;
+  border: none; background: none;
+}
+html[data-device="phone"] .settings-nav::-webkit-scrollbar { display: none; }
+html[data-device="phone"] .settings-nav-title { display: none; }
+html[data-device="phone"] .settings-nav-item {
+  flex: none; min-height: 34px; height: 34px; padding: 0 12px; gap: 6px;
+  border-radius: 17px; border: 1px solid var(--border-strong);
+  background: transparent; color: var(--text); font-size: 14px; white-space: nowrap;
+}
+html[data-device="phone"] .settings-nav-item.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+html[data-device="phone"] .settings-nav-item svg { width: 16px; height: 16px; }
+html[data-device="phone"] .settings-content { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+html[data-device="phone"] .settings-content-header { padding: 4px 20px 12px; }
+html[data-device="phone"] .settings-content-body { padding: 0 20px 24px; }
+/* The Minimal (desktop "/" command bar) layout doesn't apply to the phone UI */
+html[data-device="phone"] #settings-appearance > .section-title:first-child,
+html[data-device="phone"] #settings-appearance > .layout-switch { display: none; }
+html[data-device="phone"] .theme-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+
+/* ---------------- Local AI / Piper setup: fit rows to the phone */
+html[data-device="phone"] .piper-step { min-width: 0; }
+html[data-device="phone"] .piper-step-body { min-width: 0; flex: 1; }
+html[data-device="phone"] .piper-voice-row { min-width: 0; gap: 8px; }
+html[data-device="phone"] .piper-voice-meta { min-width: 0; flex: 1; }
+html[data-device="phone"] .piper-voice-action { flex: none; }
+html[data-device="phone"] .piper-step input { min-width: 0; flex: 1; font-size: 16px; font-family: var(--font-ui); }
+html[data-device="phone"] .piper-step form,
+html[data-device="phone"] .piper-step .llm-custom-row { display: flex; gap: 8px; min-width: 0; }
+/* No folders to open on a phone */
+html[data-device="phone"] .piper-step:has(#llm-path),
+html[data-device="phone"] .piper-step:has(#piper-path) { display: none !important; }
+html[data-device="phone"] .library-screen:has(.news-sources:not([hidden])) .m-tabbar { display: none; }

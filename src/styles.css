@@ -4536,9 +4536,26 @@ html[data-profile="article"] .text-reader-container img { border-radius: 6px; }
 @keyframes tts-loading-pulse { 50% { opacity: 0.55; } }
 @media (prefers-reduced-motion: reduce) { .tts-loading { animation: none; } }
 
-/* iOS: keep content clear of the notch and home indicator */
-@supports (padding: env(safe-area-inset-top)) {
-  body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; }
+/* iOS: keep content clear of the notch and home indicator. Screens and
+   drawers are position:fixed, so body padding doesn't move them — inset them
+   directly. Under the status bar iOS keeps taps for itself (scroll-to-top),
+   which made the top bars unclickable. env() is 0 on desktop. */
+@supports (top: env(safe-area-inset-top)) {
+  .screen {
+    top: env(safe-area-inset-top);
+    right: env(safe-area-inset-right);
+    bottom: env(safe-area-inset-bottom);
+    left: env(safe-area-inset-left);
+  }
+  .drawer {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .focus-panel { bottom: calc(90px + env(safe-area-inset-bottom)); }
+}
+/* Phones: a 340px drawer would cover the whole screen. */
+@media (max-width: 420px) {
+  .drawer { max-width: 88vw; }
 }
 
 /* ---------- Subjects ---------- */

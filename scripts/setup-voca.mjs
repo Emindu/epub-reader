@@ -63,3 +63,15 @@ if (existsSync(join(si, 'tiny-voca-si.onnx')) && existsSync(join(si, 'tiny-voca-
   copyFileSync(join(si, 'tiny-voca-si.txt'), join(out, 'model-si', 'meta.json'));
   console.log('Sinhala voice ready');
 } else console.warn('skipping Sinhala model: Sinhala/tiny-voca-si.onnx and .txt not found');
+
+// ---- Piper phonemizer (iOS) ---------------------------------------------------
+// iOS can't run the Piper helper process, so Piper runs in a Web Worker there
+// (src/piper-wasm.worker.ts). It reuses the ORT files above; the phonemizer
+// WASM + espeak data come from the web app's copy (or the library's CDN).
+mkdirSync(join(out, 'piper'), { recursive: true });
+for (const f of ['piper_phonemize.wasm', 'piper_phonemize.data']) {
+  const local = join(root, 'web', 'public', 'piper', f);
+  if (existsSync(local)) copyFileSync(local, join(out, 'piper', f));
+  else await download(`https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/${f}`, join(out, 'piper', f));
+}
+console.log('piper phonemizer ready');

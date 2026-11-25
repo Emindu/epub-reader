@@ -19,6 +19,12 @@ const cacheVocaAssets = {
 export default defineConfig(async () => ({
   plugins: [cacheVocaAssets],
 
+  // Module workers (voca, piper-wasm). piper-tts-web code-splits, which the
+  // default "iife" worker format can't do.
+  worker: {
+    format: "es" as const,
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
