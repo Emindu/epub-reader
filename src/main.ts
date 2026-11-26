@@ -8,6 +8,13 @@ import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { marked } from 'marked';
 import { Readability } from '@mozilla/readability';
+import {
+  PROVIDER_PRESETS, DEFAULT_MAX_CONTEXT_TOKENS, ByokConfig, KeyStore, SourceSection, Source as ChatSource,
+  defaultConfig as defaultByokConfig, presetById, normalizeBaseUrl, localStorageKeyStore, maskKey,
+  chat as byokChat, listModels, estimateTokens, formatTokens, buildContext, buildSystemPrompt,
+  explainPrompt, examplesPrompt,
+} from './byok';
+import { isXUrl, xStatusId, fxApiUrl, xApiJsonToHtml } from './xArticle';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
@@ -634,6 +641,26 @@ const el = {
   chatResetBtn: $<HTMLButtonElement>('chat-reset-btn'),
   closeChatBtn: $<HTMLButtonElement>('close-chat-btn'),
   chatTruncatedNote: $<HTMLParagraphElement>('chat-truncated-note'),
+  chatContextChip: $<HTMLDivElement>('chat-context-chip'),
+  chatScopeBook: $<HTMLButtonElement>('chat-scope-book'),
+  chatScopeSelection: $<HTMLButtonElement>('chat-scope-selection'),
+  popoverAsk: $<HTMLButtonElement>('popover-ask'),
+  byokProvider: $<HTMLSelectElement>('byok-provider'),
+  byokBaseUrlRow: $<HTMLElement>('byok-baseurl-row'),
+  byokBaseUrl: $<HTMLInputElement>('byok-baseurl'),
+  byokKey: $<HTMLInputElement>('byok-key'),
+  byokKeyLink: $<HTMLAnchorElement>('byok-keylink'),
+  byokKeySave: $<HTMLButtonElement>('byok-key-save'),
+  byokKeyStatus: $<HTMLElement>('byok-key-status'),
+  byokModel: $<HTMLInputElement>('byok-model'),
+  byokModelList: $<HTMLDataListElement>('byok-model-list'),
+  byokModelSelect: $<HTMLSelectElement>('byok-model-select'),
+  byokTest: $<HTMLButtonElement>('byok-test'),
+  byokTestStatus: $<HTMLElement>('byok-test-status'),
+  byokMaxCtx: $<HTMLInputElement>('byok-maxctx'),
+  byokSessionCap: $<HTMLInputElement>('byok-sessioncap'),
+  byokEnabled: $<HTMLInputElement>('byok-enabled'),
+  byokRemove: $<HTMLButtonElement>('byok-remove'),
 
   openSettingsBtn: $<HTMLButtonElement>('open-settings-btn'),
   closeSettingsBtn: $<HTMLButtonElement>('close-settings-btn'),
@@ -2265,7 +2292,15 @@ function htmlToMarkdown(cleanHtml: string): string {
 /** Fetch a page and reduce it to a reader-mode markdown document; null when nothing readable was found. */
 async function fetchArticleMarkdown(url: string): Promise<{ title: string; byline: string; markdown: string } | null> {
   const hostname = new URL(url).hostname;
-  const html = await invoke<string>('fetch_url_html', { url });
+  let html: string;
+  if (isXUrl(url)) {
+    // X shows a login wall to plain fetches; read the post via the FxTwitter API instead.
+    const id = xStatusId(url);
+    if (!id) throw new Error('Paste a link to a specific post on X (…/status/…).');
+    html = xApiJsonToHtml(await invoke<string>('fetch_url_html', { url: fxApiUrl(id) }));
+  } else {
+    html = await invoke<string>('fetch_url_html', { url });
+  }
 
   const doc = new DOMParser().parseFromString(html, 'text/html');
   // Readability resolves relative image/link URLs against the document's
@@ -3109,6 +3144,7 @@ function cleanupCurrentReader() {
   // Chat is per-book — a conversation about one book's chapter makes no
   // sense carried into the next book opened.
   chatHistory = [];
+  chatSelectionText = '';
   el.chatModal.hidden = true;
   // Clear the reading position so a ResizeObserver-driven requestReflow that
   // fires during the next book's load can't replay THIS book's CFI against the
@@ -5290,7 +5326,7 @@ function createAiExplainController(els: AiExplainElements): AiExplainController 
     els.output.textContent = '';
     // Only offer the button when a model is actually installed and we have
     // a real word — otherwise the click would just error.
-    const offer = isLlmReady() && !!w && w.trim().length > 0;
+    const offer = isAiReady() && !!w && w.trim().length > 0;
     els.btn.hidden = !offer;
     els.btn.disabled = false;
     els.btn.classList.remove('is-busy');
@@ -5325,8 +5361,9 @@ function createAiExplainController(els: AiExplainElements): AiExplainController 
   }
 
   async function explain() {
-    if (explainInFlight || !isLlmReady() || !word) return;
-    const model = currentLlmModel()!;
+    if (explainInFlight || !isAiReady() || !word) return;
+    const cloud = isCloudReady();
+    const model = cloud ? null : currentLlmModel()!;
 
     explainInFlight = true;
     els.btn.disabled = true;
@@ -5343,18 +5380,20 @@ function createAiExplainController(els: AiExplainElements): AiExplainController 
     const w = word;
     const s = sentence;
     try {
-      const answer = await withTimeout(
-        invoke<string>('llm_explain', { word: w, sentence: s, modelPath: model.path }),
-        60_000,
-        'Timed out waiting for the local model — it may have stalled while the app was minimized. Try again.'
-      );
+      const answer = cloud
+        ? await cloudComplete(explainPrompt(w, s), 250)
+        : await withTimeout(
+            invoke<string>('llm_explain', { word: w, sentence: s, modelPath: model!.path }),
+            60_000,
+            'Timed out waiting for the local model — it may have stalled while the app was minimized. Try again.'
+          );
       // Guard against a stale response after the user moved on to another word.
       if (word !== w) return;
       els.output.innerHTML = renderAiMarkdown(answer);   // sanitized — see renderAiMarkdown
     } catch (err) {
       if (word !== w) return;
       console.error('llm_explain failed:', err);
-      els.output.textContent = `Couldn't run the local model: ${String(err)}`;
+      els.output.textContent = cloud ? errText(err) : `Couldn't run the local model: ${String(err)}`;
     } finally {
       if (word === w) {
         explainInFlight = false;
@@ -5381,8 +5420,9 @@ function createAiExplainController(els: AiExplainElements): AiExplainController 
   // explain() (word doubles as the staleness guard for both), since this
   // button only ever appears for the word that's currently explained.
   async function examples() {
-    if (examplesInFlight || !isLlmReady() || !word) return;
-    const model = currentLlmModel()!;
+    if (examplesInFlight || !isAiReady() || !word) return;
+    const cloud = isCloudReady();
+    const model = cloud ? null : currentLlmModel()!;
 
     examplesInFlight = true;
     els.examplesBtn.disabled = true;
@@ -5394,17 +5434,19 @@ function createAiExplainController(els: AiExplainElements): AiExplainController 
     const w = word;
     const s = sentence;
     try {
-      const answer = await withTimeout(
-        invoke<string>('llm_word_examples', { word: w, sentence: s, modelPath: model.path }),
-        60_000,
-        'Timed out waiting for the local model — it may have stalled while the app was minimized. Try again.'
-      );
+      const answer = cloud
+        ? await cloudComplete(examplesPrompt(w, s), 260)
+        : await withTimeout(
+            invoke<string>('llm_word_examples', { word: w, sentence: s, modelPath: model!.path }),
+            60_000,
+            'Timed out waiting for the local model — it may have stalled while the app was minimized. Try again.'
+          );
       if (word !== w) return;
       els.examplesOutput.innerHTML = renderAiMarkdown(answer);
     } catch (err) {
       if (word !== w) return;
       console.error('llm_word_examples failed:', err);
-      els.examplesOutput.textContent = `Couldn't run the local model: ${String(err)}`;
+      els.examplesOutput.textContent = cloud ? errText(err) : `Couldn't run the local model: ${String(err)}`;
     } finally {
       if (word === w) {
         examplesInFlight = false;
@@ -5449,9 +5491,9 @@ const vocabAi = createAiExplainController({
    also why the passage is scoped to the visible page by default rather than
    the whole chapter (a chapter routinely doesn't fit; a screen always does).
    ------------------------------------------------------------------ */
-interface ChatMessage { role: 'user' | 'assistant'; content: string; }
+interface ChatMessage { role: 'user' | 'assistant'; content: string; sources?: ChatSource[]; }
 let chatHistory: ChatMessage[] = [];
-let chatScope: 'page' | 'chapter' = 'page';
+let chatScope: 'page' | 'chapter' | 'book' | 'selection' = 'page';
 let chatInFlight = false;
 // Resent as context on every send (capped independently of the full,
 // unbounded chatHistory kept for on-screen scrollback) — keeps the prompt
@@ -5519,8 +5561,17 @@ function renderChatMessages(): void {
   for (const m of chatHistory) {
     const div = document.createElement('div');
     div.className = `chat-msg ${m.role}`;
-    if (m.role === 'assistant') div.innerHTML = renderAiMarkdown(m.content);
-    else div.textContent = m.content;
+    if (m.role === 'assistant') {
+      div.innerHTML = citeHtml(renderAiMarkdown(m.content), chatHistory.indexOf(m), m.sources);
+      const actions = document.createElement('div');
+      actions.className = 'chat-msg-actions';
+      const noteBtn = document.createElement('button');
+      noteBtn.type = 'button';
+      noteBtn.textContent = 'Save as note';
+      noteBtn.dataset.noteMsg = String(chatHistory.indexOf(m));
+      actions.appendChild(noteBtn);
+      div.appendChild(actions);
+    } else div.textContent = m.content;
     el.chatMessages.appendChild(div);
   }
   el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
@@ -5528,9 +5579,15 @@ function renderChatMessages(): void {
 
 function openChat(): void {
   if (!currentRendition && !currentTextElement && !currentPdfDoc) { toast('Open a book first'); return; }
-  if (!isLlmReady()) { toast('Set up a local LLM to chat (see TTS/AI setup)'); return; }
+  if (!isAiReady()) { toast('Set up Cloud AI (your key) or a local LLM in Settings to chat'); return; }
+  if (!chatHistory.length && currentBookRecord) {
+    chatHistory = load<ChatMessage[]>(KEY_CHAT(currentBookRecord.id), []);
+  }
   el.chatModal.hidden = false;
   renderLlmModelSelect();
+  syncChatScopeUi();
+  setChatChip('');
+  el.chatTruncatedNote.hidden = true;
   renderChatMessages();
   el.chatInput.focus();
 }
@@ -5541,11 +5598,15 @@ function closeChat(): void {
 
 function resetChat(): void {
   chatHistory = [];
+  persistChat();
+  setChatChip('');
   el.chatTruncatedNote.hidden = true;
   renderChatMessages();
 }
 
 async function sendChatMessage(): Promise<void> {
+  if (chatInFlight && chatAbort) { chatAbort.abort(); return; }
+  if (isCloudReady()) { await sendCloudChatMessage(); return; }
   if (chatInFlight || !isLlmReady()) return;
   const question = el.chatInput.value.trim();
   if (!question) return;
@@ -5569,7 +5630,7 @@ async function sendChatMessage(): Promise<void> {
   el.chatMessages.appendChild(placeholder);
   el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
 
-  const { text: passage, truncated } = await currentChatPassage(chatScope);
+  const { text: passage, truncated } = await currentChatPassage(chatScope === 'chapter' ? 'chapter' : 'page');
   el.chatTruncatedNote.hidden = !truncated;
   if (truncated) {
     el.chatTruncatedNote.textContent = `Using the first ~${CHAT_CHAPTER_WORD_BUDGET} words of this chapter.`;
@@ -5614,6 +5675,454 @@ async function sendChatMessage(): Promise<void> {
     el.chatSendBtn.disabled = false;
     el.chatInput.focus();
   }
+}
+
+/* ------------------------------------------------------------------
+   Cloud AI (bring your own key). The adapter in ./byok handles Anthropic,
+   OpenAI, Mistral and other OpenAI-compatible providers; this is the glue:
+   key + settings state, gathering the right slice of the document for the
+   chosen scope, streaming the reply, citations and notes.
+   ------------------------------------------------------------------ */
+const KEY_BYOK = 'read.byok.cfg';
+let byokCfg: ByokConfig = { ...defaultByokConfig(), ...load<Partial<ByokConfig>>(KEY_BYOK, {}) };
+const persistByok = () => save(KEY_BYOK, byokCfg);
+// The key lives in the OS keychain (see byok_key_* in lib.rs); this is only a
+// per-session in-memory copy so requests don't hit the keychain every time.
+let byokKey = '';
+let byokSessionTokens = 0;
+
+const byokKeyStore: KeyStore = {
+  async get(id) {
+    try { return await invoke<string>('byok_key_get', { provider: id }); }
+    catch { return localStorageKeyStore.get(id); }   // platforms without a keychain backend
+  },
+  async set(id, key) {
+    try { await invoke('byok_key_set', { provider: id, key }); }
+    catch (err) {
+      if (String(err) === 'unsupported') await localStorageKeyStore.set(id, key);
+      else throw new Error(`Couldn't save the key to the OS keychain: ${String(err)}`);
+    }
+  },
+  async remove(id) {
+    try { await invoke('byok_key_delete', { provider: id }); } catch { /* nothing stored */ }
+    await localStorageKeyStore.remove(id);
+  },
+};
+
+function isCloudReady(): boolean {
+  return byokCfg.enabled && !!byokKey && !!byokCfg.model && !!byokCfg.baseUrl;
+}
+// Any AI backend that can answer — cloud takes precedence when enabled.
+function isAiReady(): boolean {
+  return isCloudReady() || isLlmReady();
+}
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function checkSessionCap(extraTokens: number): void {
+  if (byokCfg.sessionTokenCap > 0 && byokSessionTokens + extraTokens > byokCfg.sessionTokenCap) {
+    throw new Error(`Session token cap reached (~${formatTokens(byokSessionTokens)} of ${formatTokens(byokCfg.sessionTokenCap)} used). Raise it in Settings → Cloud AI.`);
+  }
+}
+
+/** One-shot (non-chat) completion used by "Explain in context" and word examples. */
+async function cloudComplete(prompt: string, maxTokens: number): Promise<string> {
+  checkSessionCap(estimateTokens(prompt) + maxTokens);
+  const out = await byokChat(byokCfg, byokKey, [{ role: 'user', content: prompt }], { maxTokens, temperature: 0.2 });
+  byokSessionTokens += estimateTokens(prompt) + estimateTokens(out);
+  return out;
+}
+
+/* ---- Gathering document text for each scope ---- */
+type ChatScope = 'page' | 'chapter' | 'book' | 'selection';
+let chatSelectionText = '';
+const bookSectionsCache = new Map<string, SourceSection[]>();
+
+function textSections(root: HTMLElement): SourceSection[] {
+  const full = root.textContent || '';
+  const marks: { start: number; label: string }[] = [];
+  for (const h of Array.from(root.querySelectorAll('h1,h2,h3'))) {
+    const r = document.createRange();
+    r.selectNodeContents(root);
+    r.setEndBefore(h);
+    marks.push({ start: r.toString().length, label: (h.textContent || '').trim() });
+  }
+  if (!marks.length || marks[0].start > 0) marks.unshift({ start: 0, label: currentBookRecord?.title || 'Beginning' });
+  return marks.map((m, i) => {
+    const end = i + 1 < marks.length ? marks[i + 1].start : full.length;
+    return {
+      label: m.label || `Section ${i + 1}`,
+      ref: `${TEXT_ANCHOR}${m.start}-${Math.min(full.length, m.start + 1)}`,
+      text: full.slice(m.start, end).trim(),
+    };
+  });
+}
+
+async function gatherBookSections(): Promise<SourceSection[]> {
+  const id = currentBookRecord?.id;
+  if (!id) return [];
+  const cached = bookSectionsCache.get(id);
+  if (cached) return cached;
+  let sections: SourceSection[] = [];
+
+  if (activeFormat === 'pdf') {
+    if (!currentPdfDoc) return [];
+    const GROUP = 5;
+    for (let p = 1; p <= pdfTotalPages; p += GROUP) {
+      const end = Math.min(pdfTotalPages, p + GROUP - 1);
+      const parts: string[] = [];
+      for (let q = p; q <= end; q++) parts.push(await getPdfPageText(q));
+      sections.push({ label: p === end ? `Page ${p}` : `Pages ${p}–${end}`, ref: `pdf-page-${p}`, text: parts.join('\n\n') });
+    }
+  } else if (currentTextElement) {
+    sections = textSections(currentTextElement);
+  } else if (currentBook) {
+    const book = currentBook as any;
+    const labels = new Map<string, string>();
+    const walk = (items: any[]) => {
+      for (const it of items || []) {
+        labels.set(String(it.href || '').split('#')[0], String(it.label || '').trim());
+        walk(it.subitems);
+      }
+    };
+    walk(book.navigation?.toc || []);
+    const items: any[] = book.spine?.spineItems || [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      try {
+        const root: Element = await item.load(book.load.bind(book));
+        const blocks = Array.from(root.querySelectorAll('p,li,h1,h2,h3,h4,blockquote'))
+          .map(e => (e.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+        const text = (blocks.length ? blocks.join('\n\n') : (root.textContent || '').replace(/\s+/g, ' ')).trim();
+        const heading = root.querySelector('h1,h2,h3')?.textContent?.trim();
+        if (text.length >= 40) {
+          sections.push({ label: labels.get(String(item.href).split('#')[0]) || heading || `Section ${i + 1}`, ref: `href:${item.href}`, text });
+        }
+        item.unload?.();
+      } catch { /* unreadable spine item — skip */ }
+    }
+  }
+  sections = sections.filter(s => s.text.trim().length > 0);
+  bookSectionsCache.set(id, sections);
+  return sections;
+}
+
+function currentRef(): string {
+  if (activeFormat === 'pdf') return `pdf-page-${currentPdfPage}`;
+  const href = currentSectionHref();
+  return href ? `href:${href}` : '';
+}
+
+async function cloudScopeSections(scope: ChatScope): Promise<SourceSection[]> {
+  if (scope === 'book') return gatherBookSections();
+
+  if (scope === 'page') {
+    const { text } = await currentChatPassage('page');
+    return text ? [{ label: activeFormat === 'pdf' ? `Page ${currentPdfPage}` : 'This page', ref: currentRef(), text }] : [];
+  }
+
+  // chapter + selection (selection also carries its surrounding chapter as context)
+  if (activeFormat === 'pdf') {
+    const all = await gatherBookSections();
+    let hit: SourceSection | undefined;
+    for (const s of all) {
+      const p = parseInt(s.ref.slice('pdf-page-'.length), 10);
+      if (p <= currentPdfPage) hit = s;
+    }
+    return hit ? [hit] : [];
+  }
+  if (!currentRendition && !currentTextElement) return [];
+  collectFocusWords();
+  const { texts } = collectSectionSentences();
+  const text = texts.join(' ').trim();
+  return text ? [{ label: currentChapterLabel || 'This chapter', ref: currentRef(), text }] : [];
+}
+
+/* ---- Chat UI helpers ---- */
+let chatAbort: AbortController | null = null;
+const KEY_CHAT = (id: string) => `read.chat.${id}`;
+
+function persistChat(): void {
+  if (!currentBookRecord) return;
+  try {
+    const slim = chatHistory.slice(-40).map(m => ({ role: m.role, content: m.content, sources: m.sources }));
+    if (slim.length) save(KEY_CHAT(currentBookRecord.id), slim);
+    else localStorage.removeItem(KEY_CHAT(currentBookRecord.id));
+  } catch { /* storage full — chat just won't persist */ }
+}
+
+function setChatChip(text: string): void {
+  el.chatContextChip.hidden = !text;
+  el.chatContextChip.textContent = text;
+}
+
+function syncChatScopeUi(): void {
+  const cloud = isCloudReady();
+  el.chatScopeBook.hidden = !cloud;
+  el.chatScopeSelection.hidden = !(cloud && chatSelectionText);
+  if ((chatScope === 'book' && !cloud) || (chatScope === 'selection' && !(cloud && chatSelectionText))) chatScope = 'page';
+  el.chatScopeToggle.querySelectorAll<HTMLButtonElement>('button').forEach(b => {
+    b.classList.toggle('active', b.dataset.value === chatScope);
+  });
+  el.chatInput.placeholder = chatScope === 'book' ? 'Ask about the whole book…'
+    : chatScope === 'selection' ? 'Ask about your selection…' : chatScope === 'chapter' ? 'Ask about this chapter…' : 'Ask about this page…';
+}
+
+function citeHtml(html: string, msgIndex: number, sources: ChatSource[] | undefined): string {
+  if (!sources?.length) return html;
+  return html.replace(/\[((?:S\d+\s*[,;]?\s*)+)\]/g, (_m, inner: string) => {
+    const ids = (inner.match(/S(\d+)/g) || []).map(x => parseInt(x.slice(1), 10));
+    return ids.map(n => {
+      const s = sources.find(x => x.n === n);
+      return s ? `<button type="button" class="chat-cite" data-msg="${msgIndex}" data-n="${n}" title="${escapeHtml(s.label)}">${n}</button>` : '';
+    }).join('');
+  });
+}
+
+function navigateToRef(ref: string): void {
+  if (!ref) return;
+  closeChat();
+  if (ref.startsWith('href:')) { void currentRendition?.display(ref.slice(5)).catch(() => {}); return; }
+  navigateToCfi(ref);
+}
+
+function saveChatAsNote(msgIndex: number): void {
+  if (!currentBookRecord || !currentLocationCfi) { toast("Can't save a note here"); return; }
+  const m = chatHistory[msgIndex];
+  if (!m) return;
+  let q = '';
+  for (let i = msgIndex - 1; i >= 0; i--) if (chatHistory[i].role === 'user') { q = chatHistory[i].content; break; }
+  const note = `💬 ${q ? `Q: ${q}\n` : ''}A: ${m.content.replace(/\[S\d+(?:\s*[,;]?\s*S\d+)*\]/g, '').trim()}`;
+  const existing = currentMarks.bookmarks.find(b => b.cfi === currentLocationCfi);
+  if (existing) existing.text = `${existing.text}\n\n${note}`.trim();
+  else currentMarks.bookmarks.push({ cfi: currentLocationCfi, text: note, chapter: currentChapterLabel, createdAt: Date.now() });
+  save(KEY_MARKS(currentBookRecord.id), currentMarks);
+  refreshPageStrip();
+  refreshBookmarkButton();
+  toast('Saved as a note on this page (see Bookmarks)');
+}
+
+async function sendCloudChatMessage(): Promise<void> {
+  const question = el.chatInput.value.trim();
+  if (!question || chatInFlight) return;
+  chatHistory.push({ role: 'user', content: question });
+  el.chatInput.value = '';
+  el.chatInput.style.height = 'auto';
+  renderChatMessages();
+
+  chatInFlight = true;
+  chatAbort = new AbortController();
+  el.chatInput.disabled = true;
+  el.chatSendBtn.textContent = 'Stop';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-msg assistant is-busy';
+  bubble.textContent = chatScope === 'book' ? 'Reading the book…' : 'Thinking…';
+  el.chatMessages.appendChild(bubble);
+  el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+
+  const provider = presetById(byokCfg.presetId).label;
+  let partial = '';
+  try {
+    const sections = await cloudScopeSections(chatScope);
+    if (!sections.length) throw new Error("Couldn't find any text to answer against — try another scope or scroll to a page with content.");
+    let prevQ = '';
+    for (let i = chatHistory.length - 2; i >= 0; i--) if (chatHistory[i].role === 'user') { prevQ = chatHistory[i].content; break; }
+    const ctx = buildContext(sections, `${question} ${prevQ}`, byokCfg.maxContextTokens);
+    checkSessionCap(ctx.tokens + 600);
+    setChatChip(`Sending ${ctx.note} to ${provider}`);
+
+    const system = buildSystemPrompt(currentBookRecord?.title || 'this text', ctx.sources,
+      chatScope === 'selection' ? { selection: chatSelectionText } : {});
+    const history = chatHistory.slice(0, -1).slice(-20).map(m => ({ role: m.role, content: m.content }));
+
+    let raf = 0;
+    const paint = () => {
+      raf = 0;
+      bubble.className = 'chat-msg assistant';
+      bubble.innerHTML = renderAiMarkdown(partial);
+      el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+    };
+    const answer = await byokChat(byokCfg, byokKey, [...history, { role: 'user', content: question }], {
+      system, cacheSystem: true, maxTokens: 1500, temperature: 0.3, signal: chatAbort.signal,
+      onToken: (t) => { partial += t; if (!raf) raf = requestAnimationFrame(paint); },
+    });
+    if (raf) cancelAnimationFrame(raf);
+    byokSessionTokens += ctx.tokens + estimateTokens(question) + estimateTokens(answer);
+    chatHistory.push({ role: 'assistant', content: answer, sources: ctx.sources.map(s => ({ ...s, text: '' })) });
+    persistChat();
+    renderChatMessages();
+    setChatChip(`${ctx.note} · session ~${formatTokens(byokSessionTokens)} tokens`);
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') {
+      if (partial.trim()) { chatHistory.push({ role: 'assistant', content: partial.trim() }); persistChat(); renderChatMessages(); }
+      else bubble.remove();
+    } else {
+      console.error('cloud chat failed:', err);
+      bubble.className = 'chat-msg assistant is-error';
+      bubble.textContent = errText(err);
+    }
+  } finally {
+    chatInFlight = false;
+    chatAbort = null;
+    el.chatInput.disabled = false;
+    el.chatSendBtn.textContent = 'Send';
+    el.chatInput.focus();
+  }
+}
+
+/* ---- Settings → Cloud AI ---- */
+function byokStatus(node: HTMLElement, text: string, kind: '' | 'ok' | 'error' = ''): void {
+  node.textContent = text;
+  node.classList.toggle('is-ok', kind === 'ok');
+  node.classList.toggle('is-error', kind === 'error');
+}
+
+function renderByokSettings(): void {
+  const preset = presetById(byokCfg.presetId);
+  if (!el.byokProvider.options.length) {
+    for (const p of PROVIDER_PRESETS) {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = p.label;
+      el.byokProvider.appendChild(o);
+    }
+  }
+  el.byokProvider.value = byokCfg.presetId;
+  el.byokBaseUrlRow.hidden = preset.id !== 'custom';
+  el.byokBaseUrl.value = byokCfg.baseUrl;
+  el.byokKeyLink.hidden = !preset.keyUrl;
+  el.byokKey.placeholder = preset.keyHint;
+  el.byokModel.value = byokCfg.model;
+  el.byokMaxCtx.value = String(byokCfg.maxContextTokens);
+  el.byokSessionCap.value = String(byokCfg.sessionTokenCap);
+  el.byokEnabled.checked = byokCfg.enabled;
+  el.byokRemove.disabled = !byokKey;
+  byokStatus(el.byokKeyStatus, byokKey ? `Key saved (${maskKey(byokKey)}) — kept in your OS keychain.` : 'No key saved for this provider.');
+}
+
+// Dropdown of every model the account can use (a datalist hides all but the
+// ones matching the current text, so it looked like only one model existed).
+function fillByokModelSelect(ids: string[]): void {
+  const sel = el.byokModelSelect;
+  sel.innerHTML = '';
+  const list = ids.includes(byokCfg.model) || !byokCfg.model ? ids : [byokCfg.model, ...ids];
+  for (const id of list) {
+    const o = document.createElement('option');
+    o.value = id;
+    o.textContent = id;
+    sel.appendChild(o);
+  }
+  sel.value = byokCfg.model;
+  sel.hidden = false;
+}
+
+function initByokSettings(): void {
+  renderByokSettings();
+  el.byokModelSelect.addEventListener('change', () => {
+    byokCfg.model = el.byokModelSelect.value;
+    el.byokModel.value = byokCfg.model;
+    persistByok();
+  });
+  el.byokProvider.addEventListener('change', async () => {
+    const p = presetById(el.byokProvider.value);
+    byokCfg = { ...byokCfg, presetId: p.id, kind: p.kind, baseUrl: p.baseUrl, model: p.defaultModel };
+    persistByok();
+    byokKey = await byokKeyStore.get(p.id);
+    if (!byokKey) byokCfg.enabled = false;
+    persistByok();
+    el.byokModelList.innerHTML = '';
+    el.byokModelSelect.hidden = true;
+    byokStatus(el.byokTestStatus, '');
+    renderByokSettings();
+    refreshChatButtonVisibility();
+  });
+  el.byokBaseUrl.addEventListener('change', () => {
+    byokCfg.baseUrl = normalizeBaseUrl(el.byokBaseUrl.value);
+    persistByok();
+  });
+  el.byokModel.addEventListener('change', () => {
+    byokCfg.model = el.byokModel.value.trim();
+    persistByok();
+    if (!el.byokModelSelect.hidden) el.byokModelSelect.value = byokCfg.model;
+  });
+  el.byokMaxCtx.addEventListener('change', () => {
+    byokCfg.maxContextTokens = Math.max(2000, Math.min(900_000, parseInt(el.byokMaxCtx.value, 10) || DEFAULT_MAX_CONTEXT_TOKENS));
+    persistByok();
+    renderByokSettings();
+  });
+  el.byokSessionCap.addEventListener('change', () => {
+    byokCfg.sessionTokenCap = Math.max(0, parseInt(el.byokSessionCap.value, 10) || 0);
+    persistByok();
+    renderByokSettings();
+  });
+  el.byokKeyLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    const url = presetById(byokCfg.presetId).keyUrl;
+    if (url) void openUrl(url);
+  });
+  el.byokKeySave.addEventListener('click', async () => {
+    const key = el.byokKey.value.trim();
+    if (!key) { byokStatus(el.byokKeyStatus, 'Paste a key first.', 'error'); return; }
+    try {
+      await byokKeyStore.set(byokCfg.presetId, key);
+      byokKey = key;
+      el.byokKey.value = '';
+      renderByokSettings();
+      refreshChatButtonVisibility();
+    } catch (err) {
+      byokStatus(el.byokKeyStatus, errText(err), 'error');
+    }
+  });
+  el.byokTest.addEventListener('click', async () => {
+    const key = el.byokKey.value.trim() || byokKey;
+    byokCfg.baseUrl = normalizeBaseUrl(el.byokBaseUrl.value || byokCfg.baseUrl);
+    el.byokTest.disabled = true;
+    byokStatus(el.byokTestStatus, 'Checking…');
+    try {
+      const ids = await listModels(byokCfg, key);
+      el.byokModelList.innerHTML = '';
+      for (const id of ids) {
+        const o = document.createElement('option');
+        o.value = id;
+        el.byokModelList.appendChild(o);
+      }
+      fillByokModelSelect(ids);
+      byokStatus(el.byokTestStatus, `Connected — ${ids.length} models available. Choose one from the dropdown below.`, 'ok');
+    } catch (err) {
+      byokStatus(el.byokTestStatus, errText(err), 'error');
+    } finally {
+      el.byokTest.disabled = false;
+    }
+  });
+  el.byokEnabled.addEventListener('change', () => {
+    if (el.byokEnabled.checked && !byokKey) {
+      el.byokEnabled.checked = false;
+      byokStatus(el.byokKeyStatus, 'Save an API key first.', 'error');
+      return;
+    }
+    byokCfg.enabled = el.byokEnabled.checked;
+    if (byokCfg.enabled && !byokCfg.acknowledged) {
+      byokCfg.acknowledged = true;
+      toast(`Text you ask about is sent to ${presetById(byokCfg.presetId).label}`);
+    }
+    persistByok();
+    refreshChatButtonVisibility();
+  });
+  el.byokRemove.addEventListener('click', async () => {
+    await byokKeyStore.remove(byokCfg.presetId);
+    byokKey = '';
+    byokCfg.enabled = false;
+    persistByok();
+    renderByokSettings();
+    refreshChatButtonVisibility();
+  });
+  void byokKeyStore.get(byokCfg.presetId).then(k => {
+    byokKey = k;
+    renderByokSettings();
+    refreshChatButtonVisibility();
+  });
 }
 
 /* ------------------------------------------------------------------
@@ -5826,6 +6335,7 @@ async function speakPdfSelection(): Promise<void> {
 
 function showSelectionPopover(pageX: number, pageY: number) {
   const p = el.selectionPopover;
+  el.popoverAsk.hidden = !isCloudReady();
   p.hidden = false;
   const w = p.offsetWidth;
   const h = p.offsetHeight;
@@ -7877,6 +8387,14 @@ function currentLlmModel(): LlmModel | null {
 // live boot-time refresh the way refreshChatButtonVisibility needs one.
 function renderLlmModelSelect(): void {
   el.chatModelSelect.innerHTML = '';
+  if (isCloudReady()) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = `${presetById(byokCfg.presetId).label} · ${byokCfg.model}`;
+    el.chatModelSelect.appendChild(opt);
+    el.chatModelSelect.disabled = true;
+    return;
+  }
   if (!isLlmReady()) {
     const opt = document.createElement('option');
     opt.value = '';
@@ -7916,7 +8434,7 @@ function isLlmReady(): boolean {
 // button would appear before there's any text to extract.
 function refreshChatButtonVisibility(): void {
   const pdfNotReady = activeFormat === 'pdf' && !currentPdfDoc;
-  el.chatBtn.hidden = !isLlmReady() || pdfNotReady;
+  el.chatBtn.hidden = !isAiReady() || pdfNotReady;
 }
 
 async function refreshLlmStatus(): Promise<LlmStatus | null> {
@@ -10778,6 +11296,26 @@ function wire() {
   el.libraryThemeBtn.addEventListener('click', cycleTheme);
   el.markReadBtn.addEventListener('click', () => { if (currentBookRecord) toggleBookFinished(currentBookRecord); });
   el.aiExportBtn.addEventListener('click', () => { void copyForAi(); });
+  el.popoverAsk.addEventListener('click', () => {
+    chatSelectionText = pendingSelectionText;
+    hideAllPopovers();
+    try { window.getSelection()?.removeAllRanges(); } catch { /* ignore */ }
+    chatScope = 'selection';
+    openChat();
+  });
+  el.chatMessages.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement;
+    const cite = t.closest<HTMLElement>('.chat-cite');
+    if (cite) {
+      const m = chatHistory[parseInt(cite.dataset.msg || '-1', 10)];
+      const src = m?.sources?.find(x => x.n === parseInt(cite.dataset.n || '0', 10));
+      if (src?.ref) navigateToRef(src.ref);
+      return;
+    }
+    const note = t.closest<HTMLElement>('[data-note-msg]');
+    if (note) saveChatAsNote(parseInt(note.dataset.noteMsg || '-1', 10));
+  });
+  initByokSettings();
   el.popoverAi.addEventListener('click', async () => {
     await copyForAi();
     hideAllPopovers();
@@ -11136,12 +11674,10 @@ function wire() {
   });
   el.chatScopeToggle.querySelectorAll<HTMLButtonElement>('button').forEach(btn => {
     btn.addEventListener('click', () => {
-      const v = btn.dataset.value as 'page' | 'chapter';
+      const v = btn.dataset.value as ChatScope;
       if (chatScope === v) return;
       chatScope = v;
-      el.chatScopeToggle.querySelectorAll<HTMLButtonElement>('button').forEach(b => {
-        b.classList.toggle('active', b === btn);
-      });
+      syncChatScopeUi();
       el.chatTruncatedNote.hidden = true;
     });
   });

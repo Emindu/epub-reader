@@ -26,3 +26,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-clipboard-manager = "2"
 
+
+# OS keychain for the "bring your own key" cloud AI feature. Other platforms
+# fall back to a stub that reports "unsupported" (the app then keeps the key in
+# localStorage).
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
