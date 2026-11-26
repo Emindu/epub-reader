@@ -24,6 +24,7 @@ import { Readability } from '@mozilla/readability';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 import { sha256Key, articleKey } from './contentKey';
+import { Sync, SyncMarks } from './sync';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -173,7 +174,14 @@ const load = <T>(k: string, fallback: T): T => {
   try { const raw = localStorage.getItem(k); return raw ? JSON.parse(raw) as T : fallback; }
   catch { return fallback; }
 };
-const save = (k: string, v: unknown) => localStorage.setItem(k, JSON.stringify(v));
+// Set while sync writes remote notes, so its own writes don't schedule another sync.
+let syncWriting = false;
+// Created in the Sync section; declared here because save() runs during start-up.
+let sync: Sync | null = null;
+const save = (k: string, v: unknown) => {
+  localStorage.setItem(k, JSON.stringify(v));
+  if (!syncWriting && k.startsWith('read.marks.')) sync?.noteChanged();
+};
 
 let settings: Settings = { ...DEFAULT_SETTINGS, ...load<Partial<Settings>>(KEY_SETTINGS, {}) };
 
@@ -8980,6 +8988,113 @@ function wire() {
 /* ============================================================
    Boot
    ============================================================ */
+/* ============================================================
+   Sync — highlights and bookmarks across devices (see sync.ts)
+   ============================================================ */
+sync = (import.meta.env.VITE_SYNC_URL && import.meta.env.VITE_FIREBASE_API_KEY)
+  ? new Sync(
+      { serviceUrl: import.meta.env.VITE_SYNC_URL, apiKey: import.meta.env.VITE_FIREBASE_API_KEY },
+      {
+        books: () => library
+          .filter(b => b.contentKey)
+          .map(b => ({ id: b.id, contentKey: b.contentKey! })),
+        readMarks: id => load<BookMarks>(KEY_MARKS(id), { bookmarks: [], highlights: [] }) as unknown as SyncMarks,
+        writeMarks: (id, marks) => {
+          syncWriting = true;
+          try { save(KEY_MARKS(id), marks); } finally { syncWriting = false; }
+        },
+        onRemoteChange: reloadMarksAfterSync,
+        onStatus: renderSyncSettings,
+      },
+    )
+  : null;
+
+/** Remote notes arrived: refresh the open book and its bookmark/highlight lists. */
+function reloadMarksAfterSync(bookIds: string[]): void {
+  if (currentBookRecord && bookIds.includes(currentBookRecord.id)) {
+    const previous = currentMarks;
+    currentMarks = load<BookMarks>(KEY_MARKS(currentBookRecord.id), { bookmarks: [], highlights: [] });
+    if (currentRendition) {
+      for (const h of previous.highlights) {
+        try { currentRendition.annotations.remove(h.cfi, 'highlight'); } catch { /* not drawn */ }
+      }
+      reapplyHighlights();
+    }
+    refreshBookmarkButton();
+    renderBookmarksList();
+    renderHighlightsList();
+  }
+}
+
+function syncAgo(ms: number): string {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+function renderSyncSettings(): void {
+  if (!sync) return;
+  const email = sync.email;
+  $<HTMLElement>('sync-signed-out').hidden = !!email;
+  $<HTMLElement>('sync-signed-in').hidden = !email;
+  if (!email) return;
+  $('sync-account').textContent = email;
+  const status = $<HTMLElement>('sync-status');
+  const { lastSyncAt, lastError } = sync.status();
+  status.classList.toggle('is-ok', !lastError && !!lastSyncAt);
+  status.textContent = sync.busy ? 'Syncing…'
+    : lastError ? `Last sync failed: ${lastError}`
+    : lastSyncAt ? `Synced ${syncAgo(lastSyncAt)}`
+    : 'Not synced yet';
+  ($('sync-now') as HTMLButtonElement).disabled = sync.busy;
+}
+
+function wireSync(): void {
+  if (!sync) return;
+  $<HTMLElement>('settings-sync-nav').hidden = false;
+  $<HTMLElement>('settings-sync').hidden = false;
+  const email = $<HTMLInputElement>('sync-email');
+  const password = $<HTMLInputElement>('sync-password');
+  const authStatus = $<HTMLElement>('sync-auth-status');
+  const buttons = ['sync-signin', 'sync-signup', 'sync-reset'].map(id => $<HTMLButtonElement>(id));
+  const say = (text: string, ok = false) => { authStatus.textContent = text; authStatus.classList.toggle('is-ok', ok); };
+  const attempt = async (create: boolean) => {
+    if (!email.value.trim() || !password.value) { say('Enter your email and password.'); return; }
+    buttons.forEach(b => { b.disabled = true; });
+    say(create ? 'Creating your account…' : 'Signing in…');
+    try {
+      await sync.signIn(email.value, password.value, create);
+      password.value = '';
+      say('');
+      toast(create ? 'Account created — your notes are syncing' : 'Signed in — your notes are syncing');
+    } catch (err) {
+      say(err instanceof Error ? err.message : String(err));
+    } finally {
+      buttons.forEach(b => { b.disabled = false; });
+    }
+  };
+  $('sync-signed-out').addEventListener('submit', e => { e.preventDefault(); void attempt(false); });
+  $('sync-signup').addEventListener('click', () => { void attempt(true); });
+  $('sync-reset').addEventListener('click', async () => {
+    if (!email.value.trim()) { say('Enter your email first, then tap “Forgot password?”.'); return; }
+    try {
+      await sync.sendPasswordReset(email.value);
+      say('Check your email for a link to reset your password.', true);
+    } catch (err) {
+      say(err instanceof Error ? err.message : String(err));
+    }
+  });
+  $('sync-now').addEventListener('click', () => { void sync.syncNow(); });
+  $('sync-signout').addEventListener('click', () => {
+    sync.signOut();
+    toast('Signed out — your notes stay on this device');
+  });
+  renderSyncSettings();
+  sync.start();
+}
+
 /** Give records saved before contentKey existed their key. Runs once per
     record in the background; a book whose stored copy can't be read is left
     without one (it just won't sync) and retried next launch. */
@@ -9001,7 +9116,7 @@ async function backfillContentKeys(): Promise<void> {
       }
     } catch { /* missing copy: try again next launch */ }
   }
-  if (changed) persistLibrary();
+  if (changed) { persistLibrary(); sync?.noteChanged(); }
 }
 
 function boot() {
@@ -9026,6 +9141,7 @@ function boot() {
   // the probe resolves.
   refreshLlmStatus().then(() => refreshChatButtonVisibility());
   void webgpuAvailable().then(ok => { webgpuOk = ok; });
+  wireSync();
   // Hashing reads every stored book once, so let first paint happen first.
   window.setTimeout(() => { void backfillContentKeys(); }, 3000);
 }

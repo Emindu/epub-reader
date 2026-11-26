@@ -4,6 +4,7 @@
 //   GET  /health                      liveness probe
 //   GET  /v1/sync?since=<cursor>       changes after the cursor  -> { items, cursor, more }
 //   POST /v1/sync   { items: [...] }   upload changes            -> { cursor, results }
+//   GET  /v1/items?book=<contentKey>   every live item for one book -> { items }
 //
 // Every /v1 request needs `Authorization: Bearer <Firebase ID token>`.
 //
@@ -21,6 +22,7 @@ const MAX_BODY = 1024 * 1024;          // 1 MB per request
 const MAX_ITEMS = 200;                 // per push; keeps a Firestore transaction well under 500 writes
 const MAX_DATA = 16 * 1024;            // per item, serialised
 const PULL_LIMIT = 500;
+const BOOK_LIMIT = 5000;
 const KINDS = new Set(['highlight', 'bookmark']);
 const ID_RE = /^[a-f0-9]{64}$/;        // client sends sha256(kind|book|key) so ids are path-safe
 
@@ -102,7 +104,7 @@ export function createApp({ store, verifyToken, allowedOrigins = DEFAULT_ORIGINS
     const url = new URL(req.url, 'http://local');
     try {
       if (url.pathname === '/health') return send(res, 200, { ok: true });
-      if (url.pathname !== '/v1/sync') throw new HttpError(404, 'not found');
+      if (url.pathname !== '/v1/sync' && url.pathname !== '/v1/items') throw new HttpError(404, 'not found');
 
       const auth = req.headers.authorization || '';
       const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
@@ -111,6 +113,12 @@ export function createApp({ store, verifyToken, allowedOrigins = DEFAULT_ORIGINS
       try { uid = await verifyToken(token); }
       catch { throw new HttpError(401, 'invalid or expired token'); }
 
+      if (url.pathname === '/v1/items') {
+        if (req.method !== 'GET') throw new HttpError(405, 'method not allowed');
+        const book = url.searchParams.get('book') || '';
+        if (!book || book.length > 600) throw new HttpError(400, 'book: expected a content key');
+        return send(res, 200, { items: await store.forBook(uid, book, BOOK_LIMIT) });
+      }
       if (req.method === 'GET') {
         const since = Number(url.searchParams.get('since') || 0);
         if (!Number.isInteger(since) || since < 0) throw new HttpError(400, 'since: expected a non-negative integer');

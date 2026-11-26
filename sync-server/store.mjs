@@ -2,6 +2,7 @@
 //
 //   pull(uid, since, limit) -> { items, cursor, more }
 //   push(uid, items)        -> { cursor, results: [{ id, status, item? }] }
+//   forBook(uid, book)      -> live (not deleted) items for one book, for a device that just imported it
 //
 // Every accepted write gets the user's next sequence number, so a client that
 // pulls `since` its last cursor sees each change exactly once, in order.
@@ -42,6 +43,10 @@ export class MemoryStore {
     return { items, cursor: items.length ? items[items.length - 1].seq : since, more: newer.length > limit };
   }
 
+  async forBook(uid, book, limit) {
+    return [...this.user(uid).items.values()].filter(i => i.book === book && !i.deleted).slice(0, limit);
+  }
+
   async push(uid, items) {
     const u = this.user(uid);
     const results = [];
@@ -70,6 +75,12 @@ export class FirestoreStore {
     const docs = snap.docs.map(d => d.data());
     const items = docs.slice(0, limit);
     return { items, cursor: items.length ? items[items.length - 1].seq : since, more: docs.length > limit };
+  }
+
+  async forBook(uid, book, limit) {
+    // Equality on one field uses Firestore's automatic index; deleted markers are dropped here.
+    const snap = await this.userRef(uid).collection('items').where('book', '==', book).limit(limit).get();
+    return snap.docs.map(d => d.data()).filter(i => !i.deleted);
   }
 
   async push(uid, items) {

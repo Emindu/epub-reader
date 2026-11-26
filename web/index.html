@@ -592,6 +592,10 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 1 0 5 14.5 3.5 3.5 0 0 0 6.5 19z"/></svg>
             <span>Cloud AI</span>
           </button>
+          <button id="settings-sync-nav" class="settings-nav-item" data-settings-target="settings-sync" hidden>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-14.3 4.9M4 12a8 8 0 0 1 14.3-4.9"/><path d="M18.5 3v4h-4M5.5 21v-4h4"/></svg>
+            <span>Sync</span>
+          </button>
         </nav>
         <div class="settings-content">
           <div class="settings-content-header">
@@ -782,6 +786,35 @@
                 <label class="byok-check"><input type="checkbox" id="byok-enabled"> <span>Use Cloud AI for chat, “Explain in context” and word examples</span></label>
                 <div class="piper-actions">
                   <button id="byok-remove" class="pill-btn ghost" type="button">Remove key</button>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-sync" class="settings-section settings-section-divided" hidden>
+              <div class="section-title">
+                <h3>Sync</h3>
+                <p>Keep highlights and bookmarks the same on all your devices. A book's notes appear on another device once the same file is in its library there. Your books themselves stay on each device.</p>
+              </div>
+              <form id="sync-signed-out" class="byok-form" autocomplete="on">
+                <label class="byok-field"><span>Email</span>
+                  <input type="email" id="sync-email" autocomplete="username" spellcheck="false" placeholder="you@example.com">
+                </label>
+                <label class="byok-field"><span>Password</span>
+                  <input type="password" id="sync-password" autocomplete="current-password" placeholder="At least 6 characters">
+                </label>
+                <small id="sync-auth-status" class="byok-hint"></small>
+                <div class="piper-actions">
+                  <button id="sync-signin" class="pill-btn" type="submit">Sign in</button>
+                  <button id="sync-signup" class="pill-btn ghost" type="button">Create account</button>
+                  <button id="sync-reset" class="pill-btn ghost" type="button">Forgot password?</button>
+                </div>
+              </form>
+              <div id="sync-signed-in" class="byok-form" hidden>
+                <p class="byok-field"><span>Signed in as <strong id="sync-account"></strong></span></p>
+                <small id="sync-status" class="byok-hint"></small>
+                <div class="piper-actions">
+                  <button id="sync-now" class="pill-btn" type="button">Sync now</button>
+                  <button id="sync-signout" class="pill-btn ghost" type="button">Sign out</button>
                 </div>
               </div>
             </section>

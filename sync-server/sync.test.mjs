@@ -107,6 +107,17 @@ test('pull pages through large histories with `more`', async () => {
   assert.equal(since, 601);
 });
 
+test('items for one book: live ones only, and only that user\'s', async () => {
+  const other = { ...hl('/4/9', 100), id: idFor('highlight', 'sha256:other', '/4/9'), book: 'sha256:other' };
+  await call('POST', '/v1/sync', { user: 'fb', body: { items: [hl('/4/2', 100), hl('/4/4', 100), other] } });
+  await call('POST', '/v1/sync', { user: 'fb', body: { items: [{ ...hl('/4/4', 200), deleted: true, data: undefined }] } });
+  const { status, json } = await call('GET', '/v1/items?book=' + encodeURIComponent('sha256:book'), { user: 'fb' });
+  assert.equal(status, 200);
+  assert.deepEqual(json.items.map(i => i.data.cfi), ['/4/2']);
+  assert.deepEqual((await call('GET', '/v1/items?book=sha256:book', { user: 'nobody' })).json.items, []);
+  assert.equal((await call('GET', '/v1/items', { user: 'fb' })).status, 400);
+});
+
 test('validation rejects malformed items', async () => {
   const bad = [
     { items: 'nope' },

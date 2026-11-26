@@ -8,6 +8,7 @@ Firebase Auth.
 GET  /health                      liveness probe
 GET  /v1/sync?since=<cursor>       changes after the cursor  -> { items, cursor, more }
 POST /v1/sync   { items: [...] }   upload changes            -> { cursor, results }
+GET  /v1/items?book=<contentKey>   every live item for one book -> { items }
 ```
 
 Every `/v1` request needs `Authorization: Bearer <Firebase ID token>`.
