@@ -23,6 +23,7 @@ import { marked } from 'marked';
 import { Readability } from '@mozilla/readability';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
+import { sha256Key, articleKey } from './contentKey';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -66,6 +67,7 @@ interface BookRecord {
   title: string;
   author: string;
   identifier?: string;             // EPUB dc:identifier — stable across renames/moves
+  contentKey?: string;             // same on every device (see contentKey.ts); filled in by backfillContentKeys for older records
   filePath: string;                // original file name (or article URL) — display + dedupe
   fileSize?: number;               // bytes of the imported file, used with filePath to dedupe
   storedRelPath?: string;          // key of our own copy in browser storage (see platform/storage)
@@ -1313,6 +1315,8 @@ async function relocateBook(record: BookRecord): Promise<Uint8Array | null> {
   record.fileSize = file.size;
   record.format = fmt;
   record.storedRelPath = bookStorageKey(record.id, fmt);
+  // Could be a different edition; the key must describe the bytes we now hold.
+  record.contentKey = await sha256Key(bytes);
   record.updatedAt = Date.now();
   persistLibrary();
   return bytes;
@@ -1336,6 +1340,18 @@ async function importBook() {
     const fileData = new Uint8Array(await file.arrayBuffer());
     const format = getBookFormat(filePath);
     const id = safeUuid();
+    const contentKey = await sha256Key(fileData);
+    // The exact same file is already in the library (any format): open that copy.
+    const existingByContent = library.find(b => b.contentKey === contentKey);
+    if (existingByContent) {
+      if (existingByContent.filePath !== filePath) {
+        existingByContent.filePath = filePath;
+        existingByContent.fileSize = file.size;
+        persistLibrary();
+      }
+      openFromLibrary(existingByContent);
+      return;
+    }
 
     let title = filePath || 'Untitled';
     let author = '';
@@ -1415,6 +1431,7 @@ async function importBook() {
       title,
       author,
       identifier,
+      contentKey,
       filePath,
       fileSize: file.size,
       storedRelPath: key,
@@ -1561,6 +1578,7 @@ async function saveArticleFromUrl(rawUrl: string) {
       updatedAt: Date.now(),
       format: 'md',
       sourceUrl: url,
+      contentKey: articleKey(url),
     };
 
     ensurePersistentStorage();
@@ -8962,6 +8980,30 @@ function wire() {
 /* ============================================================
    Boot
    ============================================================ */
+/** Give records saved before contentKey existed their key. Runs once per
+    record in the background; a book whose stored copy can't be read is left
+    without one (it just won't sync) and retried next launch. */
+async function backfillContentKeys(): Promise<void> {
+  let changed = false;
+  for (const record of library) {
+    if (record.contentKey) continue;
+    if (record.sourceUrl) {
+      record.contentKey = articleKey(record.sourceUrl);
+      changed = true;
+      continue;
+    }
+    if (!record.storedRelPath) continue;
+    try {
+      const bytes = await blobGet(record.storedRelPath);
+      if (bytes && bytes.byteLength > 0) {
+        record.contentKey = await sha256Key(bytes);
+        changed = true;
+      }
+    } catch { /* missing copy: try again next launch */ }
+  }
+  if (changed) persistLibrary();
+}
+
 function boot() {
   applyGlobalTheme();
   applyComfortSettings();
@@ -8984,6 +9026,8 @@ function boot() {
   // the probe resolves.
   refreshLlmStatus().then(() => refreshChatButtonVisibility());
   void webgpuAvailable().then(ok => { webgpuOk = ok; });
+  // Hashing reads every stored book once, so let first paint happen first.
+  window.setTimeout(() => { void backfillContentKeys(); }, 3000);
 }
 
 boot();

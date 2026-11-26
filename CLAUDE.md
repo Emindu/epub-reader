@@ -73,7 +73,7 @@ All Tauri commands live in this one file and are called from `main.ts` via `invo
 When adding a command: define it in `lib.rs`, register it in the `invoke_handler`, and add any new plugin permissions to `src-tauri/capabilities/default.json`.
 
 ### Web port (`web/`)
-`web/src/main.ts` is a port of the desktop `main.ts`; native pieces are replaced by `web/src/platform/` (IndexedDB storage, file picker, Piper in a Web Worker via ONNX WASM, WebLLM/OpenAI-compatible LLM, article client). `web/server/article-proxy.mjs` is the SSRF-guarded article fetcher shared by the Vite dev middleware and the production `server.mjs`. `web/src/codeblocks.ts` is currently an identical copy of `src/codeblocks.ts`. Features added to desktop are ported manually — check whether a change should be mirrored.
+`web/src/main.ts` is a port of the desktop `main.ts`; native pieces are replaced by `web/src/platform/` (IndexedDB storage, file picker, Piper in a Web Worker via ONNX WASM, WebLLM/OpenAI-compatible LLM, article client). `web/server/article-proxy.mjs` is the SSRF-guarded article fetcher shared by the Vite dev middleware and the production `server.mjs`. `web/src/codeblocks.ts` and `web/src/contentKey.ts` are currently identical copies of their `src/` counterparts. Features added to desktop are ported manually — check whether a change should be mirrored.
 
 ### Other
 - `new wanted design/` and `frontend-for-redesign.zip` are design references for a planned redesign, not built code.

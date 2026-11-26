@@ -24,6 +24,7 @@ import {
 import { isXUrl, xStatusId, fxApiUrl, xApiJsonToHtml } from './xArticle';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
+import { sha256Key, articleKey } from './contentKey';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
 import { CATEGORY_ORDER, DEFAULT_FEEDS, NewsFeed, NewsItem, parseFeed, timeAgo } from './news';
 import { piperWasmStored, piperWasmDownload, piperWasmSynthesize, parseWav, wrapWav } from './piper-wasm';
@@ -99,6 +100,7 @@ interface BookRecord {
   title: string;
   author: string;
   identifier?: string;             // EPUB dc:identifier — stable across renames/moves
+  contentKey?: string;             // same on every device (see contentKey.ts); filled in by backfillContentKeys for older records
   filePath: string;                // original path on disk (for reference / re-locate)
   storedRelPath?: string;          // path inside AppData (self-owned copy)
   coverDataUrl: string | null;
@@ -2047,6 +2049,8 @@ async function relocateBook(record: BookRecord): Promise<Uint8Array | null> {
   if (!picked || typeof picked !== 'string') return null;
   const bytes = await readFile(picked);
   record.filePath = picked;
+  // Could be a different edition; the key must describe the bytes we now hold.
+  record.contentKey = await sha256Key(bytes);
   await adoptIntoAppData(record, bytes);
   return bytes;
 }
@@ -2087,6 +2091,17 @@ async function importFileBytes(fileData: Uint8Array, filePath: string): Promise<
     let existing: BookRecord | undefined;
     const format = getBookFormat(filePath);
     const id = safeUuid();
+    const contentKey = await sha256Key(fileData);
+    // The exact same file is already in the library (any format): open that copy.
+    existing = library.find(b => b.contentKey === contentKey && !b.newsTemp);
+    if (existing) {
+      if (existing.filePath !== filePath) {
+        existing.filePath = filePath;
+        persistLibrary();
+      }
+      openFromLibrary(existing);
+      return;
+    }
 
     let title = filePath.split(/[\\/]/).pop() || 'Untitled';
     let author = '';
@@ -2163,6 +2178,7 @@ async function importFileBytes(fileData: Uint8Array, filePath: string): Promise<
       title,
       author,
       identifier,
+      contentKey,
       filePath,
       storedRelPath: rel,
       coverDataUrl,
@@ -2329,9 +2345,11 @@ async function savePastedText(readAloud: boolean): Promise<void> {
       coverDataUrl: generateTextCoverDataUrl(title, 'md', false),
       lastCfi: null, progress: 0, addedAt: now, updatedAt: now, format: 'md',
     };
+    const bytes = new TextEncoder().encode(markdown);
+    record.contentKey = await sha256Key(bytes);
     await ensureBooksDir();
     const rel = `${BOOKS_DIR}/${id}.md`;
-    await writeFile(rel, new TextEncoder().encode(markdown), { baseDir: BaseDirectory.AppData });
+    await writeFile(rel, bytes, { baseDir: BaseDirectory.AppData });
     record.storedRelPath = rel;
     library.push(record);
     persistLibrary();
@@ -2412,6 +2430,7 @@ async function createArticleRecord(title: string, byline: string, url: string, m
     updatedAt: now,
     format: 'md',
     sourceUrl: url,
+    contentKey: articleKey(url),
   };
   if (temp) {
     record.newsTemp = true;
@@ -13156,6 +13175,30 @@ function setupMinimalLayout() {
 /* ============================================================
    Boot
    ============================================================ */
+/** Give records saved before contentKey existed their key. Runs once per
+    record in the background; a book whose stored copy can't be read is left
+    without one (it just won't sync) and retried next launch. */
+async function backfillContentKeys(): Promise<void> {
+  let changed = false;
+  for (const record of library) {
+    if (record.contentKey || record.newsTemp) continue;
+    if (record.sourceUrl) {
+      record.contentKey = articleKey(record.sourceUrl);
+      changed = true;
+      continue;
+    }
+    if (!record.storedRelPath) continue;
+    try {
+      const bytes = await readFile(record.storedRelPath, { baseDir: BaseDirectory.AppData });
+      if (bytes.byteLength > 0) {
+        record.contentKey = await sha256Key(bytes);
+        changed = true;
+      }
+    } catch { /* missing copy: try again next launch */ }
+  }
+  if (changed) persistLibrary();
+}
+
 function boot() {
   applyGlobalTheme();
   applyComfortSettings();
@@ -13181,6 +13224,8 @@ function boot() {
   // AI buttons) is persistent chrome, so it needs an explicit refresh once
   // the probe resolves.
   refreshLlmStatus().then(() => refreshChatButtonVisibility());
+  // Hashing reads every stored book once, so let first paint happen first.
+  window.setTimeout(() => { void backfillContentKeys(); }, 3000);
 }
 
 boot();
