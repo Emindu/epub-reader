@@ -66,3 +66,4 @@ Debug builds are inspectable: `ios_webkit_debug_proxy` (Homebrew) exposes the we
 | `No space left on device` during build | Clear `src-tauri/target/aarch64-apple-ios-sim` and `src-tauri/target/debug` (regenerable). |
 | Build fails with Swift/`MacOSX.sdk` errors | swift-rs must be ≥ 1.0.9 (`cargo update -p swift-rs`). |
 | Install says device locked | Unlock the phone and retry. |
+| `CodeSign failed` with `errSecInternalComponent` (everything else compiled) | `codesign` can't read the signing key from the login keychain. In Terminal run `security unlock-keychain ~/Library/Keychains/login.keychain-db` and `security set-key-partition-list -S apple-tool:,apple:,codesign: -s ~/Library/Keychains/login.keychain-db` (both ask for your Mac password), then rebuild in that same Terminal. A background or agent shell (e.g. Claude Code) can't unlock the keychain, so run the iOS build in your own Terminal. |
