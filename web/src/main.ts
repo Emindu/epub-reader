@@ -7,6 +7,12 @@ import {
   chat as byokChat, listModels, estimateTokens, formatTokens, buildContext, buildSystemPrompt,
   explainPrompt, examplesPrompt,
 } from './platform/byok';
+import {
+  KEY_JOURNAL, Journal, DaySummary, DayHighlight, DayNote, DayWord,
+  dayKey, shiftDay, dayRange, formatDayLong, formatDuration, recordReading, weekStrip,
+  progressText, summaryMarkdown, exportMarkdown, reflectionPrompt, DayExcerpt, capWords, sliceByProgress,
+  KEY_JOURNAL_TEXT, ReadTextStore, addReadText, pruneReadText, readBookWords,
+} from './platform/journal';
 import { fetchArticleHtml } from './platform/article';
 import { piperStored, piperDownload, piperRemove, piperSynthesize, piperCacheLookup, piperCacheDeleteBook, piperBatchSynthesize, type CachedChapter } from './platform/piper';
 import { WEBLLM_CATALOG, webgpuAvailable, webllmInstall, webllmRemove, normalizeServerUrl, serverListModels, complete, type LlmTarget, type WebLlmModel } from './platform/llm';
@@ -441,6 +447,25 @@ const el = {
   closeChatBtn: $<HTMLButtonElement>('close-chat-btn'),
   chatTruncatedNote: $<HTMLParagraphElement>('chat-truncated-note'),
   chatContextChip: $<HTMLDivElement>('chat-context-chip'),
+  chatQuoteBar: $<HTMLDivElement>('chat-quote'),
+  chatQuoteText: $<HTMLElement>('chat-quote-text'),
+  chatQuoteClear: $<HTMLButtonElement>('chat-quote-clear'),
+  journalBtn: $<HTMLButtonElement>('library-journal-btn'),
+  journalModal: $<HTMLDivElement>('journal-modal'),
+  closeJournalBtn: $<HTMLButtonElement>('close-journal-btn'),
+  journalCopyBtn: $<HTMLButtonElement>('journal-copy-btn'),
+  journalExportBtn: $<HTMLButtonElement>('journal-export-btn'),
+  journalPrev: $<HTMLButtonElement>('journal-prev'),
+  journalNext: $<HTMLButtonElement>('journal-next'),
+  journalToday: $<HTMLButtonElement>('journal-today'),
+  journalDate: $<HTMLDivElement>('journal-date'),
+  journalWeek: $<HTMLDivElement>('journal-week'),
+  journalContent: $<HTMLDivElement>('journal-content'),
+  journalReflection: $<HTMLTextAreaElement>('journal-reflection'),
+  journalAiBtn: $<HTMLButtonElement>('journal-ai-btn'),
+  journalAiNote: $<HTMLElement>('journal-ai-note'),
+  journalAiOutput: $<HTMLDivElement>('journal-ai-output'),
+  journalAiAdd: $<HTMLButtonElement>('journal-ai-add'),
   chatScopeBook: $<HTMLButtonElement>('chat-scope-book'),
   chatScopeSelection: $<HTMLButtonElement>('chat-scope-selection'),
   popoverAsk: $<HTMLButtonElement>('popover-ask'),
@@ -1655,7 +1680,9 @@ function cleanupCurrentReader() {
   // sense carried into the next book opened.
   chatHistory = [];
   chatSelectionText = '';
+  chatQuote = '';
   el.chatModal.hidden = true;
+  document.documentElement.classList.remove('chat-docked');
   // Clear the reading position so a ResizeObserver-driven requestReflow that
   // fires during the next book's load can't replay THIS book's CFI against the
   // new rendition. A cross-book CFI won't resolve, and the continuous manager
@@ -2815,6 +2842,7 @@ function onSelected(cfiRange: string, contents: any) {
       hideAllPopovers();
       return;
     }
+    journalNoteSelection(pendingSelectionText);
 
     const range = sel.getRangeAt(0);
     const rect = range.getBoundingClientRect();
@@ -2876,6 +2904,7 @@ function onTextReaderMouseUp(e: MouseEvent) {
 
   pendingSelectionCfi = null;
   pendingSelectionText = text;
+  journalNoteSelection(text);
   pendingSelectionContext = extractSentenceContext(range);
 
   hideDictPopover();
@@ -3336,7 +3365,7 @@ const vocabAi = createAiExplainController({
    also why the passage is scoped to the visible page by default rather than
    the whole chapter (a chapter routinely doesn't fit; a screen always does).
    ------------------------------------------------------------------ */
-interface ChatMessage { role: 'user' | 'assistant'; content: string; sources?: ChatSource[]; }
+interface ChatMessage { role: 'user' | 'assistant'; content: string; sources?: ChatSource[]; quote?: string; }
 let chatHistory: ChatMessage[] = [];
 let chatScope: 'page' | 'chapter' | 'book' | 'selection' = 'page';
 let chatInFlight = false;
@@ -3416,7 +3445,15 @@ function renderChatMessages(): void {
       noteBtn.dataset.noteMsg = String(chatHistory.indexOf(m));
       actions.appendChild(noteBtn);
       div.appendChild(actions);
-    } else div.textContent = m.content;
+    } else {
+      if (m.quote) {
+        const q = document.createElement('div');
+        q.className = 'chat-msg-quote';
+        q.textContent = m.quote;
+        div.appendChild(q);
+      }
+      div.appendChild(document.createTextNode(m.content));
+    }
     el.chatMessages.appendChild(div);
   }
   el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
@@ -3429,8 +3466,10 @@ function openChat(): void {
     chatHistory = load<ChatMessage[]>(KEY_CHAT(currentBookRecord.id), []);
   }
   el.chatModal.hidden = false;
+  document.documentElement.classList.add('chat-docked');
   renderLlmModelSelect();
   syncChatScopeUi();
+  renderChatQuote();
   setChatChip('');
   el.chatTruncatedNote.hidden = true;
   renderChatMessages();
@@ -3439,6 +3478,7 @@ function openChat(): void {
 
 function closeChat(): void {
   el.chatModal.hidden = true;
+  document.documentElement.classList.remove('chat-docked');
 }
 
 function resetChat(): void {
@@ -3670,10 +3710,22 @@ const KEY_CHAT = (id: string) => `read.chat.${id}`;
 function persistChat(): void {
   if (!currentBookRecord) return;
   try {
-    const slim = chatHistory.slice(-40).map(m => ({ role: m.role, content: m.content, sources: m.sources }));
+    const slim = chatHistory.slice(-40).map(m => ({ role: m.role, content: m.content, sources: m.sources, quote: m.quote }));
     if (slim.length) save(KEY_CHAT(currentBookRecord.id), slim);
     else localStorage.removeItem(KEY_CHAT(currentBookRecord.id));
   } catch { /* storage full — chat just won't persist */ }
+}
+
+let chatQuote = '';
+function renderChatQuote(): void {
+  el.chatQuoteBar.hidden = !chatQuote;
+  el.chatQuoteText.textContent = chatQuote;
+  if (chatQuote) el.chatInput.placeholder = 'Ask about the quoted passage…';
+  else syncChatScopeUi();
+}
+// What the model sees for a turn: the quoted passage (if any) followed by the question.
+function chatApiContent(m: ChatMessage): string {
+  return m.quote ? `The reader selected this passage:\n"""\n${m.quote}\n"""\n\n${m.content}` : m.content;
 }
 
 function setChatChip(text: string): void {
@@ -3729,7 +3781,10 @@ function saveChatAsNote(msgIndex: number): void {
 async function sendCloudChatMessage(): Promise<void> {
   const question = el.chatInput.value.trim();
   if (!question || chatInFlight) return;
-  chatHistory.push({ role: 'user', content: question });
+  const quote = chatQuote;
+  chatQuote = '';
+  renderChatQuote();
+  chatHistory.push({ role: 'user', content: question, ...(quote ? { quote } : {}) });
   el.chatInput.value = '';
   el.chatInput.style.height = 'auto';
   renderChatMessages();
@@ -3753,12 +3808,13 @@ async function sendCloudChatMessage(): Promise<void> {
     let prevQ = '';
     for (let i = chatHistory.length - 2; i >= 0; i--) if (chatHistory[i].role === 'user') { prevQ = chatHistory[i].content; break; }
     const ctx = buildContext(sections, `${question} ${prevQ}`, byokCfg.maxContextTokens);
-    checkSessionCap(ctx.tokens + 600);
+    checkSessionCap(ctx.tokens + estimateTokens(quote) + 600);
     setChatChip(`Sending ${ctx.note} to ${provider}`);
 
     const system = buildSystemPrompt(currentBookRecord?.title || 'this text', ctx.sources,
-      chatScope === 'selection' ? { selection: chatSelectionText } : {});
-    const history = chatHistory.slice(0, -1).slice(-20).map(m => ({ role: m.role, content: m.content }));
+      {});
+    let turns = chatHistory.slice(-21).map(m => ({ role: m.role, content: chatApiContent(m) }));
+    while (turns.length && turns[0].role !== 'user') turns.shift();   // providers require a user turn first
 
     let raf = 0;
     const paint = () => {
@@ -3767,7 +3823,7 @@ async function sendCloudChatMessage(): Promise<void> {
       bubble.innerHTML = renderAiMarkdown(partial);
       el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
     };
-    const answer = await byokChat(byokCfg, byokKey, [...history, { role: 'user', content: question }], {
+    const answer = await byokChat(byokCfg, byokKey, turns, {
       system, cacheSystem: true, maxTokens: 1500, temperature: 0.3, signal: chatAbort.signal,
       onToken: (t) => { partial += t; if (!raf) raf = requestAnimationFrame(paint); },
     });
@@ -3946,6 +4002,411 @@ function initByokSettings(): void {
     renderByokSettings();
     refreshChatButtonVisibility();
   });
+}
+
+/* ------------------------------------------------------------------
+   Daily journal — what was read each day, for an end-of-day reflection.
+   Reading time + chapters are logged by journalTick() (called from the
+   reading-stats timer); highlights, notes and new words are collected by
+   date from the data that already exists. See ./journal for the model.
+   ------------------------------------------------------------------ */
+let journal: Journal = load<Journal>(KEY_JOURNAL, {});
+let journalDay = dayKey();
+let journalSaveTimer = 0;
+let readText: ReadTextStore = load<ReadTextStore>(KEY_JOURNAL_TEXT, {});
+pruneReadText(readText, dayKey());
+let journalAiAbort: AbortController | null = null;
+
+function persistJournalNow(): void {
+  window.clearTimeout(journalSaveTimer);
+  journalSaveTimer = 0;
+  try { save(KEY_JOURNAL, journal); } catch { /* storage full — journal just won't persist */ }
+  try { save(KEY_JOURNAL_TEXT, readText); } catch { /* storage full — the text log just won't persist */ }
+}
+function persistJournalSoon(): void {
+  if (journalSaveTimer) return;
+  journalSaveTimer = window.setTimeout(persistJournalNow, 20_000);
+}
+
+function journalTick(ms: number): void {
+  const rec = currentBookRecord;
+  if (!rec) return;
+  recordReading(journal, dayKey(), {
+    id: rec.id, title: rec.title, author: rec.author || '', format: activeFormat, progress: rec.progress || 0,
+  }, currentChapterLabel, ms);
+  persistJournalSoon();
+}
+
+
+/* ---- Exact text read (see ./journal): read-aloud / focus sentences and selections ---- */
+let jrLastSentenceKey = '';
+let jrLastBlock: Element | null = null;
+
+function journalLogRead(text: string, newPara: boolean): void {
+  const rec = currentBookRecord;
+  if (!rec) return;
+  const label = currentChapterLabel || el.progressChapter.textContent || '';
+  if (addReadText(readText, dayKey(), rec.id, rec.title, label, text, newPara)) persistJournalSoon();
+}
+
+/** Called for every painted word in focus mode / read-aloud; logs each new sentence once. */
+function journalNoteSentence(sStart: number, sEnd: number): void {
+  if (sStart < 0 || sEnd < sStart || sEnd >= focusWords.length) return;
+  if (!ttsOn && !focusModeOn) return;
+  const id = currentBookRecord?.id || '';
+  const key = id + ':' + sStart + ':' + sEnd + ':' + focusWords.length;
+  if (key === jrLastSentenceKey) return;
+  jrLastSentenceKey = key;
+  const words: string[] = [];
+  for (let i = sStart; i <= sEnd; i++) {
+    const w = focusWords[i];
+    words.push((w.node.textContent || '').slice(w.start, w.end));
+  }
+  const block = sentenceBlockAncestor(focusWords[sStart].node);
+  const newPara = block !== jrLastBlock;
+  jrLastBlock = block;
+  journalLogRead(words.join(' '), newPara);
+}
+
+/** Called when the reader finishes selecting text by hand; a word or two is a lookup, not reading. */
+function journalNoteSelection(text: string): void {
+  const t = text.trim();
+  if (t.split(/\s+/).length < 3) return;
+  journalLogRead(t.slice(0, 3000), true);
+}
+
+function plainText(html: string): string {
+  return (new DOMParser().parseFromString(html, 'text/html').body.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function buildDaySummary(key: string): DaySummary {
+  const [from, to] = dayRange(key);
+  const inDay = (t: number | undefined) => typeof t === 'number' && t >= from && t < to;
+  const day = journal[key];
+  const books = day ? Object.values(day.books).sort((a, b) => a.firstAt - b.firstAt) : [];
+  const highlights: DayHighlight[] = [];
+  const notes: DayNote[] = [];
+  const words: DayWord[] = [];
+  for (const rec of library) {
+    if ((rec as { newsTemp?: boolean }).newsTemp) continue;
+    const marks = load<BookMarks>(KEY_MARKS(rec.id), { bookmarks: [], highlights: [] });
+    for (const h of marks.highlights) {
+      if (inDay(h.createdAt) && h.text) highlights.push({ book: rec.title, chapter: h.chapter, text: h.text });
+    }
+    for (const b of marks.bookmarks) {
+      // Notes saved from the chat are bookmarks whose text starts with 💬.
+      if (inDay(b.createdAt) && b.text.startsWith('💬')) notes.push({ book: rec.title, chapter: b.chapter, text: b.text.replace(/^💬\s*/, '') });
+    }
+    const vocab = load<VocabJournal>(KEY_VOCAB(rec.id), { words: [] });
+    for (const w of vocab.words) {
+      if (inDay(w.createdAt)) words.push({ book: rec.title, word: w.displayWord || w.word, definition: plainText(w.definition).slice(0, 160) });
+    }
+  }
+  return {
+    key, books, highlights, notes, words,
+    totalSeconds: books.reduce((a, b) => a + b.seconds, 0),
+  };
+}
+
+function renderJournal(): void {
+  const today = dayKey();
+  const s = buildDaySummary(journalDay);
+  el.journalDate.textContent = journalDay === today ? `Today · ${formatDayLong(journalDay)}` : formatDayLong(journalDay);
+  el.journalNext.disabled = journalDay >= today;
+  el.journalToday.hidden = journalDay === today;
+
+  el.journalWeek.innerHTML = weekStrip(journal, journalDay).map(d =>
+    `<button type="button" class="journal-wd${d.key === journalDay ? ' is-active' : ''}" data-day="${d.key}"><span>${escapeHtml(d.label)}</span><b>${d.seconds ? formatDuration(d.seconds) : '–'}</b></button>`
+  ).join('');
+
+  const tile = (n: string, label: string) => `<div class="journal-tile"><b>${escapeHtml(n)}</b><span>${label}</span></div>`;
+  let html = `<div class="journal-tiles">${tile(formatDuration(s.totalSeconds), 'read')}${tile(String(s.books.length), s.books.length === 1 ? 'title' : 'titles')}${tile(String(s.highlights.length), 'highlights')}${tile(String(s.words.length), 'new words')}</div>`;
+
+  if (!s.books.length && !s.highlights.length && !s.notes.length && !s.words.length) {
+    html += '<p class="journal-empty">Nothing recorded for this day.</p>';
+  }
+  if (s.books.length) {
+    html += '<h4>What you read</h4><ul class="journal-books">' + s.books.map(b =>
+      `<li><div class="journal-book-head"><strong>${escapeHtml(b.title)}</strong>${b.author ? `<span class="journal-muted"> — ${escapeHtml(b.author)}</span>` : ''}</div>` +
+      `<div class="journal-muted">${formatDuration(b.seconds)} · ${escapeHtml(progressText(b))}</div>` +
+      (b.sections.length ? `<div class="journal-sections">${b.sections.map(x => `<span>${escapeHtml(x)}</span>`).join('')}</div>` : '') + '</li>'
+    ).join('') + '</ul>';
+  }
+  const ledger = readText[journalDay];
+  const ledBooks = s.books.filter(b => ledger?.[b.id]?.sections.some(x => x.parts.length));
+  if (ledBooks.length) {
+    html += '<h4>Text you read</h4><p class="journal-muted">Logged while you used read-aloud, focus mode or selected text.</p>' + ledBooks.map(b => {
+      const lb = ledger[b.id];
+      const body = lb.sections.filter(x => x.parts.length).map(x =>
+        (x.label ? '<h5>' + escapeHtml(x.label) + '</h5>' : '') + x.parts.map(p => '<p>' + escapeHtml(p) + '</p>').join('')
+      ).join('');
+      return '<details class="journal-read"><summary><strong>' + escapeHtml(b.title) + '</strong> <span class="journal-muted">· ' + readBookWords(lb).toLocaleString() + ' words</span></summary>' + body + '</details>';
+    }).join('');
+  }
+  if (s.highlights.length) {
+    html += '<h4>Highlights</h4>' + s.highlights.map(h =>
+      `<blockquote class="journal-quote">${escapeHtml(h.text)}<cite>${escapeHtml(h.book)}${h.chapter ? ` › ${escapeHtml(h.chapter)}` : ''}</cite></blockquote>`
+    ).join('');
+  }
+  if (s.notes.length) {
+    html += '<h4>Notes</h4><ul class="journal-notes">' + s.notes.map(n =>
+      `<li>${escapeHtml(n.text)}<div class="journal-muted">${escapeHtml(n.book)}${n.chapter ? ` › ${escapeHtml(n.chapter)}` : ''}</div></li>`
+    ).join('') + '</ul>';
+  }
+  if (s.words.length) {
+    html += '<h4>New words</h4><ul class="journal-words">' + s.words.map(w =>
+      `<li><strong>${escapeHtml(w.word)}</strong>${w.definition ? ` — ${escapeHtml(w.definition)}` : ''}</li>`
+    ).join('') + '</ul>';
+  }
+  el.journalContent.innerHTML = html;
+
+  const d = journal[journalDay];
+  el.journalReflection.value = d?.reflection || '';
+  const ready = isCloudReady();
+  el.journalAiBtn.hidden = !ready;
+  el.journalAiNote.textContent = ready ? '' : 'Turn on Cloud AI (Settings → Cloud AI) to get an AI reflection on your day.';
+  const ai = d?.aiReflection || '';
+  el.journalAiOutput.hidden = !ai;
+  el.journalAiOutput.innerHTML = ai ? renderAiMarkdown(ai) : '';
+  el.journalAiAdd.hidden = !ai;
+}
+
+function openJournal(): void {
+  journalDay = dayKey();
+  el.journalModal.hidden = false;
+  renderJournal();
+}
+
+function closeJournal(): void {
+  journalAiAbort?.abort();
+  el.journalModal.hidden = true;
+  persistJournalNow();
+}
+
+function setJournalDay(key: string): void {
+  if (key > dayKey()) return;
+  journalAiAbort?.abort();
+  journalDay = key;
+  renderJournal();
+}
+
+async function runJournalAi(): Promise<void> {
+  if (journalAiAbort) { journalAiAbort.abort(); return; }
+  if (!isCloudReady()) { toast('Turn on Cloud AI in Settings first'); return; }
+  const key = journalDay;
+  const s = buildDaySummary(key);
+  if (!s.books.length && !s.highlights.length && !s.notes.length && !s.words.length && !el.journalReflection.value.trim()) {
+    toast('Nothing to reflect on for this day yet');
+    return;
+  }
+  const { system, user } = reflectionPrompt(s, el.journalReflection.value);
+  journalAiAbort = new AbortController();
+  el.journalAiBtn.textContent = 'Stop';
+  el.journalAiOutput.hidden = false;
+  el.journalAiOutput.textContent = 'Thinking…';
+  el.journalAiAdd.hidden = true;
+  let partial = '';
+  try {
+    checkSessionCap(estimateTokens(user) + 900);
+    const answer = await byokChat(byokCfg, byokKey, [{ role: 'user', content: user }], {
+      system, maxTokens: 900, temperature: 0.5, signal: journalAiAbort.signal,
+      onToken: (t) => { partial += t; el.journalAiOutput.innerHTML = renderAiMarkdown(partial); },
+    });
+    byokSessionTokens += estimateTokens(user) + estimateTokens(answer);
+    const d = (journal[key] ||= { books: {}, reflection: '' });
+    d.aiReflection = answer;
+    persistJournalNow();
+    if (journalDay === key) { el.journalAiOutput.innerHTML = renderAiMarkdown(answer); el.journalAiAdd.hidden = false; }
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') {
+      if (!partial.trim()) el.journalAiOutput.hidden = true;
+    } else {
+      el.journalAiOutput.textContent = errText(err);
+    }
+  } finally {
+    journalAiAbort = null;
+    el.journalAiBtn.textContent = 'Reflect with AI';
+  }
+}
+
+
+// Browser download of a text file. Returns the file name.
+async function saveTextFile(name: string, text: string): Promise<string | null> {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return name;
+}
+
+/* ---- Collect the text that was read today (for the Markdown export) ---- */
+const EXPORT_WORDS_PER_BOOK = 6000;
+const EXPORT_WORDS_TOTAL = 20000;
+
+async function epubSectionsFrom(bytes: Uint8Array): Promise<{ label: string; text: string }[]> {
+  const book = ePub(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer) as any;
+  const out: { label: string; text: string }[] = [];
+  try {
+    await book.ready;
+    const labels = new Map<string, string>();
+    const walk = (items: any[]) => { for (const it of items || []) { labels.set(String(it.href || '').split('#')[0], String(it.label || '').trim()); walk(it.subitems); } };
+    try { walk((await book.loaded.navigation)?.toc || []); } catch { /* no TOC */ }
+    const items: any[] = book.spine?.spineItems || [];
+    for (let i = 0; i < items.length; i++) {
+      try {
+        const root: Element = await items[i].load(book.load.bind(book));
+        const blocks = Array.from(root.querySelectorAll('p,li,h1,h2,h3,h4,blockquote'))
+          .map(e => (e.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+        const text = (blocks.length ? blocks.join('\n\n') : (root.textContent || '').replace(/\s+/g, ' ')).trim();
+        const heading = root.querySelector('h1,h2,h3')?.textContent?.trim();
+        if (text.length >= 40) out.push({ label: labels.get(String(items[i].href).split('#')[0]) || heading || `Section ${i + 1}`, text });
+        items[i].unload?.();
+      } catch { /* unreadable spine item */ }
+    }
+  } finally {
+    try { book.destroy(); } catch { /* ignore */ }
+  }
+  return out;
+}
+
+async function readExcerptFor(rec: BookRecord, b: { sections: string[]; startProgress: number; endProgress: number }): Promise<{ label: string; text: string } | null> {
+  const bytes = await readBookBytes(rec);
+  const fmt = rec.format || getBookFormat(rec);
+  const lo = Math.min(b.startProgress, b.endProgress);
+  const hi = Math.max(b.startProgress, b.endProgress);
+
+  if (fmt === 'epub') {
+    let secs: { label: string; text: string }[];
+    if (currentBookRecord?.id === rec.id && currentBook) {
+      secs = (await gatherBookSections()).map(s => ({ label: s.label, text: s.text }));
+    } else {
+      secs = await epubSectionsFrom(bytes);
+    }
+    if (!secs.length) return null;
+    let picked = secs.filter(s => b.sections.includes(s.label));
+    if (!picked.length) {
+      const i0 = Math.min(secs.length - 1, Math.floor(lo * secs.length));
+      const i1 = Math.max(i0, Math.min(secs.length - 1, Math.ceil(hi * secs.length) - 1));
+      picked = secs.slice(i0, i1 + 1);
+    }
+    return { label: picked.map(s => s.label).join('; '), text: picked.map(s => s.text).join('\n\n') };
+  }
+
+  if (fmt === 'pdf') {
+    const task = pdfjsLib.getDocument({ data: new Uint8Array(bytes) });
+    const doc = await task.promise;
+    try {
+      const n = doc.numPages;
+      const p0 = Math.min(n, Math.floor(lo * n) + 1);
+      const p1 = Math.min(n, Math.max(p0, Math.ceil(hi * n)), p0 + 14);
+      const parts: string[] = [];
+      for (let p = p0; p <= p1; p++) {
+        const page = await doc.getPage(p);
+        const tc = await page.getTextContent();
+        parts.push(tc.items.map(it => (it as { str?: string }).str || '').join(' ').replace(/\s+/g, ' ').trim());
+      }
+      return { label: p0 === p1 ? `Page ${p0}` : `Pages ${p0}–${p1}`, text: parts.filter(Boolean).join('\n\n') };
+    } finally {
+      void task.destroy();
+    }
+  }
+
+  // txt / md / pasted text / saved web article
+  const full = new TextDecoder().decode(bytes);
+  const text = sliceByProgress(full, lo, hi);
+  return text ? { label: `${Math.round(lo * 100)}% → ${Math.round(hi * 100)}%`, text } : null;
+}
+
+async function collectExcerpts(s: DaySummary): Promise<DayExcerpt[]> {
+  const out: DayExcerpt[] = [];
+  let budget = EXPORT_WORDS_TOTAL;
+  for (const b of s.books) {
+    if (budget <= 0) break;
+    const led = readText[s.key]?.[b.id];
+    let ledWords = 0;
+    if (led) {
+      for (const sec of led.sections) {
+        if (budget <= 0 || !sec.parts.length) continue;
+        const capped = capWords(sec.parts.join('\n\n'), Math.min(EXPORT_WORDS_PER_BOOK, budget));
+        const n = capped.text.split(/\s+/).filter(Boolean).length;
+        budget -= n;
+        ledWords += n;
+        out.push({ book: b.title, label: sec.label, text: capped.text, truncated: capped.truncated, exact: true });
+      }
+      // Whatever was logged while reading is the record; the estimate below is only for books with no log.
+      if (ledWords > 0) continue;
+    }
+    const rec = library.find(r => r.id === b.id);
+    if (!rec) continue;
+    try {
+      const ex = await readExcerptFor(rec, b);
+      if (!ex || !ex.text.trim()) continue;
+      const capped = capWords(ex.text, Math.min(EXPORT_WORDS_PER_BOOK, budget));
+      budget -= capped.text.split(/\s+/).filter(Boolean).length;
+      out.push({ book: b.title, label: ex.label, text: capped.text, truncated: capped.truncated });
+    } catch (err) {
+      console.warn('journal: could not read text for', b.title, err);
+    }
+  }
+  return out;
+}
+
+function initJournal(): void {
+  el.journalBtn.addEventListener('click', openJournal);
+  document.querySelector('.sidebar-streak')?.addEventListener('click', openJournal);
+  document.getElementById('reader-stats')?.addEventListener('click', openJournal);
+  el.closeJournalBtn.addEventListener('click', closeJournal);
+  el.journalModal.addEventListener('click', (e) => { if (e.target === el.journalModal) closeJournal(); });
+  el.journalPrev.addEventListener('click', () => setJournalDay(shiftDay(journalDay, -1)));
+  el.journalNext.addEventListener('click', () => setJournalDay(shiftDay(journalDay, 1)));
+  el.journalToday.addEventListener('click', () => setJournalDay(dayKey()));
+  el.journalWeek.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('[data-day]');
+    if (b?.dataset.day) setJournalDay(b.dataset.day);
+  });
+  el.journalReflection.addEventListener('input', () => {
+    const d = (journal[journalDay] ||= { books: {}, reflection: '' });
+    d.reflection = el.journalReflection.value;
+    persistJournalSoon();
+  });
+  el.journalAiBtn.addEventListener('click', () => { void runJournalAi(); });
+  el.journalAiAdd.addEventListener('click', () => {
+    const ai = journal[journalDay]?.aiReflection;
+    if (!ai) return;
+    const cur = el.journalReflection.value.trim();
+    el.journalReflection.value = `${cur}${cur ? '\n\n' : ''}**AI reflection**\n\n${ai}`;
+    el.journalReflection.dispatchEvent(new Event('input'));
+    toast('Added to your reflection');
+  });
+  el.journalExportBtn.addEventListener('click', async () => {
+    el.journalExportBtn.disabled = true;
+    toast('Preparing the file…');
+    const summary = buildDaySummary(journalDay);
+    try { summary.excerpts = await collectExcerpts(summary); } catch (err) { console.warn('journal excerpts failed:', err); }
+    const md = exportMarkdown(summary, el.journalReflection.value);
+    const name = `reading-journal-${journalDay}.md`;
+    try {
+      const saved = await saveTextFile(name, md);
+      if (saved) toast(`Saved ${name}`);
+    } catch (err) {
+      console.error('journal export failed:', err);
+      toast("Couldn't save the file");
+    } finally {
+      el.journalExportBtn.disabled = false;
+    }
+  });
+  el.journalCopyBtn.addEventListener('click', async () => {
+    const md = summaryMarkdown(buildDaySummary(journalDay), el.journalReflection.value);
+    try { await navigator.clipboard.writeText(md); toast('Day copied as Markdown'); }
+    catch { toast("Couldn't access the clipboard"); }
+  });
+  // Don't lose the last few seconds of reading if the window is closed.
+  document.addEventListener('visibilitychange', () => { if (document.hidden) persistJournalNow(); });
+  window.addEventListener('beforeunload', persistJournalNow);
 }
 
 /* ------------------------------------------------------------------
@@ -4201,6 +4662,7 @@ function tickReadingStats() {
   // `elapsed` can be arbitrarily large. Credit at most one tick's worth
   // (a bit above the 5s interval to absorb jitter).
   readingAccumulatorMs += Math.min(elapsed, 10000);
+  journalTick(Math.min(elapsed, 10000));
 
   // Day rollover — only fires on the first tick after midnight, once the user
   // is actively reading again.
@@ -5577,6 +6039,7 @@ function paintRange(range: Range, rect: DOMRect, wordIdx: number = -1): void {
   if (wordIdx >= 0) {
     const [sStart, sEnd] = sentenceRangeAround(wordIdx);
     paintSentenceRange(sStart, sEnd);
+    journalNoteSentence(sStart, sEnd);
   }
 
   const overlay = ensureFocusOverlay(focusIframeDoc);
@@ -7941,13 +8404,23 @@ function wire() {
   el.libraryThemeBtn.addEventListener('click', cycleTheme);
   el.markReadBtn.addEventListener('click', () => { if (currentBookRecord) toggleBookFinished(currentBookRecord); });
   el.aiExportBtn.addEventListener('click', () => { void copyForAi(); });
+  initJournal();
   el.popoverAsk.addEventListener('click', () => {
-    chatSelectionText = pendingSelectionText;
+    // Attach the selection to the NEXT question as a quote (shown above the
+    // input, removable) instead of switching scope — so it works alongside
+    // page / chapter / book context and can be sent with any question.
+    const text = pendingSelectionText.trim();
+    const sentence = (pendingSelectionContext || '').trim();
     hideAllPopovers();
     try { window.getSelection()?.removeAllRanges(); } catch { /* ignore */ }
-    chatScope = 'selection';
+    if (!text) return;
+    const clipped = text.length > 2500 ? text.slice(0, 2500) + '…' : text;
+    chatQuote = !/\s/.test(text) && sentence && sentence !== text
+      ? clipped + '\n(in the sentence: ' + sentence.slice(0, 600) + ')'
+      : clipped;
     openChat();
   });
+  el.chatQuoteClear.addEventListener('click', () => { chatQuote = ''; renderChatQuote(); el.chatInput.focus(); });
   el.chatMessages.addEventListener('click', (e) => {
     const t = e.target as HTMLElement;
     const cite = t.closest<HTMLElement>('.chat-cite');
@@ -8186,9 +8659,8 @@ function wire() {
   // Chat
   el.chatBtn.addEventListener('click', openChat);
   el.closeChatBtn.addEventListener('click', closeChat);
-  el.chatModal.addEventListener('click', (e) => {
-    if (e.target === el.chatModal) closeChat();
-  });
+  // (No click-outside-to-close: the chat is a docked panel now, not a modal —
+  // the reader beside it must stay clickable without dismissing the chat.)
   el.chatResetBtn.addEventListener('click', resetChat);
   el.chatModelSelect.addEventListener('change', () => {
     llmModelPath = el.chatModelSelect.value;

@@ -4721,3 +4721,76 @@ html[data-appearance="dark"] ::highlight(hl-purple) { background-color: rgba(196
 }
 .chat-msg-actions button:hover { color: var(--text); border-color: var(--text-muted); }
 @media (max-width: 560px) { .byok-two { grid-template-columns: 1fr; } }
+
+/* ---- Chat as a docked side panel: the reader stays visible and selectable ---- */
+:root { --chat-w: 420px; }
+#chat-modal.modal-backdrop {
+  left: auto; width: var(--chat-w); max-width: 100vw;
+  background: var(--bg); backdrop-filter: none; -webkit-backdrop-filter: none;
+  border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0,0,0,0.08);
+  z-index: 40; align-items: stretch; justify-content: stretch;
+}
+#chat-modal[hidden] { display: none; }
+#chat-modal .chat-container {
+  width: 100%; max-width: none; height: 100%; max-height: none;
+  border: 0; border-radius: 0; box-shadow: none; transform: none;
+}
+#chat-modal .modal-header { flex-wrap: wrap; gap: 0.5rem; }
+#chat-modal .chat-body { min-height: 0; padding: 1rem 1.1rem 1.1rem; }
+#chat-modal .chat-msg { max-width: 94%; }
+html.chat-docked .reader-screen { width: calc(100% - var(--chat-w)); }
+@media (max-width: 760px) {
+  html.chat-docked .reader-screen { width: 100%; }
+}
+
+#chat-modal.modal-backdrop:not([hidden]) { animation: chat-slide-in 0.22s var(--ease-out); }
+@keyframes chat-slide-in { from { transform: translateX(28px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+.chat-quote-bar {
+  display: flex; gap: 0.5rem; align-items: flex-start;
+  border-left: 3px solid var(--text-muted); background: var(--surface);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0; padding: 0.4rem 0.5rem 0.4rem 0.7rem;
+}
+.chat-quote-bar blockquote {
+  margin: 0; flex: 1; font-size: 0.82rem; color: var(--text-muted); font-style: italic;
+  max-height: 5.5rem; overflow-y: auto; white-space: pre-wrap;
+}
+.chat-quote-bar button { background: none; border: 0; cursor: pointer; color: var(--text-muted); font-size: 0.9rem; padding: 0 0.2rem; }
+.chat-quote-bar button:hover { color: var(--text); }
+.chat-msg.user .chat-msg-quote {
+  margin: 0 0 0.4rem; padding-left: 0.55rem; border-left: 2px solid currentColor; opacity: 0.75;
+  font-size: 0.82rem; font-style: italic; white-space: pre-wrap;
+}
+
+/* ---- Daily journal ---- */
+.journal-container { max-width: 680px; width: 92%; height: 86vh; display: flex; flex-direction: column; overflow: hidden; }
+.journal-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.9rem; padding: 1rem 1.5rem 1.5rem; }
+.journal-nav { display: flex; align-items: center; gap: 0.5rem; }
+.journal-date { flex: 1; text-align: center; font-weight: 600; }
+.journal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.journal-wd { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 0.35rem 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); color: var(--text-muted); font-size: 0.72rem; cursor: pointer; }
+.journal-wd b { color: var(--text); font-size: 0.78rem; font-weight: 600; }
+.journal-wd.is-active { border-color: var(--text); color: var(--text); }
+.journal-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; }
+.journal-tile { display: flex; flex-direction: column; align-items: center; padding: 0.6rem 0.25rem; border-radius: var(--radius-md); background: var(--surface); border: 1px solid var(--border); }
+.journal-tile b { font-size: 1.15rem; }
+.journal-tile span, .journal-muted { font-size: 0.78rem; color: var(--text-muted); }
+.journal-content h4, .journal-reflection h4 { margin: 1rem 0 0.4rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.journal-books, .journal-notes, .journal-words { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.journal-sections { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 0.3rem; }
+.journal-sections span { font-size: 0.72rem; padding: 0.1rem 0.5rem; border-radius: 999px; background: var(--surface-hover); color: var(--text-muted); }
+.journal-quote { margin: 0 0 0.6rem; padding: 0.1rem 0 0.1rem 0.8rem; border-left: 3px solid var(--border-strong, var(--border)); font-size: 0.92rem; line-height: 1.5; }
+.journal-quote cite { display: block; margin-top: 0.2rem; font-size: 0.75rem; color: var(--text-muted); font-style: normal; }
+.journal-empty { text-align: center; color: var(--text-muted); margin: 1.5rem 0; }
+.journal-reflection textarea { width: 100%; box-sizing: border-box; padding: 0.7rem 0.8rem; border: 1px solid var(--border-strong, var(--border)); border-radius: var(--radius-md); background: var(--surface); color: var(--text); font: inherit; resize: vertical; }
+.journal-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
+.journal-ai-output { margin-top: 0.75rem; padding: 0.75rem 0.9rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); font-size: 0.9rem; line-height: 1.55; }
+.journal-ai-output p, .journal-ai-output ul, .journal-ai-output ol { margin: 0 0 0.5rem; }
+.journal-ai-output ul, .journal-ai-output ol { padding-left: 1.2rem; }
+#journal-ai-add { margin-top: 0.5rem; }
+@media (max-width: 520px) { .journal-tiles { grid-template-columns: repeat(2, 1fr); } }
+
+.journal-read { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); padding: 0.5rem 0.8rem; margin-bottom: 0.5rem; }
+.journal-read summary { cursor: pointer; }
+.journal-read h5 { margin: 0.8rem 0 0.3rem; font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.journal-read p { margin: 0 0 0.6rem; font-size: 0.9rem; line-height: 1.55; }

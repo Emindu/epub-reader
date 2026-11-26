@@ -43,6 +43,10 @@
             <span>News</span>
             <span id="nav-news-count" class="sidebar-due-badge" hidden>0</span>
           </button>
+          <button id="library-journal-btn" class="sidebar-nav-item" title="What you read each day, with an end-of-day reflection">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/></svg>
+            <span>Journal</span>
+          </button>
           <button id="library-vocab-review-btn" class="sidebar-nav-item sidebar-vocab-item" title="Review vocabulary across all books">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V6a2 2 0 0 1 2-2h12v13H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 0 2 2h12"/><path d="M9 9h5"/></svg>
             <span>Vocabulary</span>
@@ -1240,6 +1244,46 @@
       </div>
     </div>
 
+    <!-- Daily journal — what you read each day, plus an end-of-day reflection -->
+    <div id="journal-modal" class="modal-backdrop" hidden>
+      <div class="modal-container journal-container">
+        <div class="modal-header">
+          <div class="modal-header-left"><h3>Daily journal</h3></div>
+          <div class="modal-header-right">
+            <button id="journal-copy-btn" class="ghost-btn" title="Copy this day as Markdown">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>
+            </button>
+            <button id="journal-export-btn" class="ghost-btn" title="Export this day as a .md file (for AI chats)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+            </button>
+            <button id="close-journal-btn" class="ghost-btn" aria-label="Close">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="modal-body journal-body">
+          <div class="journal-nav">
+            <button id="journal-prev" class="ghost-btn" aria-label="Previous day">‹</button>
+            <div id="journal-date" class="journal-date"></div>
+            <button id="journal-next" class="ghost-btn" aria-label="Next day">›</button>
+            <button id="journal-today" class="pill-btn ghost" type="button" hidden>Today</button>
+          </div>
+          <div id="journal-week" class="journal-week"></div>
+          <div id="journal-content" class="journal-content"></div>
+          <section class="journal-reflection">
+            <h4>Reflection</h4>
+            <textarea id="journal-reflection" rows="5" placeholder="What stood out today? What did I learn or disagree with? What do I want to remember or try tomorrow?"></textarea>
+            <div class="journal-actions">
+              <button id="journal-ai-btn" class="pill-btn" type="button" hidden>Reflect with AI</button>
+              <small id="journal-ai-note" class="journal-muted"></small>
+            </div>
+            <div id="journal-ai-output" class="journal-ai-output" hidden></div>
+            <button id="journal-ai-add" class="pill-btn ghost" type="button" hidden>Add to my reflection</button>
+          </section>
+        </div>
+      </div>
+    </div>
+
     <!-- Chat Modal — ask the local LLM about the current page/chapter -->
     <div id="chat-modal" class="modal-backdrop" hidden>
       <div class="modal-container chat-container">
@@ -1270,6 +1314,10 @@
           <p id="chat-truncated-note" class="chat-truncated-note" hidden></p>
           <div id="chat-context-chip" class="chat-context-chip" hidden></div>
           <div id="chat-messages" class="chat-messages"></div>
+          <div id="chat-quote" class="chat-quote-bar" hidden>
+            <blockquote id="chat-quote-text"></blockquote>
+            <button id="chat-quote-clear" type="button" aria-label="Remove quote" title="Remove quote">✕</button>
+          </div>
           <div class="chat-input-row">
             <textarea id="chat-input" class="chat-input" placeholder="Ask about this page…" rows="1"></textarea>
             <button id="chat-send-btn" class="pill-btn chat-send-btn">Send</button>
