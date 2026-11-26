@@ -7239,6 +7239,61 @@ function openMSheet(title: string, items: SheetItem[], extra?: HTMLElement): voi
 
 function closeMSheet(): void { $<HTMLDivElement>('m-sheet').hidden = true; }
 
+/* Phones have no sidebar, so the journal sheet also carries the reading streak and
+   the cross-book Highlights / Bookmarks pages that live in the desktop sidebar. */
+function addPhoneJournalExtras(): void {
+  const body = el.journalModal.querySelector<HTMLElement>('.journal-body');
+  if (!body) return;
+  body.querySelector('.m-journal-extras')?.remove();
+  const box = document.createElement('div');
+  box.className = 'm-journal-extras';
+  const streak = document.querySelector<HTMLElement>('.sidebar-streak')?.cloneNode(true) as HTMLElement | undefined;
+  if (streak) { streak.classList.add('m-stats'); box.appendChild(streak); }
+  const links = document.createElement('div');
+  links.className = 'm-journal-links';
+  for (const [kind, label] of [['highlights', 'Highlights'], ['bookmarks', 'Bookmarks']] as const) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pill-btn ghost';
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      el.closeJournalBtn.click();
+      document.querySelector<HTMLButtonElement>(`.sidebar-nav-item[data-library-nav="${kind}"]`)?.click();
+    });
+    links.appendChild(b);
+  }
+  box.appendChild(links);
+  body.prepend(box);
+}
+
+function ttsEngineLabel(): string {
+  const engine = el.ttsEngineSelect.selectedOptions[0]?.textContent || '';
+  const voice = el.ttsVoiceSelect.selectedOptions[0]?.textContent || '';
+  return voice ? `${engine} · ${voice}` : engine;
+}
+
+/* Read-aloud engine and voice as a sheet: the selects themselves only show in the expanded player. */
+function openVoiceSheet(): void {
+  const items: SheetItem[] = [];
+  for (const o of Array.from(el.ttsEngineSelect.options)) {
+    items.push({
+      label: o.textContent || o.value, detail: 'Engine', checked: o.value === el.ttsEngineSelect.value,
+      action: () => {
+        if (o.value === el.ttsEngineSelect.value) return;
+        void setTtsEngine(o.value as TtsEngine).then(() => openVoiceSheet());   // show the new engine's voices
+      },
+    });
+  }
+  for (const o of Array.from(el.ttsVoiceSelect.options)) {
+    if (o.disabled || !o.value) continue;
+    items.push({
+      label: o.textContent || o.value, checked: o.value === el.ttsVoiceSelect.value,
+      action: () => { el.ttsVoiceSelect.value = o.value; el.ttsVoiceSelect.dispatchEvent(new Event('change')); },
+    });
+  }
+  openMSheet('Voice', items);
+}
+
 /** A desktop toolbar button that is showing right now (not hidden by format). */
 const isShown = (b: HTMLElement | null): b is HTMLElement => !!b && !b.hidden && b.offsetParent !== null;
 
@@ -7284,19 +7339,10 @@ function wirePhone(): void {
         break;
       case 'review': el.libraryVocabReviewBtn.click(); break;
       case 'settings': el.librarySettingsBtn.click(); break;
-      case 'stats': {
-        // Streak card, then the desktop sidebar's reading pages (the sidebar is hidden on phones).
-        const streak = document.querySelector<HTMLElement>('.sidebar-streak')?.cloneNode(true) as HTMLElement | undefined;
-        streak?.classList.add('m-stats');
-        const nav = (kind: string) => () =>
-          document.querySelector<HTMLButtonElement>(`.sidebar-nav-item[data-library-nav="${kind}"]`)?.click();
-        openMSheet('Your reading', [
-          { label: 'Journal', detail: 'What you read each day', action: () => el.journalBtn.click() },
-          { label: 'Highlights', detail: 'Across all books', action: nav('highlights') },
-          { label: 'Bookmarks', detail: 'Across all books', action: nav('bookmarks') },
-        ], streak);
+      case 'journal':
+        el.journalBtn.click();
+        addPhoneJournalExtras();
         break;
-      }
     }
   }));
   // Library and News are the two "places"; highlight whichever is showing.
@@ -7342,10 +7388,13 @@ function wirePhone(): void {
   // Reader ⋯: whatever toolbar buttons this format shows that the tool bar doesn't.
   $<HTMLButtonElement>('m-more-btn').addEventListener('click', () => {
     const extras = [el.themeBtn, el.markReadBtn, el.aiExportBtn, el.openOriginalBtn, $<HTMLButtonElement>('save-news-btn'), el.pdfDictBtn, el.pdfSpeakBtn];
-    openMSheet('More', extras.filter(isShown).map(b => ({
-      label: (b.title || b.getAttribute('aria-label') || '').replace(/\s*\([A-Z]\)$/, '').replace(/ —.*$/, ''),
-      action: () => b.click(),
-    })));
+    openMSheet('More', [
+      { label: 'Read-aloud voice', detail: ttsEngineLabel(), action: openVoiceSheet },
+      ...extras.filter(isShown).map(b => ({
+        label: (b.title || b.getAttribute('aria-label') || '').replace(/\s*\([A-Z]\)$/, '').replace(/ —.*$/, ''),
+        action: () => b.click(),
+      })),
+    ]);
   });
 
   // News: round buttons, Sources page, pull to refresh

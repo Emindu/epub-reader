@@ -1031,3 +1031,9 @@ html[data-device="phone"] .piper-step .llm-custom-row { display: flex; gap: 8px;
 html[data-device="phone"] .piper-step:has(#llm-path),
 html[data-device="phone"] .piper-step:has(#piper-path) { display: none !important; }
 html[data-device="phone"] .library-screen:has(.news-sources:not([hidden])) .m-tabbar { display: none; }
+
+/* Journal tab: streak card and Highlights / Bookmarks links above the day (phones have no sidebar). */
+html[data-device="phone"] .m-journal-extras { display: flex; flex-direction: column; gap: 10px; }
+html[data-device="phone"] .m-journal-extras .m-stats { padding: 14px; border-radius: 14px; background: var(--m-fill); }
+html[data-device="phone"] .m-journal-links { display: flex; gap: 8px; }
+html[data-device="phone"] .m-journal-links .pill-btn { flex: 1; }
