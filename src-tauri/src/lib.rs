@@ -1302,6 +1302,26 @@ fn enable_background_audio() {
     }
 }
 
+/// Stop the page behaving like a website: WKWebView's scroll view otherwise
+/// rubber-bands the whole app and lets it be pinch-zoomed. Scrolling inside
+/// the page (library, reader, sheets) is unaffected.
+#[cfg(target_os = "ios")]
+fn make_webview_feel_native(app: &tauri::App) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use tauri::Manager;
+
+    let Some(window) = app.webview_windows().into_values().next() else { return };
+    let _ = window.with_webview(|webview| unsafe {
+        let wk: *mut AnyObject = webview.inner().cast();
+        let scroll: *mut AnyObject = msg_send![wk, scrollView];
+        let _: () = msg_send![scroll, setBounces: false];
+        let _: () = msg_send![scroll, setBouncesZoom: false];
+        let _: () = msg_send![scroll, setMinimumZoomScale: 1.0f64];
+        let _: () = msg_send![scroll, setMaximumZoomScale: 1.0f64];
+    });
+}
+
 /// Files shared to Read from other apps (iOS "Share → Read", macOS "Open
 /// With"), copied into `<AppData>/incoming/` and waiting for the frontend.
 /// Paths are AppData-relative so the frontend's fs scope covers them.
@@ -1439,7 +1459,10 @@ pub fn run() {
         ])
         .setup(|_app| {
             #[cfg(target_os = "ios")]
-            enable_background_audio();
+            {
+                enable_background_audio();
+                make_webview_feel_native(_app);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())

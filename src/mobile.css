@@ -1037,3 +1037,29 @@ html[data-device="phone"] .m-journal-extras { display: flex; flex-direction: col
 html[data-device="phone"] .m-journal-extras .m-stats { padding: 14px; border-radius: 14px; background: var(--m-fill); }
 html[data-device="phone"] .m-journal-links { display: flex; gap: 8px; }
 html[data-device="phone"] .m-journal-links .pill-btn { flex: 1; }
+
+/* ------------------------------------------------ App, not web page
+   The page never moves as a whole: no rubber-banding, no double-tap zoom, and
+   the body is pinned so the keyboard can't leave it shifted. Lists and the
+   reader still scroll inside their own containers. */
+html[data-device="phone"],
+html[data-device="phone"] body {
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+html[data-device="phone"] body { position: fixed; inset: 0; }
+
+/* Buttons, tabs and menus can't be selected or long-pressed like web text… */
+html[data-device="phone"] body {
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+}
+/* …but reading text and anything you might copy can (books in EPUB/PDF frames are separate documents). */
+html[data-device="phone"] :is(input, textarea, [contenteditable="true"], .text-reader-container,
+  .chat-messages, .journal-content, .journal-reflection, .marks-list, .dict-popover) {
+  -webkit-user-select: text; user-select: text;
+  -webkit-touch-callout: default;
+}
+/* iOS zooms into any text field under 16px when it gets focus. */
+html[data-device="phone"] :is(input:not([type]), input[type="text"], input[type="search"], input[type="email"],
+  input[type="password"], input[type="url"], input[type="number"], textarea) { font-size: 16px; }

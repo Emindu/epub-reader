@@ -7211,6 +7211,18 @@ function onReaderTap(e: MouseEvent, frame: Element | null) {
    ============================================================ */
 const IS_PHONE = IS_TOUCH && Math.min(screen.width, screen.height) < 600;
 if (IS_PHONE) document.documentElement.dataset.device = 'phone';
+if (IS_TOUCH) {
+  // App, not web page: no pinch zoom (the viewport meta covers double-tap and the
+  // iOS app also turns zoom off natively; this catches WebKit's gesture events).
+  document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+  // The keyboard pushes the whole page up to reveal the field; put it back afterwards.
+  document.addEventListener('focusout', () => {
+    window.setTimeout(() => {
+      if (!document.activeElement?.matches('input, textarea, select, [contenteditable="true"]')
+        && (window.scrollY || window.scrollX)) window.scrollTo(0, 0);
+    }, 60);
+  });
+}
 
 interface SheetItem { label: string; detail?: string; danger?: boolean; checked?: boolean; action: () => void; }
 
