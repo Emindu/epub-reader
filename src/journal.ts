@@ -91,6 +91,62 @@ export function recordReading(journal: Journal, key: string, book: BookInfo, sec
   if (label && !b.sections.includes(label) && b.sections.length < 80) b.sections.push(label);
 }
 
+/* ---- Reading on other devices (cross-device sync) ----
+   Each device syncs only its own reading log per day, keyed by the book's
+   contentKey, so two devices never overwrite each other's time. The view adds
+   them up: same book on two devices = one entry with both devices' time. */
+
+/** One device's reading on one day, books keyed by contentKey (or `title:<title>`). */
+export interface DeviceDay { books: Record<string, JournalBookDay> }
+
+function combineBookDays(a: JournalBookDay, b: JournalBookDay): JournalBookDay {
+  const first = a.firstAt <= b.firstAt ? a : b;
+  const last = a.lastAt >= b.lastAt ? a : b;
+  const sections = [...a.sections];
+  for (const x of b.sections) if (!sections.includes(x) && sections.length < 80) sections.push(x);
+  return {
+    ...a,
+    seconds: a.seconds + b.seconds,
+    firstAt: first.firstAt, lastAt: last.lastAt,
+    startProgress: first.startProgress, endProgress: last.endProgress,
+    sections,
+  };
+}
+
+/** This device's journal plus other devices' days. `keyOf` gives a local book id's
+    contentKey; `idOf` maps a contentKey back to a local book id when that book is here. */
+export function mergeJournals(
+  local: Journal,
+  others: Iterable<[day: string, entry: DeviceDay]>,
+  keyOf: (id: string) => string | undefined,
+  idOf: (key: string) => string | undefined,
+): Journal {
+  const out: Journal = {};
+  for (const [day, d] of Object.entries(local)) out[day] = { ...d, books: { ...d.books } };
+  for (const [day, entry] of others) {
+    const d = (out[day] ||= { books: {}, reflection: '' });
+    const byKey = new Map<string, string>();     // contentKey -> id used in d.books
+    for (const [id, b] of Object.entries(d.books)) byKey.set(keyOf(id) ?? `title:${b.title}`, id);
+    for (const [key, b] of Object.entries(entry.books)) {
+      const id = byKey.get(key) ?? idOf(key) ?? key;
+      d.books[id] = d.books[id] ? combineBookDays(d.books[id], b) : { ...b, id };
+      byKey.set(key, id);
+    }
+  }
+  return out;
+}
+
+/** This device's books for one day keyed by contentKey, ready to sync. */
+export function deviceDay(day: JournalDay, keyOf: (id: string) => string | undefined): DeviceDay {
+  const books: Record<string, JournalBookDay> = {};
+  for (const [id, b] of Object.entries(day.books)) {
+    const key = keyOf(id) ?? `title:${b.title}`;
+    const entry = { ...b, id: key, sections: b.sections.slice(0, 40) };
+    books[key] = books[key] ? combineBookDays(books[key], entry) : entry;
+  }
+  return { books };
+}
+
 /** Seconds read on each of the 7 days ending at `key`, for the week strip. */
 export function weekStrip(journal: Journal, key: string): { key: string; label: string; seconds: number }[] {
   const out: { key: string; label: string; seconds: number }[] = [];

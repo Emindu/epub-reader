@@ -8,7 +8,7 @@ import {
   explainPrompt, examplesPrompt,
 } from './platform/byok';
 import {
-  KEY_JOURNAL, Journal, DaySummary, DayHighlight, DayNote, DayWord,
+  KEY_JOURNAL, Journal, DeviceDay, mergeJournals, deviceDay, DaySummary, DayHighlight, DayNote, DayWord,
   dayKey, shiftDay, dayRange, formatDayLong, formatDuration, recordReading, weekStrip,
   progressText, summaryMarkdown, exportMarkdown, reflectionPrompt, DayExcerpt, capWords, sliceByProgress,
   KEY_JOURNAL_TEXT, ReadTextStore, addReadText, pruneReadText, readBookWords,
@@ -24,7 +24,7 @@ import { Readability } from '@mozilla/readability';
 import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 import { sha256Key, articleKey } from './contentKey';
-import { Sync, SyncMarks } from './sync';
+import { Sync, SyncItem, SyncChange, GLOBAL } from './sync';
 import { enhanceCodeBlocks, prepareCodeForImport, addCodeFenceRule, restoreHeadings } from './codeblocks';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -180,8 +180,13 @@ let syncWriting = false;
 let sync: Sync | null = null;
 const save = (k: string, v: unknown) => {
   localStorage.setItem(k, JSON.stringify(v));
-  if (!syncWriting && k.startsWith('read.marks.')) sync?.noteChanged();
+  if (syncWriting || !sync) return;
+  // Notes and words go out within seconds; progress and journal time change
+  // constantly while reading, so they ride along at most every half minute.
+  if (k.startsWith('read.marks.') || (k.startsWith('read.vocab.') && k !== KEY_VOCAB_STATS)) sync.noteChanged(4000);
+  else if (k === KEY_LIBRARY || k === KEY_JOURNAL) sync.noteChanged(30000);
 };
+
 
 let settings: Settings = { ...DEFAULT_SETTINGS, ...load<Partial<Settings>>(KEY_SETTINGS, {}) };
 
@@ -4108,7 +4113,7 @@ function plainText(html: string): string {
 function buildDaySummary(key: string): DaySummary {
   const [from, to] = dayRange(key);
   const inDay = (t: number | undefined) => typeof t === 'number' && t >= from && t < to;
-  const day = journal[key];
+  const day = journalView()[key];
   const books = day ? Object.values(day.books).sort((a, b) => a.firstAt - b.firstAt) : [];
   const highlights: DayHighlight[] = [];
   const notes: DayNote[] = [];
@@ -4141,7 +4146,7 @@ function renderJournal(): void {
   el.journalNext.disabled = journalDay >= today;
   el.journalToday.hidden = journalDay === today;
 
-  el.journalWeek.innerHTML = weekStrip(journal, journalDay).map(d =>
+  el.journalWeek.innerHTML = weekStrip(journalView(), journalDay).map(d =>
     `<button type="button" class="journal-wd${d.key === journalDay ? ' is-active' : ''}" data-day="${d.key}"><span>${escapeHtml(d.label)}</span><b>${d.seconds ? formatDuration(d.seconds) : '–'}</b></button>`
   ).join('');
 
@@ -8991,19 +8996,123 @@ function wire() {
 /* ============================================================
    Sync — highlights and bookmarks across devices (see sync.ts)
    ============================================================ */
+/* Other devices' reading logs, by `${day}|${deviceId}` (see mergeJournals). */
+const KEY_JOURNAL_REMOTE = 'read.journal.remote';
+let journalRemote: Record<string, DeviceDay> = load<Record<string, DeviceDay>>(KEY_JOURNAL_REMOTE, {});
+
+const syncedBooks = () => library.filter(b => b.contentKey);
+
+/** Everything on this device that syncs, as sync items (see sync.ts). */
+function syncItems(): SyncItem[] {
+  const out: SyncItem[] = [];
+  const keyOf = new Map(syncedBooks().map(b => [b.id, b.contentKey!]));
+  for (const r of syncedBooks()) {
+    const book = r.contentKey!;
+    const marks = load<BookMarks>(KEY_MARKS(r.id), { bookmarks: [], highlights: [] });
+    for (const h of marks.highlights) out.push({ kind: 'highlight', book, key: h.cfi, data: { ...h } });
+    for (const b of marks.bookmarks) out.push({ kind: 'bookmark', book, key: b.cfi, data: { ...b } });
+    for (const w of loadVocab(r.id).words) out.push({ kind: 'vocab', book, key: w.word, data: { ...w } });
+    // An untouched book has no progress to share (it would only overwrite real progress elsewhere).
+    if (r.lastCfi || r.progress > 0 || r.finishedAt) {
+      out.push({ kind: 'progress', book, key: '', data: { lastCfi: r.lastCfi ?? null, progress: r.progress || 0, finishedAt: r.finishedAt ?? null } });
+    }
+  }
+  const own = sync!.deviceId;
+  for (const [day, d] of Object.entries(journal)) {
+    const mine = deviceDay(d, id => keyOf.get(id));
+    if (Object.keys(mine.books).length) out.push({ kind: 'journal', book: GLOBAL, key: `${day}|${own}`, data: { ...mine } });
+    if (d.reflection || d.aiReflection) {
+      out.push({ kind: 'reflection', book: GLOBAL, key: day, data: { reflection: d.reflection || '', aiReflection: d.aiReflection || '' } });
+    }
+  }
+  for (const [key, d] of Object.entries(journalRemote)) out.push({ kind: 'journal', book: GLOBAL, key, data: { ...d } });
+  return out;
+}
+
+/** Store changes that arrived from other devices, then refresh what's on screen. */
+function applySyncChanges(changes: SyncChange[]): void {
+  const byKey = new Map(syncedBooks().map(b => [b.contentKey!, b]));
+  const marks = new Map<string, BookMarks>();
+  const vocab = new Map<string, VocabJournal>();
+  let libraryChanged = false, journalChanged = false, remoteChanged = false;
+  for (const c of changes) {
+    if (c.book === GLOBAL) {
+      if (c.kind === 'reflection') {
+        const d = (journal[c.key] ||= { books: {}, reflection: '' });
+        d.reflection = String(c.data?.reflection ?? '');
+        const ai = String(c.data?.aiReflection ?? '');
+        if (ai) d.aiReflection = ai; else delete d.aiReflection;
+        journalChanged = true;
+      } else if (c.kind === 'journal' && !c.key.endsWith(`|${sync!.deviceId}`)) {
+        if (c.data) journalRemote[c.key] = c.data as unknown as DeviceDay; else delete journalRemote[c.key];
+        remoteChanged = true;
+      }
+      continue;
+    }
+    const rec = byKey.get(c.book);
+    if (!rec) continue;
+    if (c.kind === 'highlight' || c.kind === 'bookmark') {
+      let m = marks.get(rec.id);
+      if (!m) { m = load<BookMarks>(KEY_MARKS(rec.id), { bookmarks: [], highlights: [] }); marks.set(rec.id, m); }
+      const list: (Highlight | Bookmark)[] = c.kind === 'highlight' ? m.highlights : m.bookmarks;
+      const at = list.findIndex(x => x.cfi === c.key);
+      if (!c.data) { if (at >= 0) list.splice(at, 1); }
+      else if (at >= 0) list[at] = c.data as unknown as Highlight;
+      else list.push(c.data as unknown as Highlight);
+    } else if (c.kind === 'vocab') {
+      let v = vocab.get(rec.id);
+      if (!v) { v = loadVocab(rec.id); vocab.set(rec.id, v); }
+      const at = v.words.findIndex(w => w.word === c.key);
+      if (!c.data) { if (at >= 0) v.words.splice(at, 1); }
+      else if (at >= 0) v.words[at] = c.data as unknown as VocabWord;
+      else v.words.push(c.data as unknown as VocabWord);
+    } else if (c.kind === 'progress' && c.data) {
+      // The open book keeps its place on screen; the next page turn here is newer and wins.
+      rec.lastCfi = (c.data.lastCfi as string | null) ?? null;
+      rec.progress = Number(c.data.progress) || 0;
+      rec.finishedAt = (c.data.finishedAt as number | null) ?? undefined;
+      libraryChanged = true;
+    }
+  }
+
+  syncWriting = true;
+  try {
+    for (const [id, m] of marks) save(KEY_MARKS(id), m);
+    for (const [id, v] of vocab) save(KEY_VOCAB(id), v);
+    if (libraryChanged) persistLibrary();
+    if (journalChanged) persistJournalNow();
+    if (remoteChanged) { try { save(KEY_JOURNAL_REMOTE, journalRemote); } catch { /* storage full */ } }
+  } finally {
+    syncWriting = false;
+  }
+
+  if (marks.size) reloadMarksAfterSync([...marks.keys()]);
+  if (currentBookRecord && vocab.has(currentBookRecord.id)) {
+    currentVocab = loadVocab(currentBookRecord.id);
+    refreshVocabPanelIfOpen();
+    scheduleVocabHighlightRefresh();
+  }
+  if (libraryChanged && document.documentElement.dataset.screen === 'library') renderLibrary();
+  // Don't rewrite the reflection box under someone who is typing in it.
+  if ((journalChanged || remoteChanged) && !el.journalModal.hidden && document.activeElement !== el.journalReflection) renderJournal();
+}
+
+/** The journal as shown: this device's days plus other devices' reading. */
+function journalView(): Journal {
+  if (!Object.keys(journalRemote).length) return journal;
+  const keyOf = new Map(library.filter(b => b.contentKey).map(b => [b.id, b.contentKey!]));
+  const idOf = new Map(library.filter(b => b.contentKey).map(b => [b.contentKey!, b.id]));
+  const others = Object.entries(journalRemote).map(([k, d]) => [k.slice(0, k.indexOf('|')), d] as [string, DeviceDay]);
+  return mergeJournals(journal, others, id => keyOf.get(id), key => idOf.get(key));
+}
+
 sync = (import.meta.env.VITE_SYNC_URL && import.meta.env.VITE_FIREBASE_API_KEY)
   ? new Sync(
       { serviceUrl: import.meta.env.VITE_SYNC_URL, apiKey: import.meta.env.VITE_FIREBASE_API_KEY },
       {
-        books: () => library
-          .filter(b => b.contentKey)
-          .map(b => ({ id: b.id, contentKey: b.contentKey! })),
-        readMarks: id => load<BookMarks>(KEY_MARKS(id), { bookmarks: [], highlights: [] }) as unknown as SyncMarks,
-        writeMarks: (id, marks) => {
-          syncWriting = true;
-          try { save(KEY_MARKS(id), marks); } finally { syncWriting = false; }
-        },
-        onRemoteChange: reloadMarksAfterSync,
+        books: () => syncedBooks().map(b => b.contentKey!),
+        items: syncItems,
+        apply: applySyncChanges,
         onStatus: renderSyncSettings,
       },
     )

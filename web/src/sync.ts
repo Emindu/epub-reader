@@ -1,36 +1,47 @@
-/* Cross-device sync of highlights and bookmarks (server: sync-server/).
+/* Cross-device sync (server: sync-server/).
 
    Accounts are Firebase Auth email + password, spoken to over its REST API so
    the same code works in the Tauri webview (desktop and iOS) and the browser.
 
-   How a sync works, without touching any of the app's highlight code:
-   - Every note becomes an item named sha256(kind|book|cfi), where `book` is the
-     record's contentKey, so all devices name the same highlight the same way.
-   - A "shadow" remembers what each item looked like at the last sync. Local
-     items that differ from it were edited here; shadow entries whose book is
-     still here but whose item is gone were deleted here.
-   - Pull the server's changes since our cursor, apply those that aren't
-     beaten by a newer local edit, then push the local edits. The server keeps
-     the newer of two edits and hands back its copy when ours lost.
-   - Removing a book from one device never deletes its notes elsewhere: notes
-     only get delete markers while their book is still in the library. A book
-     that arrives later (imported, or re-imported) fetches its notes by key.
+   The app describes everything it wants synced as items: { kind, book, key, data }.
+   `book` is the record's contentKey (same on every device), or GLOBAL for things
+   that belong to no book (journal days). An item's id is sha256(kind|book|key), so
+   every device names the same note the same way. How a sync works:
+
+   - A "shadow" remembers each item as last agreed with the server (as a short
+     hash). Local items that differ from it were changed here; shadow entries
+     whose book is still here but whose item is gone were deleted here (only for
+     kinds in DELETABLE: progress or a journal day never "disappears").
+   - "Seen" remembers when this device first noticed each local change. That is
+     the change's timestamp, so an edit made offline yesterday doesn't beat an
+     edit made on another device today just because it synced later.
+   - Pull the server's changes since our cursor, apply those not beaten by a
+     newer local change, then push the local changes. The server keeps the newer
+     of two edits and hands back its copy when ours lost.
+   - Removing a book from one device never deletes its notes elsewhere: delete
+     markers are only sent while the book is still in the library. A book that
+     arrives later (imported, or re-imported) fetches its items by key.
 
    Pure module: the app passes a SyncHost; this file has no DOM or app state,
-   so web/ can copy it as-is. */
+   so web/ can copy it as-is. Keep it free of non-erasable TypeScript (enums,
+   constructor parameter properties): sync-server/client.test.mjs runs it in Node. */
 
-export type SyncKind = 'highlight' | 'bookmark';
+export const GLOBAL = '*';
+/** Kinds whose disappearance means "deleted here". */
+const DELETABLE = new Set(['highlight', 'bookmark', 'vocab']);
 
-export interface SyncMark { cfi: string; [field: string]: unknown }
-export interface SyncMarks { highlights: SyncMark[]; bookmarks: SyncMark[] }
+export type SyncData = Record<string, unknown>;
+export interface SyncItem { kind: string; book: string; key: string; data: SyncData }
+/** A remote change for the app to store; `data: null` means deleted. */
+export interface SyncChange { kind: string; book: string; key: string; data: SyncData | null }
 
 export interface SyncHost {
-  /** Library items that can sync: per-device id plus the cross-device key. */
-  books(): { id: string; contentKey: string }[];
-  readMarks(bookId: string): SyncMarks;
-  writeMarks(bookId: string, marks: SyncMarks): void;
-  /** Called synchronously right after remote changes were written. */
-  onRemoteChange(bookIds: string[]): void;
+  /** contentKeys of the books on this device. */
+  books(): string[];
+  /** Everything stored on this device that syncs, including what earlier syncs brought in. */
+  items(): SyncItem[];
+  /** Store remote changes and refresh what's on screen. Must be synchronous. */
+  apply(changes: SyncChange[]): void;
   /** Status line changed (signed in/out, syncing, error). */
   onStatus(): void;
 }
@@ -39,21 +50,25 @@ export interface SyncConfig { serviceUrl: string; apiKey: string }
 
 interface Item {
   id: string;
-  kind: SyncKind;
+  kind: string;
   book: string;
+  key: string;
   updatedAt: number;
   deleted?: boolean;
-  data: SyncMark | null;
+  data: SyncData | null;
 }
 
 interface Auth { uid: string; email: string; idToken: string; refreshToken: string; expiresAt: number }
 
 interface State {
+  v: 2;
   uid: string;
   cursor: number;
-  /** id -> { b: book key, f: fingerprint of the data last agreed with the server } */
-  shadow: Record<string, { b: string; f: string }>;
-  /** Book keys present at the last sync; a new key means "fetch its notes". */
+  /** id -> item as last agreed with the server: f = hash of its data, b/k/y = book/kind/key */
+  shadow: Record<string, { f: string; b: string; k: string; y: string }>;
+  /** id -> [hash of the data as last seen locally ('' = gone), when that was first seen] */
+  seen: Record<string, [string, number]>;
+  /** Book keys present at the last sync; a new key means "fetch its items". */
   books: string[];
   lastSyncAt: number;
   lastError: string;
@@ -61,26 +76,41 @@ interface State {
 
 const KEY_AUTH = 'read.sync.auth';
 const KEY_STATE = 'read.sync.state';
-const PUSH_CHUNK = 200;
+const KEY_DEVICE = 'read.sync.device';
+const PUSH_ITEMS = 200;
+const PUSH_BYTES = 900_000;
 const AUTO_INTERVAL = 5 * 60 * 1000;
-const CHANGE_DELAY = 4000;
 
 const load = <T>(k: string): T | null => {
   try { const raw = localStorage.getItem(k); return raw ? JSON.parse(raw) as T : null; } catch { return null; }
 };
 const store = (k: string, v: unknown) => localStorage.setItem(k, JSON.stringify(v));
 
-/** JSON with sorted keys, so the same note always prints the same way. */
-function fingerprint(v: unknown): string {
+/** JSON with sorted keys, so the same data always prints the same way. */
+function canonical(v: unknown): string {
   return JSON.stringify(v, (_k, val) =>
     val && typeof val === 'object' && !Array.isArray(val)
       ? Object.fromEntries(Object.keys(val).sort().map(k => [k, (val as Record<string, unknown>)[k]]))
       : val);
 }
 
+/** Short hash of an item's data (cyrb53): only compared for equality, never sent. */
+function hashData(data: unknown): string {
+  const str = canonical(data);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+
 const idCache = new Map<string, string>();
-async function itemId(kind: SyncKind, book: string, cfi: string): Promise<string> {
-  const name = `${kind}|${book}|${cfi}`;
+async function itemId(kind: string, book: string, key: string): Promise<string> {
+  const name = `${kind}|${book}|${key}`;
   let id = idCache.get(name);
   if (!id) {
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(name));
@@ -90,7 +120,10 @@ async function itemId(kind: SyncKind, book: string, cfi: string): Promise<string
   return id;
 }
 
-const listOf = (marks: SyncMarks, kind: SyncKind) => kind === 'highlight' ? marks.highlights : marks.bookmarks;
+function randomId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(9));
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
 
 /** Firebase Auth's error codes, in words people can act on. */
 function authMessage(code: string): string {
@@ -116,16 +149,22 @@ export class Sync {
   private running: Promise<void> | null = null;
   private again = false;
   private changeTimer = 0;
+  private changeDue = 0;
   private syncing = false;
 
   private config: SyncConfig;
   private host: SyncHost;
+  /** Random, per install: names this device's own journal entries. */
+  readonly deviceId: string;
 
   // Plain fields rather than constructor parameter properties, so Node can run this
   // file directly (type stripping) in sync-server/client.test.mjs.
   constructor(config: SyncConfig, host: SyncHost) {
     this.config = config;
     this.host = host;
+    let device = localStorage.getItem(KEY_DEVICE);
+    if (!device) { device = randomId(); localStorage.setItem(KEY_DEVICE, device); }
+    this.deviceId = device;
   }
 
   get configured(): boolean { return !!(this.config.serviceUrl && this.config.apiKey); }
@@ -148,11 +187,15 @@ export class Sync {
     if (this.auth) void this.syncNow();
   }
 
-  /** A note changed locally: sync shortly, batching bursts of edits. */
-  noteChanged(): void {
+  /** Something synced changed locally: sync within `delayMs`. Bursts share one sync;
+      a sooner request moves the pending one earlier, a later one never delays it. */
+  noteChanged(delayMs = 4000): void {
     if (!this.auth) return;
+    const due = Date.now() + delayMs;
+    if (this.changeTimer && this.changeDue <= due) return;
     clearTimeout(this.changeTimer);
-    this.changeTimer = window.setTimeout(() => { void this.syncNow(); }, CHANGE_DELAY);
+    this.changeDue = due;
+    this.changeTimer = window.setTimeout(() => { this.changeTimer = 0; void this.syncNow(); }, delayMs);
   }
 
   // ---- Account ----------------------------------------------------------
@@ -233,7 +276,10 @@ export class Sync {
 
   // ---- Sync -------------------------------------------------------------
 
-  private state(): State | null { return load<State>(KEY_STATE); }
+  private state(): State | null {
+    const s = load<State>(KEY_STATE);
+    return s && s.v === 2 ? s : null;     // older formats: start over (a full merge, nothing is lost)
+  }
 
   /** Run a sync; a call while one is running queues exactly one more. */
   syncNow(): Promise<void> {
@@ -244,7 +290,8 @@ export class Sync {
     this.running = (async () => {
       do {
         this.again = false;
-        const s = this.state() ?? { uid: this.auth!.uid, cursor: 0, shadow: {}, books: [], lastSyncAt: 0, lastError: '' };
+        const s: State = this.state()
+          ?? { v: 2, uid: this.auth!.uid, cursor: 0, shadow: {}, seen: {}, books: [], lastSyncAt: 0, lastError: '' };
         try {
           await this.run(s);
           s.lastSyncAt = Date.now();
@@ -263,46 +310,41 @@ export class Sync {
     return this.running;
   }
 
-  private async collect(bookKeys: Map<string, string>): Promise<Map<string, Item & { data: SyncMark }>> {
-    const out = new Map<string, Item & { data: SyncMark }>();
-    for (const [book, bookId] of bookKeys) {
-      const marks = this.host.readMarks(bookId);
-      for (const kind of ['highlight', 'bookmark'] as SyncKind[]) {
-        for (const m of listOf(marks, kind)) {
-          if (!m || typeof m.cfi !== 'string') continue;
-          const id = await itemId(kind, book, m.cfi);
-          out.set(id, { id, kind, book, updatedAt: 0, data: m });
-        }
-      }
-    }
-    return out;
-  }
-
   private async run(s: State): Promise<void> {
-    // contentKey -> local book id (first copy wins if the library holds duplicates)
-    const bookKeys = new Map<string, string>();
-    for (const b of this.host.books()) if (b.contentKey && !bookKeys.has(b.contentKey)) bookKeys.set(b.contentKey, b.id);
+    const present = new Set(this.host.books());
+    present.add(GLOBAL);
 
-    // 1. What changed here since the last sync.
+    // 1. Read everything local, and note when each change was first noticed. This runs
+    //    before any network call, so even offline the timestamps stay close to the edit.
     const now = Date.now();
-    const local = await this.collect(bookKeys);
+    const local = new Map<string, SyncItem & { f: string }>();
+    for (const it of this.host.items()) {
+      const id = await itemId(it.kind, it.book, it.key);
+      local.set(id, { ...it, f: hashData(it.data) });
+    }
+    for (const [id, it] of local) {
+      if (s.seen[id]?.[0] !== it.f) s.seen[id] = [it.f, now];
+    }
+    for (const [id, seen] of Object.entries(s.seen)) {
+      if (local.has(id)) continue;
+      if (!s.shadow[id]) delete s.seen[id];             // never synced: nothing to delete anywhere
+      else if (seen[0] !== '') s.seen[id] = ['', now];  // just disappeared
+    }
+
+    // 2. What changed here since the last sync.
     const dirty = new Map<string, Item>();
-    for (const [id, item] of local) {
-      if (s.shadow[id]?.f !== this.fp(item.kind, item.data)) dirty.set(id, { ...item, updatedAt: now });
+    for (const [id, it] of local) {
+      if (s.shadow[id]?.f === it.f) continue;
+      dirty.set(id, { id, kind: it.kind, book: it.book, key: it.key, updatedAt: s.seen[id][1], data: it.data });
     }
     for (const [id, sh] of Object.entries(s.shadow)) {
       if (local.has(id)) continue;
-      if (bookKeys.has(sh.b)) {
-        // Deleted here. The id doesn't encode the kind, but the shadow's fingerprint does.
-        const kind = (JSON.parse(sh.f) as { __kind?: SyncKind }).__kind;
-        if (kind) dirty.set(id, { id, kind, book: sh.b, updatedAt: now, deleted: true, data: null });
-        else delete s.shadow[id];
-      } else {
-        delete s.shadow[id];               // book left this device: forget, don't delete everywhere
-      }
+      if (!present.has(sh.b)) { delete s.shadow[id]; delete s.seen[id]; continue; }   // book left this device: forget, don't delete everywhere
+      if (!DELETABLE.has(sh.k)) continue;
+      dirty.set(id, { id, kind: sh.k, book: sh.b, key: sh.y, updatedAt: s.seen[id]?.[1] ?? now, deleted: true, data: null });
     }
 
-    // 2. What changed elsewhere.
+    // 3. What changed elsewhere.
     const remote: Item[] = [];
     let cursor = s.cursor;
     for (let more = true; more;) {
@@ -311,102 +353,78 @@ export class Sync {
       cursor = page.cursor;
       more = page.more;
     }
-    // Books new to this device since the last sync: their older notes are behind the cursor.
+    // Books new to this device since the last sync: their older items are behind the cursor.
     if (s.cursor > 0) {
       const known = new Set(s.books);
-      for (const book of bookKeys.keys()) {
-        if (known.has(book)) continue;
+      for (const book of present) {
+        if (known.has(book) || book === GLOBAL) continue;
         const { items } = await this.api(`/v1/items?book=${encodeURIComponent(book)}`);
         remote.push(...items);
       }
     }
 
-    // 3. Apply remote changes unless a newer local edit beats them.
-    const incoming = remote.filter(r => {
+    // 4. Apply remote changes unless a newer local change beats them.
+    this.apply(s, present, remote.filter(r => {
       const d = dirty.get(r.id);
       if (d && d.updatedAt >= r.updatedAt) return false;
       dirty.delete(r.id);
       return true;
-    });
-    await this.hashBooks(bookKeys, incoming);
-    this.apply(s, bookKeys, incoming);
+    }));
     s.cursor = cursor;
-    s.books = [...bookKeys.keys()];
+    s.books = [...present].filter(b => b !== GLOBAL);
 
-    // 4. Send local edits; adopt the server's copy where ours lost.
-    const outgoing = [...dirty.values()];
-    for (let i = 0; i < outgoing.length; i += PUSH_CHUNK) {
-      const chunk = outgoing.slice(i, i + PUSH_CHUNK);
-      const { results } = await this.api('/v1/sync', {
-        items: chunk.map(({ id, kind, book, updatedAt, deleted, data }) =>
-          deleted ? { id, kind, book, updatedAt, deleted: true } : { id, kind, book, updatedAt, data }),
-      });
+    // 5. Send local changes in size-bounded batches; adopt the server's copy where ours lost.
+    const outgoing = [...dirty.values()].map(({ id, kind, book, key, updatedAt, deleted, data }) =>
+      deleted ? { id, kind, book, key, updatedAt, deleted: true } : { id, kind, book, key, updatedAt, data });
+    let batch: typeof outgoing = [], bytes = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      const sent = batch;
+      batch = []; bytes = 0;
+      const { results } = await this.api('/v1/sync', { items: sent });
       const lost: Item[] = [];
       for (const r of results as { id: string; status: string; item?: Item }[]) {
-        const sent = chunk.find(c => c.id === r.id);
-        if (!sent) continue;
+        const item = sent.find(c => c.id === r.id);
+        if (!item) continue;
         if (r.status === 'ok') {
-          if (sent.deleted) delete s.shadow[sent.id];
-          else s.shadow[sent.id] = { b: sent.book, f: this.fp(sent.kind, sent.data) };
+          if ('deleted' in item) { delete s.shadow[item.id]; delete s.seen[item.id]; }
+          else s.shadow[item.id] = { f: hashData(item.data), b: item.book, k: item.kind, y: item.key };
         } else if (r.item) {
           lost.push(r.item);
         }
       }
-      await this.hashBooks(bookKeys, lost);
-      this.apply(s, bookKeys, lost);
+      this.apply(s, present, lost);
+    };
+    for (const item of outgoing) {
+      const size = JSON.stringify(item).length;
+      if (batch.length >= PUSH_ITEMS || (batch.length && bytes + size > PUSH_BYTES)) await flush();
+      batch.push(item);
+      bytes += size;
     }
+    await flush();
   }
 
-  /** Make sure every note in the books these items touch has its id cached, so the
-      synchronous apply() can find a deleted note from its id alone. */
-  private async hashBooks(bookKeys: Map<string, string>, items: Item[]): Promise<void> {
-    for (const book of new Set(items.filter(i => i.deleted).map(i => i.book))) {
-      const bookId = bookKeys.get(book);
-      if (!bookId) continue;
-      const marks = this.host.readMarks(bookId);
-      for (const kind of ['highlight', 'bookmark'] as SyncKind[]) {
-        for (const m of listOf(marks, kind)) if (m && typeof m.cfi === 'string') await itemId(kind, book, m.cfi);
-      }
-    }
-  }
-
-  /** Fingerprint that also records the kind, so a delete can be sent later from the shadow alone. */
-  private fp(kind: SyncKind, data: SyncMark | null): string {
-    return fingerprint({ ...(data ?? {}), __kind: kind });
-  }
-
-  /** Write remote items into the books they belong to. Synchronous, so the open
-      book's in-memory copy is refreshed (onRemoteChange) before other code runs. */
-  private apply(s: State, bookKeys: Map<string, string>, items: Item[]): void {
-    const touched = new Map<string, SyncMarks>();
-    const changed = new Set<string>();
+  /** Hand remote items to the app and record them as agreed. Synchronous, so the app's
+      in-memory copies are refreshed before any other code runs. */
+  private apply(s: State, present: Set<string>, items: Item[]): void {
+    const changes: SyncChange[] = [];
     for (const r of items) {
-      const bookId = bookKeys.get(r.book);
-      if (!bookId) continue;                // not on this device: fetched by key if it arrives
-      if (!r.deleted && r.data && s.shadow[r.id]?.f === this.fp(r.kind, r.data)) continue;   // already have it (often our own push echoed back)
-      let marks = touched.get(bookId);
-      if (!marks) { marks = this.host.readMarks(bookId); touched.set(bookId, marks); }
-      const list = listOf(marks, r.kind);
+      if (!present.has(r.book)) continue;   // not on this device: fetched by key if it arrives
+      const key = r.key ?? '';
       if (r.deleted) {
-        const idx = list.findIndex(m => this.idSync(r.kind, r.book, m.cfi) === r.id);
-        if (idx >= 0) { list.splice(idx, 1); changed.add(bookId); }
+        if (!s.shadow[r.id] && !s.seen[r.id]) continue;   // never had it
         delete s.shadow[r.id];
+        delete s.seen[r.id];
+        changes.push({ kind: r.kind, book: r.book, key, data: null });
         continue;
       }
-      const cfi = r.data?.cfi;
-      if (!r.data || typeof cfi !== 'string') continue;
-      const idx = list.findIndex(m => m.cfi === cfi);
-      if (idx >= 0) list[idx] = r.data; else list.push(r.data);
-      changed.add(bookId);
-      s.shadow[r.id] = { b: r.book, f: this.fp(r.kind, r.data) };
+      if (!r.data) continue;
+      const f = hashData(r.data);
+      const known = s.shadow[r.id]?.f === f && s.seen[r.id]?.[0] === f;
+      s.shadow[r.id] = { f, b: r.book, k: r.kind, y: key };
+      s.seen[r.id] = [f, r.updatedAt];
+      if (!known) changes.push({ kind: r.kind, book: r.book, key, data: r.data });   // skip echoes of our own pushes
     }
-    if (!changed.size) return;
-    for (const bookId of changed) this.host.writeMarks(bookId, touched.get(bookId)!);
-    this.host.onRemoteChange([...changed]);
-  }
-
-  /** Id of a note already hashed during collect() (every local note is). */
-  private idSync(kind: SyncKind, book: string, cfi: string): string | undefined {
-    return idCache.get(`${kind}|${book}|${cfi}`);
+    if (changes.length) this.host.apply(changes);
   }
 }

@@ -1,5 +1,5 @@
-// Read sync service: stores each user's highlights, bookmarks (and later
-// vocab, journal, progress) so every device sees the same notes.
+// Read sync service: stores each user's highlights, bookmarks, vocabulary,
+// reading progress and journal so every device sees the same notes.
 //
 //   GET  /health                      liveness probe
 //   GET  /v1/sync?since=<cursor>       changes after the cursor  -> { items, cursor, more }
@@ -18,13 +18,14 @@ import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { MemoryStore, FirestoreStore } from './store.mjs';
 
-const MAX_BODY = 1024 * 1024;          // 1 MB per request
+const MAX_BODY = 4 * 1024 * 1024;      // 4 MB per request (the app also splits pushes by size)
 const MAX_ITEMS = 200;                 // per push; keeps a Firestore transaction well under 500 writes
-const MAX_DATA = 16 * 1024;            // per item, serialised
+const MAX_DATA = 64 * 1024;            // per item, serialised (a busy journal day is the biggest)
 const PULL_LIMIT = 500;
 const BOOK_LIMIT = 5000;
-const KINDS = new Set(['highlight', 'bookmark']);
+const KINDS = new Set(['highlight', 'bookmark', 'vocab', 'progress', 'journal', 'reflection']);
 const ID_RE = /^[a-f0-9]{64}$/;        // client sends sha256(kind|book|key) so ids are path-safe
+const MAX_KEY = 1000;                  // the item's name within its book: cfi, word, day…
 
 const DEFAULT_ORIGINS = [
   'tauri://localhost',                 // Tauri on macOS / iOS
@@ -47,19 +48,20 @@ export function validateItems(body) {
   return body.items.map((raw, n) => {
     const where = `items[${n}]`;
     if (!raw || typeof raw !== 'object') throw new HttpError(400, `${where}: not an object`);
-    const { id, kind, book, updatedAt, deleted, data } = raw;
+    const { id, kind, book, key = '', updatedAt, deleted, data } = raw;
     if (typeof id !== 'string' || !ID_RE.test(id)) throw new HttpError(400, `${where}.id: expected 64 hex chars`);
     if (seen.has(id)) throw new HttpError(400, `${where}.id: duplicate in this request`);
     seen.add(id);
     if (!KINDS.has(kind)) throw new HttpError(400, `${where}.kind: unknown kind`);
     if (typeof book !== 'string' || !book || book.length > 600) throw new HttpError(400, `${where}.book: expected a content key`);
+    if (typeof key !== 'string' || key.length > MAX_KEY) throw new HttpError(400, `${where}.key: expected a string up to ${MAX_KEY} chars`);
     if (!Number.isFinite(updatedAt) || updatedAt <= 0) throw new HttpError(400, `${where}.updatedAt: expected ms timestamp`);
     if (deleted !== undefined && typeof deleted !== 'boolean') throw new HttpError(400, `${where}.deleted: expected boolean`);
     if (!deleted) {
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new HttpError(400, `${where}.data: expected an object`);
       if (JSON.stringify(data).length > MAX_DATA) throw new HttpError(413, `${where}.data: larger than ${MAX_DATA} bytes`);
     }
-    return { id, kind, book, updatedAt, deleted: deleted === true, data: deleted ? null : data };
+    return { id, kind, book, key, updatedAt, deleted: deleted === true, data: deleted ? null : data };
   });
 }
 

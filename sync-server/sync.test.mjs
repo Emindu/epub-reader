@@ -75,6 +75,15 @@ test('last write wins; an older or equal write comes back stale with the stored 
   assert.equal(newer.json.results[0].status, 'ok');
 });
 
+test('the key is stored and kept on deletes, so other devices can find the note', async () => {
+  const item = { ...hl('/4/2', 100), key: '/4/2' };
+  await call('POST', '/v1/sync', { user: 'key', body: { items: [item] } });
+  await call('POST', '/v1/sync', { user: 'key', body: { items: [{ id: item.id, kind: 'highlight', book: item.book, key: '/4/2', updatedAt: 200, deleted: true }] } });
+  const { json } = await call('GET', '/v1/sync?since=0', { user: 'key' });
+  assert.equal(json.items[0].key, '/4/2');
+  assert.equal(json.items[0].deleted, true);
+});
+
 test('a delete is stored as a marker and reaches other devices', async () => {
   await call('POST', '/v1/sync', { user: 'del', body: { items: [hl('/4/2', 100)] } });
   const { json: first } = await call('GET', '/v1/sync?since=0', { user: 'del' });
@@ -122,7 +131,8 @@ test('validation rejects malformed items', async () => {
   const bad = [
     { items: 'nope' },
     { items: [{ ...hl('/4/2', 100), id: 'short' }] },
-    { items: [{ ...hl('/4/2', 100), kind: 'vocab' }] },
+    { items: [{ ...hl('/4/2', 100), kind: 'settings' }] },
+    { items: [{ ...hl('/4/2', 100), key: 'x'.repeat(1001) }] },
     { items: [{ ...hl('/4/2', 100), updatedAt: 'yesterday' }] },
     { items: [{ ...hl('/4/2', 100), data: undefined }] },
     { items: [hl('/4/2', 100), hl('/4/2', 101)] },

@@ -20,6 +20,7 @@ function toStored(item, seq) {
     id: item.id,
     kind: item.kind,
     book: item.book,
+    key: item.key ?? '',
     updatedAt: item.updatedAt,
     deleted: item.deleted === true,
     data: item.deleted ? null : item.data ?? null,

@@ -1,7 +1,7 @@
 # Read sync service
 
-Stores each user's highlights and bookmarks so every device sees the same
-notes. Runs on Cloud Run, keeps data in Firestore, and signs users in with
+Stores each user's highlights, bookmarks, vocabulary cards, reading progress
+and reading journal so every device sees the same notes. Runs on Cloud Run, keeps data in Firestore, and signs users in with
 Firebase Auth.
 
 ```
@@ -15,9 +15,11 @@ Every `/v1` request needs `Authorization: Bearer <Firebase ID token>`.
 
 ## How sync works
 
-- An item is one highlight or bookmark: `{ id, kind, book, updatedAt, deleted?, data }`.
-  `book` is the item's `contentKey` (same on every device), and `id` is
-  `sha256(kind|book|cfi)`, so two devices name the same highlight the same way.
+- An item is `{ id, kind, book, key, updatedAt, deleted?, data }`. Kinds: `highlight`,
+  `bookmark`, `vocab`, `progress`, `journal` (one per day per device), `reflection`.
+  `book` is the item's `contentKey` (same on every device), or `*` for journal
+  items; `key` names the item within it (cfi, word, day…); and `id` is
+  `sha256(kind|book|key)`, so two devices name the same note the same way.
 - Each accepted write gets the user's next sequence number, inside a
   Firestore transaction. Pulling `since` the last cursor returns every change
   exactly once, in order, 500 at a time (`more: true` means pull again).
