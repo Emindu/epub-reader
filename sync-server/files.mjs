@@ -5,6 +5,7 @@
 //   uploadUrl(uid, key, type)     -> signed PUT URL
 //   downloadUrl(uid, key)         -> signed GET URL, or null when there is no file
 //   remove(uid, key)              -> deletes the file (no error if missing)
+//   usage(uid)                    -> total bytes stored for the user
 import { createHash } from 'node:crypto';
 
 const URL_TTL_MS = 15 * 60 * 1000;
@@ -39,6 +40,11 @@ export class GcsFiles {
   async remove(uid, key) {
     await this.bucket.file(objectName(uid, key)).delete({ ignoreNotFound: true });
   }
+
+  async usage(uid) {
+    const [files] = await this.bucket.getFiles({ prefix: `users/${uid}/books/` });
+    return files.reduce((n, f) => n + Number(f.metadata.size || 0), 0);
+  }
 }
 
 /** In-memory stand-in for tests and local runs: serves its own "signed" URLs. */
@@ -58,6 +64,11 @@ export class MemoryFiles {
     return this.files.has(name) ? this.token(name, 'read') : null;
   }
   async remove(uid, key) { this.files.delete(objectName(uid, key)); }
+  async usage(uid) {
+    let n = 0;
+    for (const [name, f] of this.files) if (name.startsWith(`users/${uid}/`)) n += f.body.length;
+    return n;
+  }
 
   /** Handles /_memfiles/<token>; returns false for any other path. */
   async handle(req, res, url) {

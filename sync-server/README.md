@@ -86,6 +86,19 @@ npm run dev     # :8080, in-memory store; use "Bearer dev:<any-uid>" as the toke
 To allow another web origin (e.g. a hosted copy of the web app), add
 `--set-env-vars=ALLOWED_ORIGINS=https://read.example.com`.
 
+## Access control
+
+- New sign-ups are turned off in Firebase (`client.permissions.disabledUserSignup`), so only
+  existing accounts can sign in. To add a person, create their account in the Firebase
+  console (Authentication → Users → Add user) or turn sign-up back on.
+- `ALLOWED_UIDS` (Cloud Run env) lists the accounts allowed to sync; anyone else gets 403
+  even with a valid token. Empty means any signed-in account.
+- Per-account caps: `MAX_USER_BYTES` (book storage, default 5 GiB) and `MAX_USER_ITEMS`
+  (live items, default 200,000); over a cap the service answers 413.
+- The Firebase Web API key is restricted to `identitytoolkit` and `securetoken` (sign-in
+  and token refresh), the only Google APIs the apps call with it.
+- A billing budget ("Read sync monthly", US$5) emails at 50/90/100 %.
+
 ## Cost
 
 With `--min-instances=0`, Cloud Run scales to zero between syncs. A single

@@ -136,6 +136,7 @@ function authMessage(code: string): string {
   const c = code.split(' ')[0];
   return ({
     EMAIL_EXISTS: 'An account with this email already exists. Sign in instead.',
+    ADMIN_ONLY_OPERATION: 'New accounts are turned off for this app. Sign in with your existing account.',
     EMAIL_NOT_FOUND: 'Wrong email or password.',
     INVALID_PASSWORD: 'Wrong email or password.',
     INVALID_LOGIN_CREDENTIALS: 'Wrong email or password.',

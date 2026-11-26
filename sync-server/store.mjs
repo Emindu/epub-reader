@@ -10,6 +10,14 @@
 // that isn't strictly newer than the stored one comes back as `stale` with the
 // stored copy, which the client then adopts.
 
+/** A push that would take the user past their item limit. */
+export class QuotaError extends Error {}
+
+/** Change in the user's live item count if `incoming` replaces `stored`. */
+function liveDelta(stored, incoming) {
+  return (incoming.deleted ? 0 : 1) - (stored && !stored.deleted ? 1 : 0);
+}
+
 /** True when the incoming item should replace the stored one (strictly newer wins; ties keep the stored copy). */
 function accept(stored, incoming) {
   return !stored || incoming.updatedAt > stored.updatedAt;
@@ -29,7 +37,7 @@ function toStored(item, seq) {
 }
 
 export class MemoryStore {
-  constructor() { this.users = new Map(); }
+  constructor({ maxItems = Infinity } = {}) { this.users = new Map(); this.maxItems = maxItems; }
 
   user(uid) {
     let u = this.users.get(uid);
@@ -50,6 +58,9 @@ export class MemoryStore {
 
   async push(uid, items) {
     const u = this.user(uid);
+    let live = [...u.items.values()].filter(i => !i.deleted).length;
+    for (const item of items) { const st = u.items.get(item.id); if (accept(st, item)) live += liveDelta(st, item); }
+    if (live > this.maxItems) throw new QuotaError(`item limit reached (${this.maxItems})`);
     const results = [];
     for (const item of items) {
       const stored = u.items.get(item.id);
@@ -66,7 +77,7 @@ export class MemoryStore {
 
 export class FirestoreStore {
   /** @param {import('firebase-admin/firestore').Firestore} db */
-  constructor(db) { this.db = db; }
+  constructor(db, { maxItems = Infinity } = {}) { this.db = db; this.maxItems = maxItems; }
 
   userRef(uid) { return this.db.collection('users').doc(uid); }
 
@@ -92,6 +103,13 @@ export class FirestoreStore {
       const refs = items.map(i => userRef.collection('items').doc(i.id));
       const snaps = refs.length ? await tx.getAll(...refs) : [];
       let seq = userSnap.exists ? userSnap.get('seq') || 0 : 0;
+      // Live items are counted from here on (accounts older than the count start at 0).
+      let live = userSnap.exists ? userSnap.get('live') || 0 : 0;
+      items.forEach((item, n) => {
+        const stored = snaps[n].exists ? snaps[n].data() : null;
+        if (accept(stored, item)) live += liveDelta(stored, item);
+      });
+      if (live > this.maxItems) throw new QuotaError(`item limit reached (${this.maxItems})`);
       const results = [];
       items.forEach((item, n) => {
         const stored = snaps[n].exists ? snaps[n].data() : null;
@@ -102,7 +120,7 @@ export class FirestoreStore {
           results.push({ id: item.id, status: 'stale', item: stored });
         }
       });
-      tx.set(userRef, { seq, updatedAt: Date.now() }, { merge: true });
+      tx.set(userRef, { seq, live: Math.max(0, live), updatedAt: Date.now() }, { merge: true });
       return { cursor: seq, results };
     });
   }

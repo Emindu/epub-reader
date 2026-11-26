@@ -195,3 +195,35 @@ test('readtext: a device\'s chunked text log syncs to another device', async () 
   const big = { ...chunk(2), data: { books: { k: { title: 't', sections: [{ label: 'l', parts: ['y'.repeat(70000)] }] } } } };
   assert.equal((await call('POST', '/v1/sync', { user: 'rtext', body: { items: [big] } })).status, 413);
 });
+
+test('guards: only allowed accounts, and per-account item and storage limits', async () => {
+  const small = new MemoryFiles();
+  const app = http.createServer(createApp({
+    store: new MemoryStore({ maxItems: 3 }), files: small,
+    verifyToken: async t => t.slice(4),
+    allowedUids: ['me'], maxUserBytes: 10,
+  }));
+  await new Promise(r => app.listen(0, r));
+  const b = `http://127.0.0.1:${app.address().port}`;
+  small.base = b;
+  const req = (method, path, user, body) => fetch(b + path, {
+    method, headers: { Authorization: `Bearer dev:${user}`, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body),
+  });
+  try {
+    assert.equal((await req('GET', '/v1/sync?since=0', 'stranger')).status, 403, 'not on the allowlist');
+    assert.equal((await req('GET', '/v1/sync?since=0', 'me')).status, 200);
+
+    const three = ['/1', '/2', '/3'].map(c => hl(c, 1));
+    assert.equal((await req('POST', '/v1/sync', 'me', { items: three })).status, 200);
+    assert.equal((await req('POST', '/v1/sync', 'me', { items: [hl('/4', 1)] })).status, 413, 'a 4th live item is over the limit');
+    // Deleting one makes room again; editing an existing one never counts twice.
+    assert.equal((await req('POST', '/v1/sync', 'me', { items: [{ ...hl('/1', 2), deleted: true, data: undefined }] })).status, 200);
+    assert.equal((await req('POST', '/v1/sync', 'me', { items: [hl('/4', 1), hl('/2', 3)] })).status, 200);
+
+    const up = await (await req('POST', '/v1/files/upload', 'me', { book: 'sha256:big' })).json();
+    await fetch(up.url, { method: 'PUT', body: 'x'.repeat(20) });           // 20 bytes: over the 10-byte cap
+    const full = await req('POST', '/v1/files/upload', 'me', { book: 'sha256:next' });
+    assert.equal(full.status, 413);
+    assert.match((await full.json()).error, /storage is full/i);
+  } finally { app.close(); }
+});

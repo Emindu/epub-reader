@@ -16,11 +16,14 @@
 //   ALLOWED_ORIGINS   comma-separated CORS origins (defaults cover the Tauri app and local dev)
 //   SYNC_STORE=memory in-memory store + dev tokens ("dev:<uid>"), for local runs and tests only
 //   BOOKS_BUCKET      Cloud Storage bucket for book files (default <project>-books)
+//   ALLOWED_UIDS      comma-separated Firebase uids allowed to sync; empty = any signed-in account
+//   MAX_USER_BYTES    book storage per account (default 5 GiB)
+//   MAX_USER_ITEMS    live items per account (default 200000)
 //   GOOGLE_CLOUD_PROJECT / credentials: picked up automatically on Cloud Run
 
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { MemoryStore, FirestoreStore } from './store.mjs';
+import { MemoryStore, FirestoreStore, QuotaError } from './store.mjs';
 import { MemoryFiles, GcsFiles } from './files.mjs';
 
 const MAX_BODY = 4 * 1024 * 1024;      // 4 MB per request (the app also splits pushes by size)
@@ -93,10 +96,13 @@ function send(res, status, body) {
  * @param {{ store: { pull: Function, push: Function, forBook: Function },
  *           files: MemoryFiles | GcsFiles,
  *           verifyToken: (token: string) => Promise<string>,
- *           allowedOrigins?: string[] }} deps
+ *           allowedOrigins?: string[],
+ *           allowedUids?: string[] | null,
+ *           maxUserBytes?: number }} deps
  */
-export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_ORIGINS }) {
+export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_ORIGINS, allowedUids = null, maxUserBytes = 5 * 1024 ** 3 }) {
   const origins = new Set(allowedOrigins);
+  const allowed = allowedUids?.length ? new Set(allowedUids) : null;
 
   return async function handle(req, res) {
     const origin = req.headers.origin;
@@ -122,6 +128,7 @@ export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_
       let uid;
       try { uid = await verifyToken(token); }
       catch { throw new HttpError(401, 'invalid or expired token'); }
+      if (allowed && !allowed.has(uid)) throw new HttpError(403, 'This account is not allowed to use sync');
 
       if (url.pathname === '/v1/files/upload') {
         if (req.method !== 'POST') throw new HttpError(405, 'method not allowed');
@@ -129,6 +136,9 @@ export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_
         if (typeof book !== 'string' || !book || book.length > 600) throw new HttpError(400, 'book: expected a content key');
         const type = typeof contentType === 'string' && contentType.length < 100 ? contentType : 'application/octet-stream';
         if (await files.exists(uid, book)) return send(res, 200, { exists: true });
+        if (await files.usage(uid) >= maxUserBytes) {
+          throw new HttpError(413, `Book storage is full (${Math.round(maxUserBytes / 1024 ** 3)} GB). Remove some books to sync new ones.`);
+        }
         return send(res, 200, { exists: false, url: await files.uploadUrl(uid, book, type), contentType: type });
       }
       if (url.pathname === '/v1/files/download') {
@@ -161,6 +171,7 @@ export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_
       throw new HttpError(405, 'method not allowed');
     } catch (err) {
       if (err instanceof HttpError) return send(res, err.status, { error: err.message });
+      if (err instanceof QuotaError) return send(res, 413, { error: err.message });
       console.error(err);
       return send(res, 500, { error: 'internal error' });
     }
@@ -187,7 +198,7 @@ async function productionDeps() {
   const auth = getAuth(app);
   const project = process.env.GOOGLE_CLOUD_PROJECT || app.options.projectId || '';
   return {
-    store: new FirestoreStore(getFirestore(app)),
+    store: new FirestoreStore(getFirestore(app), { maxItems: Number(process.env.MAX_USER_ITEMS) || 200_000 }),
     files: new GcsFiles(getStorage(app).bucket(process.env.BOOKS_BUCKET || `${project}-books`)),
     verifyToken: async token => (await auth.verifyIdToken(token)).uid,
   };
@@ -197,7 +208,13 @@ async function productionDeps() {
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const deps = await productionDeps();
   const extra = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-  const handle = createApp({ ...deps, allowedOrigins: [...DEFAULT_ORIGINS, ...extra] });
+  const list = name => (process.env[name] || '').split(',').map(s => s.trim()).filter(Boolean);
+  const handle = createApp({
+    ...deps,
+    allowedOrigins: [...DEFAULT_ORIGINS, ...extra],
+    allowedUids: list('ALLOWED_UIDS'),
+    maxUserBytes: Number(process.env.MAX_USER_BYTES) || 5 * 1024 ** 3,
+  });
   const port = Number(process.env.PORT) || 8080;
   if (deps.files instanceof MemoryFiles) deps.files.base = `http://localhost:${port}`;
   http.createServer(handle).listen(port, () => console.log(`Read sync service on :${port}`));
