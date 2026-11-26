@@ -9352,12 +9352,13 @@ interface TtsSettings {
   expressiveness: number;   // Piper only: multiplier on the voice's noise-scale / noise-w (1 = voice default)
   hlMode: 'sentence' | 'box' | 'underline' | 'soft' | 'sweep';   // sentence = the whole spoken sentence; the rest mark the single spoken word
   hlTypewriter: boolean;    // text/web reading: keep the spoken line at a fixed height
+  vocaDefaulted?: boolean;  // set once Tiny Voca has replaced the old System default (see below)
 }
 
 const DEFAULT_TTS: TtsSettings = {
   hlMode: 'box',
   hlTypewriter: false,
-  engine: 'system',
+  engine: 'voca',           // built in: neural, works offline, nothing to download
   rate: 1.0,
   voiceUri: '',
   piperVoicePath: '',
@@ -9371,6 +9372,13 @@ const DEFAULT_TTS: TtsSettings = {
 let ttsSettings: TtsSettings = { ...DEFAULT_TTS, ...load<Partial<TtsSettings>>(KEY_TTS, {}) };
 ttsSettings.vocaVoice = normalizeVocaVoice(ttsSettings.vocaVoice);
 const persistTts = () => save(KEY_TTS, ttsSettings);
+// Tiny Voca replaced System as the default. Readers still on the old default move over
+// once; anyone who picks System again afterwards keeps it.
+if (!ttsSettings.vocaDefaulted) {
+  if (ttsSettings.engine === 'system') ttsSettings.engine = 'voca';
+  ttsSettings.vocaDefaulted = true;
+  persistTts();
+}
 
 /* --- Piper engine state ------------------------------------------------ */
 interface PiperVoice { path: string; name: string; lang: string; sample_rate: number; }
