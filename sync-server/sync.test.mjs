@@ -180,3 +180,18 @@ test('book files: upload once via a signed URL, download, and delete with the bo
   assert.equal((await call('GET', '/v1/files/download?book=' + encodeURIComponent(book), { user: 'f' })).status, 404);
   assert.equal((await call('POST', '/v1/files/upload', { user: 'f', body: {} })).status, 400);
 });
+
+test('readtext: a device\'s chunked text log syncs to another device', async () => {
+  const chunk = n => ({
+    id: idFor('readtext', '*', `2026-11-26|devA|${n}`), kind: 'readtext', book: '*', key: `2026-11-26|devA|${n}`, updatedAt: 100,
+    data: { books: { 'sha256:book': { title: 'Alpha', sections: [{ label: 'Ch1', parts: ['x'.repeat(20000)] }] } } },
+  });
+  const push = await call('POST', '/v1/sync', { user: 'rtext', body: { items: [chunk(0), chunk(1)] } });
+  assert.deepEqual(push.json.results.map(r => r.status), ['ok', 'ok']);
+  const pull = await call('GET', '/v1/sync?since=0', { user: 'rtext' });
+  assert.deepEqual(pull.json.items.map(i => i.key).sort(), ['2026-11-26|devA|0', '2026-11-26|devA|1']);
+  assert.equal(pull.json.items[0].data.books['sha256:book'].sections[0].parts[0].length, 20000);
+  // an oversized chunk is refused rather than stored
+  const big = { ...chunk(2), data: { books: { k: { title: 't', sections: [{ label: 'l', parts: ['y'.repeat(70000)] }] } } } };
+  assert.equal((await call('POST', '/v1/sync', { user: 'rtext', body: { items: [big] } })).status, 413);
+});

@@ -18,7 +18,7 @@ Every `/v1` request needs `Authorization: Bearer <Firebase ID token>`.
 ## How sync works
 
 - An item is `{ id, kind, book, key, updatedAt, deleted?, data }`. Kinds: `highlight`,
-  `bookmark`, `vocab`, `progress`, `journal` (one per day per device), `reflection`.
+  `bookmark`, `vocab`, `progress`, `journal` (one per day per device), `reflection`, `readtext` (the exact text read, in chunks).
   `book` is the item's `contentKey` (same on every device), or `*` for journal
   items; `key` names the item within it (cfi, word, day…); and `id` is
   `sha256(kind|book|key)`, so two devices name the same note the same way.

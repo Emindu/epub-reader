@@ -366,3 +366,88 @@ export function readBookWords(b: ReadBook): number {
   for (const s of b.sections) for (const p of s.parts) n += p.split(/\s+/).filter(Boolean).length;
   return n;
 }
+
+/* ---- Syncing the text log between devices ----
+   Each device uploads its own log as small chunks (items stay under the server's
+   64 KB limit): key "<day>|<deviceId>|<n>", data = a ReadChunk. Books are named
+   by contentKey so the same book lines up across devices. */
+export interface ReadChunk { books: Record<string, { title: string; sections: ReadSection[] }> }
+
+function splitLong(text: string, max: number): string[] {
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf(' ', max);
+    if (cut < max / 2) cut = max;
+    out.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/** One day of this device's log as chunks of at most ~maxChars of text. Appending
+    text only changes the last chunk, so a sync re-sends little. */
+export function readChunks(day: DayReadText, keyOf: (id: string) => string | undefined, maxChars = 20000): ReadChunk[] {
+  const chunks: ReadChunk[] = [];
+  let cur: ReadChunk = { books: {} };
+  let size = 0;
+  for (const [id, b] of Object.entries(day)) {
+    const key = keyOf(id) ?? 'title:' + b.title;
+    for (const sec of b.sections) {
+      for (const part of sec.parts) {
+        for (const piece of splitLong(part, maxChars)) {
+          if (size > 0 && size + piece.length > maxChars) { chunks.push(cur); cur = { books: {} }; size = 0; }
+          const cb = (cur.books[key] ||= { title: b.title, sections: [] });
+          let cs = cb.sections[cb.sections.length - 1];
+          if (!cs || cs.label !== sec.label) { cs = { label: sec.label, parts: [] }; cb.sections.push(cs); }
+          cs.parts.push(piece);
+          size += piece.length;
+        }
+      }
+    }
+  }
+  if (size > 0) chunks.push(cur);
+  return chunks;
+}
+
+/** This device's log plus other devices'. Remote books map to a local book id when
+    that book is here (idOf), else keep their contentKey as the id (as mergeJournals does). */
+export function mergeReadText(
+  local: ReadTextStore,
+  remote: Iterable<[chunkKey: string, chunk: ReadChunk]>,
+  keyOf: (id: string) => string | undefined,
+  idOf: (key: string) => string | undefined,
+): ReadTextStore {
+  const out: ReadTextStore = {};
+  for (const [day, books] of Object.entries(local)) {
+    out[day] = {};
+    for (const [id, b] of Object.entries(books)) {
+      out[day][id] = { ...b, sections: b.sections.map(s => ({ ...s, parts: [...s.parts] })) };
+    }
+  }
+  const rows = [...remote].map(([k, chunk]) => {
+    const [day, device, n] = k.split('|');
+    return { day, device, n: Number(n) || 0, chunk };
+  }).sort((a, b) => a.day.localeCompare(b.day) || a.device.localeCompare(b.device) || a.n - b.n);
+  for (const { day, chunk } of rows) {
+    const d = (out[day] ||= {});
+    const byKey = new Map<string, string>();
+    for (const [id, b] of Object.entries(d)) byKey.set(keyOf(id) ?? 'title:' + b.title, id);
+    for (const [key, rb] of Object.entries(chunk.books || {})) {
+      const id = byKey.get(key) ?? idOf(key) ?? key;
+      byKey.set(key, id);
+      const book = (d[id] ||= { title: rb.title, chars: 0, sections: [] });
+      for (const rs of rb.sections || []) {
+        let sec = book.sections.find(x => x.label === rs.label);
+        if (!sec) { sec = { label: rs.label, parts: [] }; book.sections.push(sec); }
+        for (const p of rs.parts || []) {
+          if (sec.parts.some(x => x.includes(p))) continue;
+          sec.parts.push(p);
+          book.chars += p.length + 1;
+        }
+      }
+    }
+  }
+  return out;
+}

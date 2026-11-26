@@ -19,7 +19,7 @@ import {
   KEY_JOURNAL, Journal, DeviceDay, mergeJournals, deviceDay, DaySummary, DayHighlight, DayNote, DayWord,
   dayKey, shiftDay, dayRange, formatDayLong, formatDuration, recordReading, weekStrip,
   progressText, summaryMarkdown, exportMarkdown, reflectionPrompt, DayExcerpt, capWords, sliceByProgress,
-  KEY_JOURNAL_TEXT, ReadTextStore, addReadText, pruneReadText, readBookWords,
+  KEY_JOURNAL_TEXT, ReadTextStore, addReadText, pruneReadText, readBookWords, ReadChunk, readChunks, mergeReadText,
 } from './journal';
 import { isXUrl, xStatusId, fxApiUrl, xApiJsonToHtml } from './xArticle';
 import DOMPurify from 'dompurify';
@@ -236,7 +236,7 @@ const save = (k: string, v: unknown) => {
   // Notes and words go out within seconds; progress and journal time change
   // constantly while reading, so they ride along at most every half minute.
   if (k.startsWith('read.marks.') || (k.startsWith('read.vocab.') && k !== KEY_VOCAB_STATS)) sync.noteChanged(4000);
-  else if (k === KEY_LIBRARY || k === KEY_JOURNAL) sync.noteChanged(30000);
+  else if (k === KEY_LIBRARY || k === KEY_JOURNAL || k === KEY_JOURNAL_TEXT) sync.noteChanged(30000);
 };
 
 const storedSettings = load<Partial<Settings>>(KEY_SETTINGS, {});
@@ -6573,7 +6573,7 @@ function renderJournal(): void {
       (b.sections.length ? `<div class="journal-sections">${b.sections.map(x => `<span>${escapeHtml(x)}</span>`).join('')}</div>` : '') + '</li>'
     ).join('') + '</ul>';
   }
-  const ledger = readText[journalDay];
+  const ledger = readTextView()[journalDay];
   const ledBooks = s.books.filter(b => ledger?.[b.id]?.sections.some(x => x.parts.length));
   if (ledBooks.length) {
     html += '<h4>Text you read</h4><p class="journal-muted">Logged while you used read-aloud, focus mode or selected text.</p>' + ledBooks.map(b => {
@@ -6763,7 +6763,7 @@ async function collectExcerpts(s: DaySummary): Promise<DayExcerpt[]> {
   let budget = EXPORT_WORDS_TOTAL;
   for (const b of s.books) {
     if (budget <= 0) break;
-    const led = readText[s.key]?.[b.id];
+    const led = readTextView()[s.key]?.[b.id];
     let ledWords = 0;
     if (led) {
       for (const sec of led.sections) {
@@ -13247,6 +13247,14 @@ function setupMinimalLayout() {
 /* Other devices' reading logs, by `${day}|${deviceId}` (see mergeJournals). */
 const KEY_JOURNAL_REMOTE = 'read.journal.remote';
 let journalRemote: Record<string, DeviceDay> = load<Record<string, DeviceDay>>(KEY_JOURNAL_REMOTE, {});
+/* Other devices' text logs, by "<day>|<deviceId>|<n>" (see readChunks / mergeReadText). */
+const KEY_READTEXT_REMOTE = 'read.journal.text.remote';
+let readTextRemote: Record<string, ReadChunk> = load<Record<string, ReadChunk>>(KEY_READTEXT_REMOTE, {});
+{
+  const cutoff = shiftDay(dayKey(), -45);
+  for (const k of Object.keys(readTextRemote)) if (k.slice(0, k.indexOf('|')) < cutoff) delete readTextRemote[k];
+}
+
 
 const syncedBooks = () => library.filter(b => b.contentKey && !b.newsTemp);
 
@@ -13279,6 +13287,15 @@ function syncItems(): SyncItem[] {
     }
   }
   for (const [key, d] of Object.entries(journalRemote)) out.push({ kind: 'journal', book: GLOBAL, key, data: { ...d } });
+  {
+    const keyOf2 = (id: string) => keyOf.get(id);
+    for (const [day, books] of Object.entries(readText)) {
+      readChunks(books, keyOf2).forEach((chunk, n) => {
+        out.push({ kind: 'readtext', book: GLOBAL, key: day + '|' + own + '|' + n, data: { ...chunk } });
+      });
+    }
+    for (const [key, chunk] of Object.entries(readTextRemote)) out.push({ kind: 'readtext', book: GLOBAL, key, data: { ...chunk } });
+  }
   return out;
 }
 
@@ -13326,6 +13343,9 @@ function applySyncChanges(changes: SyncChange[]): void {
       } else if (c.kind === 'journal' && !c.key.endsWith(`|${sync!.deviceId}`)) {
         if (c.data) journalRemote[c.key] = c.data as unknown as DeviceDay; else delete journalRemote[c.key];
         remoteChanged = true;
+      } else if (c.kind === 'readtext' && c.key.split('|')[1] !== sync!.deviceId) {
+        if (c.data) readTextRemote[c.key] = c.data as unknown as ReadChunk; else delete readTextRemote[c.key];
+        remoteChanged = true;
       }
       continue;
     }
@@ -13361,7 +13381,10 @@ function applySyncChanges(changes: SyncChange[]): void {
     for (const [id, v] of vocab) save(KEY_VOCAB(id), v);
     if (libraryChanged) persistLibrary();
     if (journalChanged) persistJournalNow();
-    if (remoteChanged) { try { save(KEY_JOURNAL_REMOTE, journalRemote); } catch { /* storage full */ } }
+    if (remoteChanged) {
+      try { save(KEY_JOURNAL_REMOTE, journalRemote); } catch { /* storage full */ }
+      try { save(KEY_READTEXT_REMOTE, readTextRemote); } catch { /* storage full */ }
+    }
   } finally {
     syncWriting = false;
   }
@@ -13375,6 +13398,14 @@ function applySyncChanges(changes: SyncChange[]): void {
   if (libraryChanged && document.documentElement.dataset.screen === 'library') renderLibrary();
   // Don't rewrite the reflection box under someone who is typing in it.
   if ((journalChanged || remoteChanged) && !el.journalModal.hidden && document.activeElement !== el.journalReflection) renderJournal();
+}
+
+/** Text read, as shown: this device's log plus what other devices logged. */
+function readTextView(): ReadTextStore {
+  if (!Object.keys(readTextRemote).length) return readText;
+  const keyOf = new Map(library.filter(b => b.contentKey).map(b => [b.id, b.contentKey!]));
+  const idOf = new Map(library.filter(b => b.contentKey).map(b => [b.contentKey!, b.id]));
+  return mergeReadText(readText, Object.entries(readTextRemote), id => keyOf.get(id), key => idOf.get(key));
 }
 
 /** The journal as shown: this device's days plus other devices' reading. */

@@ -28,7 +28,7 @@ const MAX_ITEMS = 200;                 // per push; keeps a Firestore transactio
 const MAX_DATA = 64 * 1024;            // per item, serialised (a busy journal day is the biggest)
 const PULL_LIMIT = 500;
 const BOOK_LIMIT = 5000;
-const KINDS = new Set(['book', 'highlight', 'bookmark', 'vocab', 'progress', 'journal', 'reflection']);
+const KINDS = new Set(['book', 'highlight', 'bookmark', 'vocab', 'progress', 'journal', 'reflection', 'readtext']);
 const ID_RE = /^[a-f0-9]{64}$/;        // client sends sha256(kind|book|key) so ids are path-safe
 const MAX_KEY = 1000;                  // the item's name within its book: cfi, word, day…
 
