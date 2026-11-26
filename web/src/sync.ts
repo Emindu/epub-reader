@@ -28,8 +28,9 @@
 
 export const GLOBAL = '*';
 /** Kinds whose disappearance means "deleted here". A `book` item (book: GLOBAL,
-    key: its contentKey) disappearing means the book was removed from the library. */
-const DELETABLE = new Set(['book', 'highlight', 'bookmark', 'vocab']);
+    key: its contentKey) disappearing means the book was removed from the library;
+    a `readtext` chunk disappears when its day ages out of the 45-day text log. */
+const DELETABLE = new Set(['book', 'highlight', 'bookmark', 'vocab', 'readtext']);
 
 export type SyncData = Record<string, unknown>;
 export interface SyncItem { kind: string; book: string; key: string; data: SyncData }

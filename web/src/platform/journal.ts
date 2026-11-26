@@ -361,6 +361,70 @@ export function pruneReadText(store: ReadTextStore, today: string, keepDays = 45
   for (const k of Object.keys(store)) if (k < cutoff) delete store[k];
 }
 
+/* ---- "Text you read" on other devices (cross-device sync) ----
+   A day's log can hold 400k characters, more than one sync item may carry, so each
+   device sends it per book in chunks: key `${day}|${device}|${bookKey}|${n}`. */
+
+/** One chunk of one device's log for one book on one day. */
+export interface ReadTextChunk { title: string; sections: ReadSection[] }
+
+export const READ_TEXT_CHUNK_CHARS = 40_000;
+
+/** Split this device's log for one day into chunks per book, keyed by contentKey (or `title:<title>`). */
+export function readTextChunks(day: DayReadText, keyOf: (id: string) => string | undefined, max = READ_TEXT_CHUNK_CHARS): { book: string; n: number; chunk: ReadTextChunk }[] {
+  const out: { book: string; n: number; chunk: ReadTextChunk }[] = [];
+  for (const [id, b] of Object.entries(day)) {
+    const book = keyOf(id) ?? `title:${b.title}`;
+    let chunk: ReadTextChunk = { title: b.title, sections: [] };
+    let size = 0, n = 0;
+    const flush = () => { if (chunk.sections.length) out.push({ book, n: n++, chunk }); chunk = { title: b.title, sections: [] }; size = 0; };
+    for (const sec of b.sections) {
+      for (let part of sec.parts) {
+        while (part.length) {
+          if (size >= max) flush();
+          const piece = part.slice(0, max - size);
+          part = part.slice(piece.length);
+          const last = chunk.sections[chunk.sections.length - 1];
+          if (last && last.label === sec.label) last.parts.push(piece);
+          else chunk.sections.push({ label: sec.label, parts: [piece] });
+          size += piece.length;
+        }
+      }
+    }
+    flush();
+  }
+  return out;
+}
+
+/** Parse a chunk key back into its parts (the book key may itself contain '|'). */
+export function parseReadTextKey(key: string): { day: string; device: string; book: string; n: number } {
+  const parts = key.split('|');
+  return { day: parts[0], device: parts[1], book: parts.slice(2, -1).join('|'), n: Number(parts[parts.length - 1]) || 0 };
+}
+
+/** One day's log as shown: this device's plus other devices' chunks, under the same ids
+    mergeJournals uses (the local book id when the book is here, else its key). */
+export function mergeReadText(
+  local: DayReadText | undefined,
+  others: { key: string; chunk: ReadTextChunk }[],
+  idOf: (key: string) => string | undefined,
+): DayReadText {
+  const out: DayReadText = {};
+  for (const [id, b] of Object.entries(local ?? {})) out[id] = { ...b, sections: b.sections.map(x => ({ ...x, parts: [...x.parts] })) };
+  const ordered = others.map(o => ({ ...parseReadTextKey(o.key), chunk: o.chunk }))
+    .sort((a, b) => a.device.localeCompare(b.device) || a.book.localeCompare(b.book) || a.n - b.n);
+  for (const o of ordered) {
+    const id = idOf(o.book) ?? o.book;
+    const target = (out[id] ||= { title: o.chunk.title, chars: 0, sections: [] });
+    for (const sec of o.chunk.sections) {
+      const same = target.sections.find(x => x.label === sec.label);
+      if (same) same.parts.push(...sec.parts); else target.sections.push({ label: sec.label, parts: [...sec.parts] });
+      target.chars += sec.parts.reduce((a, p) => a + p.length + 1, 0);
+    }
+  }
+  return out;
+}
+
 export function readBookWords(b: ReadBook): number {
   let n = 0;
   for (const s of b.sections) for (const p of s.parts) n += p.split(/\s+/).filter(Boolean).length;

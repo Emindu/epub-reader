@@ -12,6 +12,7 @@ import {
   dayKey, shiftDay, dayRange, formatDayLong, formatDuration, recordReading, weekStrip,
   progressText, summaryMarkdown, exportMarkdown, reflectionPrompt, DayExcerpt, capWords, sliceByProgress,
   KEY_JOURNAL_TEXT, ReadTextStore, addReadText, pruneReadText, readBookWords,
+  ReadTextChunk, readTextChunks, mergeReadText, parseReadTextKey,
 } from './platform/journal';
 import { fetchArticleHtml } from './platform/article';
 import { piperStored, piperDownload, piperRemove, piperSynthesize, piperCacheLookup, piperCacheDeleteBook, piperBatchSynthesize, type CachedChapter } from './platform/piper';
@@ -200,8 +201,30 @@ if (['light', 'sepia', 'dark'].includes(settings.theme as any)) {
 
 let library: BookRecord[] = load<BookRecord[]>(KEY_LIBRARY, []);
 
+/* Covers live one per key, written only when they change. Inside read.library they
+   made every progress save rewrite ~0.5 MB, and WebKit's storage log grew by that
+   much each time (it reached ~1 GB on an iPhone). */
+const KEY_COVER = (id: string) => `read.cover.${id}`;
+const coversWritten = new Map<string, string | null>();
+for (const b of library) {
+  if (b.coverDataUrl) continue;            // older format: still inline, moved out on the next save
+  const c = localStorage.getItem(KEY_COVER(b.id));
+  if (c) b.coverDataUrl = c;
+  coversWritten.set(b.id, c);
+}
+/** Write the library list without covers, plus any cover that changed since it was last written. */
+function saveLibraryRecords(): void {
+  for (const b of library) {
+    const c = b.coverDataUrl ?? null;
+    if (coversWritten.get(b.id) === c) continue;
+    if (c) localStorage.setItem(KEY_COVER(b.id), c); else localStorage.removeItem(KEY_COVER(b.id));
+    coversWritten.set(b.id, c);
+  }
+  save(KEY_LIBRARY, library.map(b => b.coverDataUrl ? { ...b, coverDataUrl: null } : b));
+}
+
 const persistSettings = () => save(KEY_SETTINGS, settings);
-const persistLibrary = () => save(KEY_LIBRARY, library);
+const persistLibrary = () => saveLibraryRecords();
 
 const KEY_STATS = 'read.stats';
 let stats = load<ReadingStats>(KEY_STATS, {
@@ -1281,6 +1304,8 @@ function removeBook(id: string, quiet = false) {
   localStorage.removeItem(KEY_MARKS(id));
   localStorage.removeItem(KEY_LOCATIONS(id));
   localStorage.removeItem(KEY_VOCAB(id));
+  localStorage.removeItem(KEY_COVER(id));
+  coversWritten.delete(id);
   persistLibrary();
   renderLibrary();
   if (rec?.storedRelPath) {
@@ -4090,6 +4115,22 @@ let journalDay = dayKey();
 let journalSaveTimer = 0;
 let readText: ReadTextStore = load<ReadTextStore>(KEY_JOURNAL_TEXT, {});
 pruneReadText(readText, dayKey());
+/* Other devices' "Text you read", in sync chunks by `${day}|${device}|${bookKey}|${n}`
+   (see readTextChunks); aged out on the same 45-day rule as the local log. */
+const KEY_JOURNAL_TEXT_REMOTE = 'read.journal.text.remote';
+let readTextRemote: Record<string, ReadTextChunk> = load<Record<string, ReadTextChunk>>(KEY_JOURNAL_TEXT_REMOTE, {});
+{
+  const cutoff = shiftDay(dayKey(), -45);
+  for (const k of Object.keys(readTextRemote)) if (k < cutoff) delete readTextRemote[k];
+}
+
+/** One day's "Text you read": this device's log plus other devices', under journalView's book ids. */
+function readTextView(day: string): ReadTextStore[string] {
+  const others = Object.entries(readTextRemote).filter(([k]) => k.startsWith(`${day}|`)).map(([key, chunk]) => ({ key, chunk }));
+  if (!others.length) return readText[day] ?? {};
+  const idOf = new Map(library.filter(b => b.contentKey).map(b => [b.contentKey!, b.id]));
+  return mergeReadText(readText[day], others, key => idOf.get(key));
+}
 let journalAiAbort: AbortController | null = null;
 
 function persistJournalNow(): void {
@@ -4207,7 +4248,7 @@ function renderJournal(): void {
       (b.sections.length ? `<div class="journal-sections">${b.sections.map(x => `<span>${escapeHtml(x)}</span>`).join('')}</div>` : '') + '</li>'
     ).join('') + '</ul>';
   }
-  const ledger = readText[journalDay];
+  const ledger = readTextView(journalDay);
   const ledBooks = s.books.filter(b => ledger?.[b.id]?.sections.some(x => x.parts.length));
   if (ledBooks.length) {
     html += '<h4>Text you read</h4><p class="journal-muted">Logged while you used read-aloud, focus mode or selected text.</p>' + ledBooks.map(b => {
@@ -4402,7 +4443,7 @@ async function collectExcerpts(s: DaySummary): Promise<DayExcerpt[]> {
   let budget = EXPORT_WORDS_TOTAL;
   for (const b of s.books) {
     if (budget <= 0) break;
-    const led = readText[s.key]?.[b.id];
+    const led = readTextView(s.key)[b.id];
     let ledWords = 0;
     if (led) {
       for (const sec of led.sections) {
@@ -9076,6 +9117,12 @@ function syncItems(): SyncItem[] {
     }
   }
   for (const [key, d] of Object.entries(journalRemote)) out.push({ kind: 'journal', book: GLOBAL, key, data: { ...d } });
+  for (const [day, d] of Object.entries(readText)) {
+    for (const c of readTextChunks(d, id => keyOf.get(id))) {
+      out.push({ kind: 'readtext', book: GLOBAL, key: `${day}|${own}|${c.book}|${c.n}`, data: { ...c.chunk } });
+    }
+  }
+  for (const [key, c] of Object.entries(readTextRemote)) out.push({ kind: 'readtext', book: GLOBAL, key, data: { ...c } });
   return out;
 }
 
@@ -9084,7 +9131,7 @@ function applySyncChanges(changes: SyncChange[]): void {
   const byKey = new Map(syncedBooks().map(b => [b.contentKey!, b]));
   const marks = new Map<string, BookMarks>();
   const vocab = new Map<string, VocabJournal>();
-  let libraryChanged = false, journalChanged = false, remoteChanged = false;
+  let libraryChanged = false, journalChanged = false, remoteChanged = false, textChanged = false;
   for (const c of changes) {
     if (c.kind === 'book') {
       const existing = library.find(b => b.contentKey === c.key);
@@ -9120,6 +9167,9 @@ function applySyncChanges(changes: SyncChange[]): void {
         const ai = String(c.data?.aiReflection ?? '');
         if (ai) d.aiReflection = ai; else delete d.aiReflection;
         journalChanged = true;
+      } else if (c.kind === 'readtext' && parseReadTextKey(c.key).device !== sync!.deviceId) {
+        if (c.data) readTextRemote[c.key] = c.data as unknown as ReadTextChunk; else delete readTextRemote[c.key];
+        textChanged = true;
       } else if (c.kind === 'journal' && !c.key.endsWith(`|${sync!.deviceId}`)) {
         if (c.data) journalRemote[c.key] = c.data as unknown as DeviceDay; else delete journalRemote[c.key];
         remoteChanged = true;
@@ -9159,6 +9209,7 @@ function applySyncChanges(changes: SyncChange[]): void {
     if (libraryChanged) persistLibrary();
     if (journalChanged) persistJournalNow();
     if (remoteChanged) { try { save(KEY_JOURNAL_REMOTE, journalRemote); } catch { /* storage full */ } }
+    if (textChanged) { try { save(KEY_JOURNAL_TEXT_REMOTE, readTextRemote); } catch { /* storage full: shown next time it fits */ } }
   } finally {
     syncWriting = false;
   }
@@ -9171,7 +9222,7 @@ function applySyncChanges(changes: SyncChange[]): void {
   }
   if (libraryChanged && document.documentElement.dataset.screen === 'library') renderLibrary();
   // Don't rewrite the reflection box under someone who is typing in it.
-  if ((journalChanged || remoteChanged) && !el.journalModal.hidden && document.activeElement !== el.journalReflection) renderJournal();
+  if ((journalChanged || remoteChanged || textChanged) && !el.journalModal.hidden && document.activeElement !== el.journalReflection) renderJournal();
 }
 
 /** The journal as shown: this device's days plus other devices' reading. */
