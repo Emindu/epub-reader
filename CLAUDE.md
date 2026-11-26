@@ -75,6 +75,9 @@ When adding a command: define it in `lib.rs`, register it in the `invoke_handler
 ### Web port (`web/`)
 `web/src/main.ts` is a port of the desktop `main.ts`; native pieces are replaced by `web/src/platform/` (IndexedDB storage, file picker, Piper in a Web Worker via ONNX WASM, WebLLM/OpenAI-compatible LLM, article client). `web/server/article-proxy.mjs` is the SSRF-guarded article fetcher shared by the Vite dev middleware and the production `server.mjs`. `web/src/codeblocks.ts` and `web/src/contentKey.ts` are currently identical copies of their `src/` counterparts. Features added to desktop are ported manually — check whether a change should be mirrored.
 
+### Sync service (`sync-server/`)
+A small Node service for Cloud Run that syncs highlights and bookmarks across devices (Firestore + Firebase Auth); separate `package.json`, no build step. Items are matched across devices by `contentKey` (`src/contentKey.ts`). `npm test` runs end-to-end tests against an in-memory store; `npm run dev` serves on :8080 accepting `Bearer dev:<uid>` tokens. Deploy steps are in `sync-server/README.md`.
+
 ### Other
 - `new wanted design/` and `frontend-for-redesign.zip` are design references for a planned redesign, not built code.
 - `src-tauri/2` is a stray file (npm output), not source.

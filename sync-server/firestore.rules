@@ -1,0 +1,10 @@
+rules_version = '2';
+// Apps never talk to Firestore directly: every read and write goes through
+// the sync service, which uses admin credentials and bypasses these rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
