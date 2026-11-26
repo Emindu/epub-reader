@@ -130,6 +130,6 @@ test('CORS: allowed origins get headers and preflight works; others get none', a
   assert.equal(pre.headers.get('access-control-allow-origin'), 'tauri://localhost');
   assert.match(pre.headers.get('access-control-allow-headers'), /Authorization/);
 
-  const evil = await call('GET', '/healthz', { origin: 'https://evil.example' });
+  const evil = await call('GET', '/health', { origin: 'https://evil.example' });
   assert.equal(evil.headers.get('access-control-allow-origin'), null);
 });

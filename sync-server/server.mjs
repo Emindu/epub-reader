@@ -1,7 +1,7 @@
 // Read sync service: stores each user's highlights, bookmarks (and later
 // vocab, journal, progress) so every device sees the same notes.
 //
-//   GET  /healthz                      liveness probe
+//   GET  /health                      liveness probe
 //   GET  /v1/sync?since=<cursor>       changes after the cursor  -> { items, cursor, more }
 //   POST /v1/sync   { items: [...] }   upload changes            -> { cursor, results }
 //
@@ -101,7 +101,7 @@ export function createApp({ store, verifyToken, allowedOrigins = DEFAULT_ORIGINS
 
     const url = new URL(req.url, 'http://local');
     try {
-      if (url.pathname === '/healthz') return send(res, 200, { ok: true });
+      if (url.pathname === '/health') return send(res, 200, { ok: true });
       if (url.pathname !== '/v1/sync') throw new HttpError(404, 'not found');
 
       const auth = req.headers.authorization || '';

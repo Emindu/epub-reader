@@ -5,7 +5,7 @@ notes. Runs on Cloud Run, keeps data in Firestore, and signs users in with
 Firebase Auth.
 
 ```
-GET  /healthz                      liveness probe
+GET  /health                      liveness probe
 GET  /v1/sync?since=<cursor>       changes after the cursor  -> { items, cursor, more }
 POST /v1/sync   { items: [...] }   upload changes            -> { cursor, results }
 ```
@@ -61,7 +61,7 @@ npm run dev     # :8080, in-memory store; use "Bearer dev:<any-uid>" as the toke
    `--allow-unauthenticated` only means Cloud Run lets requests reach the
    service; the service itself rejects anything without a valid Firebase token.
    The default compute service account already has Firestore access in the same project.
-7. Check it: `curl https://<service-url>/healthz` should print `{"ok":true}`.
+7. Check it: `curl https://<service-url>/health` should print `{"ok":true}`.
 
 To allow another web origin (e.g. a hosted copy of the web app), add
 `--set-env-vars=ALLOWED_ORIGINS=https://read.example.com`.
