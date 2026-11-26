@@ -5,6 +5,9 @@
 //   GET  /v1/sync?since=<cursor>       changes after the cursor  -> { items, cursor, more }
 //   POST /v1/sync   { items: [...] }   upload changes            -> { cursor, results }
 //   GET  /v1/items?book=<contentKey>   every live item for one book -> { items }
+//   POST /v1/files/upload { book, contentType } -> { exists } or { exists: false, url }  (signed PUT)
+//   GET  /v1/files/download?book=<key>          -> { url }  (signed GET), 404 if not stored
+//   A pushed delete of a `book` item also deletes that book's stored file.
 //
 // Every /v1 request needs `Authorization: Bearer <Firebase ID token>`.
 //
@@ -12,18 +15,20 @@
 //   PORT              set by Cloud Run (default 8080)
 //   ALLOWED_ORIGINS   comma-separated CORS origins (defaults cover the Tauri app and local dev)
 //   SYNC_STORE=memory in-memory store + dev tokens ("dev:<uid>"), for local runs and tests only
+//   BOOKS_BUCKET      Cloud Storage bucket for book files (default <project>-books)
 //   GOOGLE_CLOUD_PROJECT / credentials: picked up automatically on Cloud Run
 
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { MemoryStore, FirestoreStore } from './store.mjs';
+import { MemoryFiles, GcsFiles } from './files.mjs';
 
 const MAX_BODY = 4 * 1024 * 1024;      // 4 MB per request (the app also splits pushes by size)
 const MAX_ITEMS = 200;                 // per push; keeps a Firestore transaction well under 500 writes
 const MAX_DATA = 64 * 1024;            // per item, serialised (a busy journal day is the biggest)
 const PULL_LIMIT = 500;
 const BOOK_LIMIT = 5000;
-const KINDS = new Set(['highlight', 'bookmark', 'vocab', 'progress', 'journal', 'reflection']);
+const KINDS = new Set(['book', 'highlight', 'bookmark', 'vocab', 'progress', 'journal', 'reflection']);
 const ID_RE = /^[a-f0-9]{64}$/;        // client sends sha256(kind|book|key) so ids are path-safe
 const MAX_KEY = 1000;                  // the item's name within its book: cfi, word, day…
 
@@ -85,11 +90,12 @@ function send(res, status, body) {
 }
 
 /**
- * @param {{ store: { pull: Function, push: Function },
+ * @param {{ store: { pull: Function, push: Function, forBook: Function },
+ *           files: MemoryFiles | GcsFiles,
  *           verifyToken: (token: string) => Promise<string>,
  *           allowedOrigins?: string[] }} deps
  */
-export function createApp({ store, verifyToken, allowedOrigins = DEFAULT_ORIGINS }) {
+export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_ORIGINS }) {
   const origins = new Set(allowedOrigins);
 
   return async function handle(req, res) {
@@ -106,7 +112,9 @@ export function createApp({ store, verifyToken, allowedOrigins = DEFAULT_ORIGINS
     const url = new URL(req.url, 'http://local');
     try {
       if (url.pathname === '/health') return send(res, 200, { ok: true });
-      if (url.pathname !== '/v1/sync' && url.pathname !== '/v1/items') throw new HttpError(404, 'not found');
+      if (files.handle && await files.handle(req, res, url)) return;
+      const routes = ['/v1/sync', '/v1/items', '/v1/files/upload', '/v1/files/download'];
+      if (!routes.includes(url.pathname)) throw new HttpError(404, 'not found');
 
       const auth = req.headers.authorization || '';
       const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
@@ -115,6 +123,22 @@ export function createApp({ store, verifyToken, allowedOrigins = DEFAULT_ORIGINS
       try { uid = await verifyToken(token); }
       catch { throw new HttpError(401, 'invalid or expired token'); }
 
+      if (url.pathname === '/v1/files/upload') {
+        if (req.method !== 'POST') throw new HttpError(405, 'method not allowed');
+        const { book, contentType } = await readJson(req);
+        if (typeof book !== 'string' || !book || book.length > 600) throw new HttpError(400, 'book: expected a content key');
+        const type = typeof contentType === 'string' && contentType.length < 100 ? contentType : 'application/octet-stream';
+        if (await files.exists(uid, book)) return send(res, 200, { exists: true });
+        return send(res, 200, { exists: false, url: await files.uploadUrl(uid, book, type), contentType: type });
+      }
+      if (url.pathname === '/v1/files/download') {
+        if (req.method !== 'GET') throw new HttpError(405, 'method not allowed');
+        const book = url.searchParams.get('book') || '';
+        if (!book || book.length > 600) throw new HttpError(400, 'book: expected a content key');
+        const signed = await files.downloadUrl(uid, book);
+        if (!signed) throw new HttpError(404, 'no stored file for this book');
+        return send(res, 200, { url: signed });
+      }
       if (url.pathname === '/v1/items') {
         if (req.method !== 'GET') throw new HttpError(405, 'method not allowed');
         const book = url.searchParams.get('book') || '';
@@ -128,7 +152,11 @@ export function createApp({ store, verifyToken, allowedOrigins = DEFAULT_ORIGINS
       }
       if (req.method === 'POST') {
         const items = validateItems(await readJson(req));
-        return send(res, 200, await store.push(uid, items));
+        const result = await store.push(uid, items);
+        // A book removed everywhere: its file goes too (its notes stay, for a re-import).
+        const removed = items.filter((i, n) => i.kind === 'book' && i.deleted && result.results[n]?.status === 'ok');
+        await Promise.all(removed.map(i => files.remove(uid, i.key).catch(err => console.error('file delete failed', err))));
+        return send(res, 200, result);
       }
       throw new HttpError(405, 'method not allowed');
     } catch (err) {
@@ -144,6 +172,7 @@ async function productionDeps() {
     console.warn('SYNC_STORE=memory: data is lost on restart and "dev:<uid>" tokens are accepted. Never use this on Cloud Run.');
     return {
       store: new MemoryStore(),
+      files: new MemoryFiles(),
       verifyToken: async token => {
         if (!token.startsWith('dev:') || token.length < 5) throw new Error('bad dev token');
         return token.slice(4);
@@ -153,10 +182,13 @@ async function productionDeps() {
   const { initializeApp } = await import('firebase-admin/app');
   const { getAuth } = await import('firebase-admin/auth');
   const { getFirestore } = await import('firebase-admin/firestore');
+  const { getStorage } = await import('firebase-admin/storage');
   const app = initializeApp();
   const auth = getAuth(app);
+  const project = process.env.GOOGLE_CLOUD_PROJECT || app.options.projectId || '';
   return {
     store: new FirestoreStore(getFirestore(app)),
+    files: new GcsFiles(getStorage(app).bucket(process.env.BOOKS_BUCKET || `${project}-books`)),
     verifyToken: async token => (await auth.verifyIdToken(token)).uid,
   };
 }
@@ -167,5 +199,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const extra = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
   const handle = createApp({ ...deps, allowedOrigins: [...DEFAULT_ORIGINS, ...extra] });
   const port = Number(process.env.PORT) || 8080;
+  if (deps.files instanceof MemoryFiles) deps.files.base = `http://localhost:${port}`;
   http.createServer(handle).listen(port, () => console.log(`Read sync service on :${port}`));
 }

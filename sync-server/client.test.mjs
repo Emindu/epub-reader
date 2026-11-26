@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createApp } from './server.mjs';
 import { MemoryStore } from './store.mjs';
+import { MemoryFiles } from './files.mjs';
 import { Sync, GLOBAL } from '../src/sync.ts';
 
 class LS { constructor() { this.m = new Map(); } getItem(k) { return this.m.has(k) ? this.m.get(k) : null; } setItem(k, v) { this.m.set(k, String(v)); } removeItem(k) { this.m.delete(k); } }
@@ -14,9 +15,11 @@ globalThis.document = { addEventListener() {}, visibilityState: 'visible' };
 
 let server, base;
 before(async () => {
-  server = http.createServer(createApp({ store: new MemoryStore(), verifyToken: async t => { if (!t.startsWith('dev:')) throw new Error('bad'); return t.slice(4); } }));
+  const files = new MemoryFiles();
+  server = http.createServer(createApp({ store: new MemoryStore(), files, verifyToken: async t => { if (!t.startsWith('dev:')) throw new Error('bad'); return t.slice(4); } }));
   await new Promise(r => server.listen(0, r));
   base = `http://127.0.0.1:${server.address().port}`;
+  files.base = base;
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
     if (String(url).includes('identitytoolkit')) {
@@ -34,13 +37,16 @@ const name = (kind, book, key) => `${kind}|${book}|${key}`;
 /** A device whose storage is one map of items; journal entries for its own device id are ignored on apply, like the app. */
 function device(label, books) {
   const ls = new LS();
-  const d = { label, ls, books, items: new Map(), applied: 0 };
+  const d = { label, ls, books, items: new Map(), files: new Map(), applied: 0 };
   globalThis.localStorage = ls;
+  // Like the app: a book is here if it was imported (d.books) or its library entry synced in.
+  const here = () => [...new Set([...d.books, ...[...d.items.keys()].filter(n => n.startsWith(`book|${GLOBAL}|`)).map(n => n.split('|').slice(2).join('|'))])];
   d.sync = new Sync({ serviceUrl: base, apiKey: 'k' }, {
-    books: () => d.books,
+    books: here,
+    fileFor: async key => d.files.get(key) ?? null,
     items: () => [...d.items.entries()]
       .map(([n, data]) => { const [kind, book, ...rest] = n.split('|'); return { kind, book, key: rest.join('|'), data: structuredClone(data) }; })
-      .filter(i => i.book === GLOBAL || d.books.includes(i.book)),
+      .filter(i => i.book === GLOBAL || here().includes(i.book)),
     apply: changes => {
       d.applied++;
       for (const c of changes) {
@@ -184,4 +190,32 @@ test('large pushes are split into batches the server accepts', async () => {
   await phone.run(s => s.signIn('four@x.com', 'pw', false));
   assert.equal(phone.keys('vocab', D).length, 450);
   assert.equal([...phone.items.keys()].filter(k => k.startsWith('journal|')).length, 30);
+});
+
+test('library: a book added on one device appears on the other with its notes, downloads, and removal is everywhere', async () => {
+  const K = 'sha256:libbook';
+  const mac = device('mac', []);
+  mac.set('book', GLOBAL, K, { title: 'Dune', author: 'Herbert', format: 'epub' });
+  mac.files.set(K, new TextEncoder().encode('DUNE-EPUB-BYTES'));
+  mac.set('highlight', K, '/4/2', { cfi: '/4/2', color: 'yellow' });
+  mac.set('progress', K, '', { lastCfi: 'c', progress: 0.5, finishedAt: null });
+  await mac.run(s => s.signIn('lib@x.com', 'pw', true));        // pushes the entry and uploads the file
+
+  const phone = device('phone', []);
+  await phone.run(s => s.signIn('lib@x.com', 'pw', false));
+  assert.equal(phone.get('book', GLOBAL, K).title, 'Dune');
+  // Notes and progress arrive in the same syncNow (follow-up run for the new book).
+  assert.deepEqual(phone.keys('highlight', K), ['/4/2']);
+  assert.equal(phone.get('progress', K, '').progress, 0.5);
+  // First open: the file downloads intact.
+  globalThis.localStorage = phone.ls;
+  assert.equal(new TextDecoder().decode(await phone.sync.downloadFile(K)), 'DUNE-EPUB-BYTES');
+
+  // Removing it on the phone removes it on the Mac, and the cloud file is deleted.
+  for (const k of [...phone.items.keys()]) if (k.includes(K)) phone.items.delete(k);
+  await phone.run(s => s.syncNow());
+  await mac.run(s => s.syncNow());
+  assert.equal(mac.get('book', GLOBAL, K), undefined);
+  globalThis.localStorage = mac.ls;
+  await assert.rejects(mac.sync.downloadFile(K), /no stored file/);
 });

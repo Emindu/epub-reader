@@ -27,8 +27,9 @@
    constructor parameter properties): sync-server/client.test.mjs runs it in Node. */
 
 export const GLOBAL = '*';
-/** Kinds whose disappearance means "deleted here". */
-const DELETABLE = new Set(['highlight', 'bookmark', 'vocab']);
+/** Kinds whose disappearance means "deleted here". A `book` item (book: GLOBAL,
+    key: its contentKey) disappearing means the book was removed from the library. */
+const DELETABLE = new Set(['book', 'highlight', 'bookmark', 'vocab']);
 
 export type SyncData = Record<string, unknown>;
 export interface SyncItem { kind: string; book: string; key: string; data: SyncData }
@@ -44,6 +45,8 @@ export interface SyncHost {
   apply(changes: SyncChange[]): void;
   /** Status line changed (signed in/out, syncing, error). */
   onStatus(): void;
+  /** The stored file for a library item, to upload; null when this device doesn't have it. */
+  fileFor?(key: string): Promise<Uint8Array | null>;
 }
 
 export interface SyncConfig { serviceUrl: string; apiKey: string }
@@ -70,6 +73,8 @@ interface State {
   seen: Record<string, [string, number]>;
   /** Book keys present at the last sync; a new key means "fetch its items". */
   books: string[];
+  /** Book files known to be in the cloud. */
+  uploaded?: string[];
   lastSyncAt: number;
   lastError: string;
 }
@@ -402,6 +407,34 @@ export class Sync {
       bytes += size;
     }
     await flush();
+
+    // 6. Upload book files the cloud doesn't have yet (once each; most are already there).
+    const uploaded = new Set(s.uploaded ?? []);
+    for (const it of local.values()) {
+      if (it.kind !== 'book' || uploaded.has(it.key) || !this.host.fileFor) continue;
+      const { exists, url, contentType } = await this.api('/v1/files/upload', { book: it.key, contentType: 'application/octet-stream' });
+      if (!exists) {
+        const bytes = await this.host.fileFor(it.key);
+        if (!bytes) continue;                // not on this device either: another device will upload it
+        const res = await fetch(url, { method: 'PUT', headers: { 'Content-Type': contentType }, body: bytes as BufferSource });
+        if (!res.ok) throw new Error(`Upload of a book failed (HTTP ${res.status})`);
+      }
+      uploaded.add(it.key);
+    }
+    for (const key of uploaded) if (!local.has(await itemId('book', GLOBAL, key))) uploaded.delete(key);
+    s.uploaded = [...uploaded];
+
+    // Books that just arrived from other devices: sync again at once to bring in their notes and progress.
+    if (this.host.books().some(b => !present.has(b))) this.again = true;
+  }
+
+  /** Download a library item's file from the cloud (first open of a book added on another device). */
+  async downloadFile(key: string): Promise<Uint8Array> {
+    if (!this.auth) throw new Error('Sign in (Settings → Sync) to download this book');
+    const { url } = await this.api(`/v1/files/download?book=${encodeURIComponent(key)}`);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Download failed (HTTP ${res.status})`);
+    return new Uint8Array(await res.arrayBuffer());
   }
 
   /** Hand remote items to the app and record them as agreed. Synchronous, so the app's

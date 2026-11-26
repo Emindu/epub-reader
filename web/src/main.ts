@@ -69,6 +69,7 @@ interface BookRecord {
   author: string;
   identifier?: string;             // EPUB dc:identifier — stable across renames/moves
   contentKey?: string;             // same on every device (see contentKey.ts); filled in by backfillContentKeys for older records
+  cloudOnly?: boolean;             // synced from another device; the file downloads on first open
   filePath: string;                // original file name (or article URL) — display + dedupe
   fileSize?: number;               // bytes of the imported file, used with filePath to dedupe
   storedRelPath?: string;          // key of our own copy in browser storage (see platform/storage)
@@ -1184,6 +1185,14 @@ function renderBookCard(book: BookRecord): HTMLElement {
     cover.appendChild(by);
   }
 
+  if (book.cloudOnly) {
+    const cloud = document.createElement('span');
+    cloud.className = 'book-cloud';
+    cloud.title = 'In your cloud library — downloads when you open it';
+    cloud.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 1 0 5 14.5 3.5 3.5 0 0 0 6.5 19z"/><path d="M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>';
+    cover.appendChild(cloud);
+  }
+
   if (book.progress > 0) {
     const ring = document.createElement('div');
     ring.className = 'book-progress-ring';
@@ -1266,7 +1275,7 @@ function refreshReadButton(): void {
   el.markReadBtn.title = done ? 'Marked as read — click to mark unread' : 'Mark as read';
 }
 
-function removeBook(id: string) {
+function removeBook(id: string, quiet = false) {
   const rec = library.find(b => b.id === id);
   library = library.filter(b => b.id !== id);
   localStorage.removeItem(KEY_MARKS(id));
@@ -1283,7 +1292,8 @@ function removeBook(id: string) {
   // behind in browser storage.
   piperCacheDeleteBook(id)
     .catch(err => console.warn(`removeBook: cache cleanup failed: ${err}`));
-  toast('Removed from library');
+  if (!quiet) toast('Removed from library');
+  if (rec?.contentKey) sync?.noteChanged(4000);
 }
 
 /* ============================================================
@@ -1307,7 +1317,27 @@ function bookStorageKey(id: string, fmt: BookFormat): string {
   return `books/${id}.${fmt}`;
 }
 
+/** First open of a book added on another device: fetch it from the cloud and keep a copy here. */
+async function downloadCloudBook(record: BookRecord): Promise<Uint8Array> {
+  if (!sync || !record.contentKey) throw new Error('Sync is not set up on this device');
+  toast(`Downloading "${record.title}"…`);
+  const bytes = await sync.downloadFile(record.contentKey);
+  // Books are keyed by their hash: refuse a file that isn't the one we expect.
+  if (record.contentKey.startsWith('sha256:') && await sha256Key(bytes) !== record.contentKey) {
+    throw new Error('The downloaded file doesn\'t match this book');
+  }
+  const key = bookStorageKey(record.id, record.format || getBookFormat(record.filePath));
+  await blobPut(key, bytes);
+  record.storedRelPath = key;
+  record.fileSize = bytes.byteLength;
+  delete record.cloudOnly;
+  persistLibrary();
+  renderLibrary();
+  return bytes;
+}
+
 async function readBookBytes(record: BookRecord): Promise<Uint8Array> {
+  if (record.cloudOnly) return downloadCloudBook(record);
   if (record.storedRelPath) {
     const bytes = await blobGet(record.storedRelPath);
     if (bytes && bytes.byteLength > 0) return bytes;
@@ -1356,6 +1386,14 @@ async function importBook() {
     const contentKey = await sha256Key(fileData);
     // The exact same file is already in the library (any format): open that copy.
     const existingByContent = library.find(b => b.contentKey === contentKey);
+    if (existingByContent?.cloudOnly) {
+      // Synced from another device but not downloaded: this file is it.
+      const key = bookStorageKey(existingByContent.id, existingByContent.format || format);
+      await blobPut(key, fileData);
+      existingByContent.storedRelPath = key;
+      existingByContent.fileSize = file.size;
+      delete existingByContent.cloudOnly;
+    }
     if (existingByContent) {
       if (existingByContent.filePath !== filePath) {
         existingByContent.filePath = filePath;
@@ -1457,6 +1495,7 @@ async function importBook() {
     };
     library.push(record);
     persistLibrary();
+    sync?.noteChanged(4000);
 
     openFromLibrary(record);
   } catch (err) {
@@ -1601,6 +1640,7 @@ async function saveArticleFromUrl(rawUrl: string) {
 
     library.push(record);
     persistLibrary();
+    sync?.noteChanged(4000);
 
     setUrlImportBusy(false);
     el.urlImportModal.hidden = true;
@@ -1667,6 +1707,10 @@ async function openFromLibrary(record: BookRecord) {
     return;
   } catch (err) {
     console.error('First open attempt failed:', err);
+    if (record.cloudOnly) {
+      toast(`Couldn't download "${record.title}": ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
   }
 
   // Nothing worked. Offer to re-locate the file rather than making the user
@@ -4305,6 +4349,7 @@ async function epubSectionsFrom(bytes: Uint8Array): Promise<{ label: string; tex
 }
 
 async function readExcerptFor(rec: BookRecord, b: { sections: string[]; startProgress: number; endProgress: number }): Promise<{ label: string; text: string } | null> {
+  if (rec.cloudOnly) return null;            // not downloaded here: don't fetch a whole book for an excerpt
   const bytes = await readBookBytes(rec);
   const fmt = rec.format || getBookFormat(rec);
   const lo = Math.min(b.startProgress, b.endProgress);
@@ -9008,6 +9053,11 @@ function syncItems(): SyncItem[] {
   const keyOf = new Map(syncedBooks().map(b => [b.id, b.contentKey!]));
   for (const r of syncedBooks()) {
     const book = r.contentKey!;
+    // The library entry itself; small covers ride along so the book looks right before it's downloaded.
+    out.push({ kind: 'book', book: GLOBAL, key: book, data: {
+      title: r.title, author: r.author || '', format: r.format || getBookFormat(r.filePath), sourceUrl: r.sourceUrl ?? null,
+      addedAt: r.addedAt, cover: r.coverDataUrl && r.coverDataUrl.length < 40_000 ? r.coverDataUrl : null,
+    } });
     const marks = load<BookMarks>(KEY_MARKS(r.id), { bookmarks: [], highlights: [] });
     for (const h of marks.highlights) out.push({ kind: 'highlight', book, key: h.cfi, data: { ...h } });
     for (const b of marks.bookmarks) out.push({ kind: 'bookmark', book, key: b.cfi, data: { ...b } });
@@ -9036,6 +9086,33 @@ function applySyncChanges(changes: SyncChange[]): void {
   const vocab = new Map<string, VocabJournal>();
   let libraryChanged = false, journalChanged = false, remoteChanged = false;
   for (const c of changes) {
+    if (c.kind === 'book') {
+      const existing = library.find(b => b.contentKey === c.key);
+      if (!c.data) {
+        // Removed on another device: remove here too (its notes stay in the cloud).
+        if (existing) {
+          if (currentBookRecord?.id === existing.id) goToScreen('library');
+          removeBook(existing.id, true);
+          byKey.delete(c.key);
+          libraryChanged = true;
+        }
+      } else if (!existing) {
+        const d = c.data;
+        const id = safeUuid();
+        const rec: BookRecord = {
+          id, contentKey: c.key, cloudOnly: true,
+          title: String(d.title || 'Untitled'), author: String(d.author || ''),
+          format: d.format as BookFormat, sourceUrl: (d.sourceUrl as string | null) ?? undefined,
+          filePath: (d.sourceUrl as string | null) ?? `cloud:${c.key}`,
+          coverDataUrl: (d.cover as string | null) ?? null,
+          lastCfi: null, progress: 0, addedAt: Number(d.addedAt) || Date.now(), updatedAt: Date.now(),
+        };
+        library.push(rec);
+        byKey.set(c.key, rec);
+        libraryChanged = true;
+      }
+      continue;
+    }
     if (c.book === GLOBAL) {
       if (c.kind === 'reflection') {
         const d = (journal[c.key] ||= { books: {}, reflection: '' });
@@ -9112,6 +9189,10 @@ sync = (import.meta.env.VITE_SYNC_URL && import.meta.env.VITE_FIREBASE_API_KEY)
       {
         books: () => syncedBooks().map(b => b.contentKey!),
         items: syncItems,
+        fileFor: async key => {
+          const rec = library.find(b => b.contentKey === key && !b.cloudOnly && b.storedRelPath);
+          return rec ? blobGet(rec.storedRelPath!) : null;
+        },
         apply: applySyncChanges,
         onStatus: renderSyncSettings,
       },

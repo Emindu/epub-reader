@@ -6,16 +6,20 @@ import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { createApp } from './server.mjs';
 import { MemoryStore } from './store.mjs';
+import { MemoryFiles } from './files.mjs';
 
 let server, base;
+const files = new MemoryFiles();
 before(async () => {
   const handle = createApp({
     store: new MemoryStore(),
+    files,
     verifyToken: async t => { if (!t.startsWith('dev:')) throw new Error('bad'); return t.slice(4); },
   });
   server = http.createServer(handle);
   await new Promise(r => server.listen(0, r));
   base = `http://127.0.0.1:${server.address().port}`;
+  files.base = base;
 });
 after(() => server.close());
 
@@ -153,4 +157,26 @@ test('CORS: allowed origins get headers and preflight works; others get none', a
 
   const evil = await call('GET', '/health', { origin: 'https://evil.example' });
   assert.equal(evil.headers.get('access-control-allow-origin'), null);
+});
+
+test('book files: upload once via a signed URL, download, and delete with the book', async () => {
+  const book = 'sha256:file';
+  const up = await call('POST', '/v1/files/upload', { user: 'f', body: { book, contentType: 'application/epub+zip' } });
+  assert.equal(up.status, 200);
+  assert.equal(up.json.exists, false);
+  const put = await fetch(up.json.url, { method: 'PUT', headers: { 'Content-Type': up.json.contentType }, body: 'EPUB-BYTES' });
+  assert.equal(put.status, 200);
+
+  assert.equal((await call('POST', '/v1/files/upload', { user: 'f', body: { book } })).json.exists, true);
+  assert.equal((await call('GET', '/v1/files/download?book=' + encodeURIComponent(book), { user: 'other' })).status, 404, 'per user');
+
+  const down = await call('GET', '/v1/files/download?book=' + encodeURIComponent(book), { user: 'f' });
+  assert.equal(await (await fetch(down.json.url)).text(), 'EPUB-BYTES');
+
+  // Removing the book everywhere (a pushed delete of its `book` item) deletes the file.
+  const id = idFor('book', '*', book);
+  await call('POST', '/v1/sync', { user: 'f', body: { items: [{ id, kind: 'book', book: '*', key: book, updatedAt: 1, data: { title: 'T' } }] } });
+  await call('POST', '/v1/sync', { user: 'f', body: { items: [{ id, kind: 'book', book: '*', key: book, updatedAt: 2, deleted: true }] } });
+  assert.equal((await call('GET', '/v1/files/download?book=' + encodeURIComponent(book), { user: 'f' })).status, 404);
+  assert.equal((await call('POST', '/v1/files/upload', { user: 'f', body: {} })).status, 400);
 });

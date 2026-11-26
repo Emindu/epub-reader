@@ -3088,6 +3088,16 @@ html[data-appearance="dark"] .format-tab.active { box-shadow: inset 0 0 0 1px va
   opacity: 1;
   backdrop-filter: none;
 }
+.book-cloud {
+  position: absolute;
+  left: 8px; bottom: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #18181B;
+  pointer-events: none;
+}
 .book-remove {
   position: absolute;
   top: 8px; left: 8px;

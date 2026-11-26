@@ -3929,6 +3929,16 @@ html[data-appearance="dark"] .text-reader-container {
   letter-spacing: 0.02em;
 }
 .book-card.is-finished .book-progress-ring { display: none; }
+.book-cloud {
+  position: absolute;
+  left: 8px; bottom: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #18181B;
+  pointer-events: none;
+}
 .book-card.is-finished .book-cover { opacity: 0.88; }
 .book-card.is-finished .book-progress-bar span { background: var(--accent); }
 

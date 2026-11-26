@@ -1,7 +1,9 @@
 # Read sync service
 
-Stores each user's highlights, bookmarks, vocabulary cards, reading progress
-and reading journal so every device sees the same notes. Runs on Cloud Run, keeps data in Firestore, and signs users in with
+Stores each user's library (entries and book files), highlights, bookmarks,
+vocabulary cards, reading progress and reading journal so every device sees the
+same library and notes. Book files live in a private Cloud Storage bucket; the
+service hands out 15-minute signed URLs to upload or download one file. Runs on Cloud Run, keeps data in Firestore, and signs users in with
 Firebase Auth.
 
 ```
@@ -29,6 +31,9 @@ Every `/v1` request needs `Authorization: Bearer <Firebase ID token>`.
 - Deletes are kept as markers (`deleted: true`) so they reach other devices.
 
 Data layout: `users/{uid}` holds `{ seq }`, and `users/{uid}/items/{id}` holds the items.
+Book files: `gs://<project>-books/users/{uid}/books/{sha256(contentKey)}` (env `BOOKS_BUCKET`).
+A `book` item (`book: '*'`, `key: contentKey`) is a library entry; pushing its delete
+removes the book on every device and deletes the stored file.
 
 ## Run locally
 
@@ -65,6 +70,18 @@ npm run dev     # :8080, in-memory store; use "Bearer dev:<any-uid>" as the toke
    service; the service itself rejects anything without a valid Firebase token.
    The default compute service account already has Firestore access in the same project.
 7. Check it: `curl https://<service-url>/health` should print `{"ok":true}`.
+8. Book files (library sync):
+   ```bash
+   gcloud services enable storage.googleapis.com iamcredentials.googleapis.com
+   gcloud storage buckets create gs://YOUR_PROJECT_ID-books --location=asia-south1 \
+     --uniform-bucket-level-access --public-access-prevention
+   gcloud storage buckets update gs://YOUR_PROJECT_ID-books --cors-file=cors.json   # app origins, GET/PUT/HEAD
+   SA=PROJECT_NUMBER-compute@developer.gserviceaccount.com
+   gcloud storage buckets add-iam-policy-binding gs://YOUR_PROJECT_ID-books --member=serviceAccount:$SA --role=roles/storage.objectAdmin
+   # lets the service sign URLs with its own identity (no key file)
+   gcloud iam service-accounts add-iam-policy-binding $SA --member=serviceAccount:$SA --role=roles/iam.serviceAccountTokenCreator
+   gcloud run services update read-sync --region=asia-south1 --update-env-vars=BOOKS_BUCKET=YOUR_PROJECT_ID-books
+   ```
 
 To allow another web origin (e.g. a hosted copy of the web app), add
 `--set-env-vars=ALLOWED_ORIGINS=https://read.example.com`.
