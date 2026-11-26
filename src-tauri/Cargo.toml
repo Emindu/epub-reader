@@ -41,6 +41,15 @@ llama-cpp-2 = { version = "0.1.161", default-features = false, features = ["meta
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
 
+# OS keychain for the "bring your own key" cloud AI feature. Other platforms
+# fall back to a stub that reports "unsupported" (the app then keeps the key in
+# localStorage).
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
 [features]
 embedded-llm = ["dep:llama-cpp-2"]
 

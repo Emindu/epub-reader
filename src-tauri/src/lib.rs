@@ -1355,6 +1355,49 @@ fn host_arch() -> &'static str {
     std::env::consts::ARCH
 }
 
+// ---- Bring-your-own-key storage (OS keychain) ---------------------------
+// The API key never touches localStorage on desktop: it lives in Windows
+// Credential Manager / macOS Keychain under service "com.read.app".
+#[cfg(any(windows, target_os = "macos"))]
+fn byok_entry(provider: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new("com.read.app", &format!("byok:{provider}")).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn byok_key_get(provider: String) -> Result<String, String> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        match byok_entry(&provider)?.get_password() {
+            Ok(k) => Ok(k),
+            Err(keyring::Error::NoEntry) => Ok(String::new()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    { let _ = provider; Err("unsupported".into()) }
+}
+
+#[tauri::command]
+fn byok_key_set(provider: String, key: String) -> Result<(), String> {
+    #[cfg(any(windows, target_os = "macos"))]
+    { byok_entry(&provider)?.set_password(&key).map_err(|e| e.to_string()) }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    { let _ = (provider, key); Err("unsupported".into()) }
+}
+
+#[tauri::command]
+fn byok_key_delete(provider: String) -> Result<(), String> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        match byok_entry(&provider)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    { let _ = provider; Err("unsupported".into()) }
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -1374,6 +1417,9 @@ pub fn run() {
             take_opened_files,
             fetch_url_html,
             fetch_feed_xml,
+            byok_key_get,
+            byok_key_set,
+            byok_key_delete,
             piper_status,
             piper_synthesize,
             piper_extract_downloaded_archive,
