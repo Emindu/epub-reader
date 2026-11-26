@@ -4464,6 +4464,12 @@ html[data-profile="article"] .text-reader-container img { border-radius: 6px; }
 .tts-time-left { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--text-muted); white-space: nowrap; padding: 0 4px; }
 .tts-time-left:empty { display: none; }
 .tts-panel .tts-tune { right: 16px; }
+/* When Contents / Typography are docked the text moves over; the bar follows it
+   instead of sitting centred under the drawer. */
+@media (min-width: 1180px) {
+  html:not([data-layout="minimal"])[data-drawer="toc"] .tts-panel { left: 386px; }
+  html:not([data-layout="minimal"])[data-drawer="typography"] .tts-panel { right: 414px; }
+}
 @media (max-width: 760px) {
   .tts-panel { padding: 12px 12px 10px; }
   .tts-time-left { display: none; }
@@ -4562,7 +4568,8 @@ html[data-profile="article"] .text-reader-container img { border-radius: 6px; }
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
   }
-  .focus-panel { bottom: calc(90px + env(safe-area-inset-bottom)); }
+  .focus-panel:not(.tts-panel) { bottom: calc(90px + env(safe-area-inset-bottom)); }
+  .tts-panel { bottom: env(safe-area-inset-bottom); }
 }
 /* Phones: a 340px drawer would cover the whole screen. */
 @media (max-width: 420px) {
