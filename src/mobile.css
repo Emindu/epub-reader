@@ -613,10 +613,12 @@ html[data-device="phone"] #focus-panel { bottom: calc(var(--m-safe-bottom) + 16p
 
 /* --------------------------------------------------- Review (flashcards) */
 html[data-device="phone"] #vocab-review-modal .modal-container,
-html[data-device="phone"] #chat-modal .modal-container {
+html[data-device="phone"] #chat-modal .modal-container,
+html[data-device="phone"] #journal-modal .modal-container {
   height: calc(100% - var(--m-safe-top) - 10px);
   display: flex; flex-direction: column;
 }
+html[data-device="phone"] #journal-modal .journal-tiles { grid-template-columns: repeat(2, 1fr); }
 html[data-device="phone"] #vocab-review-modal .modal-header-left h3 {
   font-family: var(--font-serif); font-size: 28px; font-weight: 500; letter-spacing: -0.4px;
 }

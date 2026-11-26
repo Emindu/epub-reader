@@ -7238,9 +7238,16 @@ function wirePhone(): void {
       case 'review': el.libraryVocabReviewBtn.click(); break;
       case 'settings': el.librarySettingsBtn.click(); break;
       case 'stats': {
+        // Streak card, then the desktop sidebar's reading pages (the sidebar is hidden on phones).
         const streak = document.querySelector<HTMLElement>('.sidebar-streak')?.cloneNode(true) as HTMLElement | undefined;
         streak?.classList.add('m-stats');
-        openMSheet('Reading stats', [], streak);
+        const nav = (kind: string) => () =>
+          document.querySelector<HTMLButtonElement>(`.sidebar-nav-item[data-library-nav="${kind}"]`)?.click();
+        openMSheet('Your reading', [
+          { label: 'Journal', detail: 'What you read each day', action: () => el.journalBtn.click() },
+          { label: 'Highlights', detail: 'Across all books', action: nav('highlights') },
+          { label: 'Bookmarks', detail: 'Across all books', action: nav('bookmarks') },
+        ], streak);
         break;
       }
     }
