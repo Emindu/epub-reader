@@ -12,7 +12,7 @@ import {
   dayKey, shiftDay, dayRange, formatDayLong, formatDuration, recordReading, weekStrip,
   progressText, summaryMarkdown, exportMarkdown, reflectionPrompt, DayExcerpt, capWords, sliceByProgress,
   KEY_JOURNAL_TEXT, ReadTextStore, addReadText, pruneReadText, readBookWords,
-  ReadTextChunk, readTextChunks, mergeReadText, parseReadTextKey,
+  ReadTextChunk, readTextChunks, mergeReadText, parseReadTextKey, LegacyReadChunk, convertLegacyReadChunk,
 } from './platform/journal';
 import { fetchArticleHtml } from './platform/article';
 import { piperStored, piperDownload, piperRemove, piperSynthesize, piperCacheLookup, piperCacheDeleteBook, piperBatchSynthesize, type CachedChapter } from './platform/piper';
@@ -186,7 +186,7 @@ const save = (k: string, v: unknown) => {
   // Notes and words go out within seconds; progress and journal time change
   // constantly while reading, so they ride along at most every half minute.
   if (k.startsWith('read.marks.') || (k.startsWith('read.vocab.') && k !== KEY_VOCAB_STATS)) sync.noteChanged(4000);
-  else if (k === KEY_LIBRARY || k === KEY_JOURNAL) sync.noteChanged(30000);
+  else if (k === KEY_LIBRARY || k === KEY_JOURNAL || k === KEY_JOURNAL_TEXT) sync.noteChanged(30000);
 };
 
 
@@ -9168,7 +9168,12 @@ function applySyncChanges(changes: SyncChange[]): void {
         if (ai) d.aiReflection = ai; else delete d.aiReflection;
         journalChanged = true;
       } else if (c.kind === 'readtext' && parseReadTextKey(c.key).device !== sync!.deviceId) {
-        if (c.data) readTextRemote[c.key] = c.data as unknown as ReadTextChunk; else delete readTextRemote[c.key];
+        if (c.data && 'books' in c.data) {
+          // An early format (several books per chunk): store it as per-book chunks. The
+          // original then disappears from this device, so sync retires it from the cloud.
+          for (const x of convertLegacyReadChunk(c.key, c.data as unknown as LegacyReadChunk)) readTextRemote[x.key] = x.chunk;
+        } else if (c.data) readTextRemote[c.key] = c.data as unknown as ReadTextChunk;
+        else delete readTextRemote[c.key];
         textChanged = true;
       } else if (c.kind === 'journal' && !c.key.endsWith(`|${sync!.deviceId}`)) {
         if (c.data) journalRemote[c.key] = c.data as unknown as DeviceDay; else delete journalRemote[c.key];

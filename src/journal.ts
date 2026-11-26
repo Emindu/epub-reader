@@ -370,6 +370,32 @@ export interface ReadTextChunk { title: string; sections: ReadSection[] }
 
 export const READ_TEXT_CHUNK_CHARS = 40_000;
 
+/** Split text longer than `max` into pieces, at a space where there is one. */
+function splitLong(text: string, max: number): string[] {
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf(' ', max);
+    if (cut < max / 2) cut = max;
+    out.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/** An early sync format (key `${day}|${device}|${n}`, several books per chunk). Pieces
+    still in it are converted on arrival into this format's per-book chunks. */
+export interface LegacyReadChunk { books: Record<string, { title: string; sections: ReadSection[] }> }
+
+export function convertLegacyReadChunk(key: string, chunk: LegacyReadChunk): { key: string; chunk: ReadTextChunk }[] {
+  const [day, device, n] = key.split('|');
+  return Object.entries(chunk.books || {}).map(([book, b]) => ({
+    key: `${day}|${device}|${book}|${Number(n) || 0}`,
+    chunk: { title: b.title, sections: b.sections || [] },
+  }));
+}
+
 /** Split this device's log for one day into chunks per book, keyed by contentKey (or `title:<title>`). */
 export function readTextChunks(day: DayReadText, keyOf: (id: string) => string | undefined, max = READ_TEXT_CHUNK_CHARS): { book: string; n: number; chunk: ReadTextChunk }[] {
   const out: { book: string; n: number; chunk: ReadTextChunk }[] = [];
@@ -379,11 +405,9 @@ export function readTextChunks(day: DayReadText, keyOf: (id: string) => string |
     let size = 0, n = 0;
     const flush = () => { if (chunk.sections.length) out.push({ book, n: n++, chunk }); chunk = { title: b.title, sections: [] }; size = 0; };
     for (const sec of b.sections) {
-      for (let part of sec.parts) {
-        while (part.length) {
-          if (size >= max) flush();
-          const piece = part.slice(0, max - size);
-          part = part.slice(piece.length);
+      for (const part of sec.parts) {
+        for (const piece of splitLong(part, max)) {
+          if (size > 0 && size + piece.length > max) flush();
           const last = chunk.sections[chunk.sections.length - 1];
           if (last && last.label === sec.label) last.parts.push(piece);
           else chunk.sections.push({ label: sec.label, parts: [piece] });
@@ -417,9 +441,13 @@ export function mergeReadText(
     const id = idOf(o.book) ?? o.book;
     const target = (out[id] ||= { title: o.chunk.title, chars: 0, sections: [] });
     for (const sec of o.chunk.sections) {
-      const same = target.sections.find(x => x.label === sec.label);
-      if (same) same.parts.push(...sec.parts); else target.sections.push({ label: sec.label, parts: [...sec.parts] });
-      target.chars += sec.parts.reduce((a, p) => a + p.length + 1, 0);
+      let same = target.sections.find(x => x.label === sec.label);
+      if (!same) { same = { label: sec.label, parts: [] }; target.sections.push(same); }
+      for (const p of sec.parts) {
+        if (same.parts.some(x => x.includes(p))) continue;   // the same passage read on two devices
+        same.parts.push(p);
+        target.chars += p.length + 1;
+      }
     }
   }
   return out;
