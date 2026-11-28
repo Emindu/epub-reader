@@ -8,6 +8,10 @@
 //   POST /v1/files/upload { book, contentType } -> { exists } or { exists: false, url }  (signed PUT)
 //   GET  /v1/files/download?book=<key>          -> { url }  (signed GET), 404 if not stored
 //   A pushed delete of a `book` item also deletes that book's stored file.
+//   POST /v1/feed                               -> { token, user, path, expiresAt }  a new e-reader password (replaces the old one)
+//   GET  /v1/feed                               -> { active, expiresAt }
+//   POST /v1/feed/revoke                        -> { active: false }
+//   GET  /opds/ ...                             the library as an OPDS catalogue for KOReader, HTTP Basic auth (see opds.mjs)
 //
 // Every /v1 request needs `Authorization: Bearer <Firebase ID token>`.
 //
@@ -19,12 +23,15 @@
 //   ALLOWED_UIDS      comma-separated Firebase uids allowed to sync; empty = any signed-in account
 //   MAX_USER_BYTES    book storage per account (default 5 GiB)
 //   MAX_USER_ITEMS    live items per account (default 200000)
+//   OPDS_LINK_DAYS    how long an e-reader password lasts (default 90)
+//   OPDS_ALLOW_URL_TOKEN=1  also accept /opds/<token>/ for readers without Basic auth (off: the secret would sit in URLs and logs)
 //   GOOGLE_CLOUD_PROJECT / credentials: picked up automatically on Cloud Run
 
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { MemoryStore, FirestoreStore, QuotaError } from './store.mjs';
 import { MemoryFiles, GcsFiles } from './files.mjs';
+import { createOpds, hashToken, newFeedToken, FEED_USER } from './opds.mjs';
 
 const MAX_BODY = 4 * 1024 * 1024;      // 4 MB per request (the app also splits pushes by size)
 const MAX_ITEMS = 200;                 // per push; keeps a Firestore transaction well under 500 writes
@@ -100,8 +107,10 @@ function send(res, status, body) {
  *           allowedUids?: string[] | null,
  *           maxUserBytes?: number }} deps
  */
-export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_ORIGINS, allowedUids = null, maxUserBytes = 5 * 1024 ** 3 }) {
+export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_ORIGINS, allowedUids = null, maxUserBytes = 5 * 1024 ** 3, opds = {} }) {
   const origins = new Set(allowedOrigins);
+  const opdsHandler = createOpds(opds);
+  const linkMs = (opds.linkDays ?? 90) * 24 * 60 * 60 * 1000;
   const allowed = allowedUids?.length ? new Set(allowedUids) : null;
 
   return async function handle(req, res) {
@@ -119,7 +128,8 @@ export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_
     try {
       if (url.pathname === '/health') return send(res, 200, { ok: true });
       if (files.handle && await files.handle(req, res, url)) return;
-      const routes = ['/v1/sync', '/v1/items', '/v1/files/upload', '/v1/files/download'];
+      if (await opdsHandler(req, res, url, { store, files, allowed })) return;
+      const routes = ['/v1/sync', '/v1/items', '/v1/files/upload', '/v1/files/download', '/v1/feed', '/v1/feed/revoke'];
       if (!routes.includes(url.pathname)) throw new HttpError(404, 'not found');
 
       const auth = req.headers.authorization || '';
@@ -130,6 +140,22 @@ export function createApp({ store, files, verifyToken, allowedOrigins = DEFAULT_
       catch { throw new HttpError(401, 'invalid or expired token'); }
       if (allowed && !allowed.has(uid)) throw new HttpError(403, 'This account is not allowed to use sync');
 
+      if (url.pathname === '/v1/feed') {
+        if (req.method === 'GET') {
+          const f = await store.feedForUser(uid);
+          return send(res, 200, { active: !!f && f.expiresAt > Date.now(), expiresAt: f?.expiresAt ?? null });
+        }
+        if (req.method !== 'POST') throw new HttpError(405, 'method not allowed');
+        const token = newFeedToken();
+        const expiresAt = Date.now() + linkMs;
+        await store.setFeedToken(uid, hashToken(token), expiresAt);
+        return send(res, 200, { token, user: FEED_USER, path: '/opds/', expiresAt });
+      }
+      if (url.pathname === '/v1/feed/revoke') {
+        if (req.method !== 'POST') throw new HttpError(405, 'method not allowed');
+        await store.clearFeedToken(uid);
+        return send(res, 200, { active: false, expiresAt: null });
+      }
       if (url.pathname === '/v1/files/upload') {
         if (req.method !== 'POST') throw new HttpError(405, 'method not allowed');
         const { book, contentType } = await readJson(req);
@@ -214,6 +240,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     allowedOrigins: [...DEFAULT_ORIGINS, ...extra],
     allowedUids: list('ALLOWED_UIDS'),
     maxUserBytes: Number(process.env.MAX_USER_BYTES) || 5 * 1024 ** 3,
+    opds: { linkDays: Number(process.env.OPDS_LINK_DAYS) || 90, allowUrlToken: process.env.OPDS_ALLOW_URL_TOKEN === '1' },
   });
   const port = Number(process.env.PORT) || 8080;
   if (deps.files instanceof MemoryFiles) deps.files.base = `http://localhost:${port}`;

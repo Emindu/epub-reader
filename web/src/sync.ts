@@ -439,6 +439,22 @@ export class Sync {
     return new Uint8Array(await res.arrayBuffer());
   }
 
+  /** A new e-reader password for browsing this library in KOReader (OPDS, HTTP Basic). Replaces any earlier one. */
+  async createFeedLink(): Promise<{ url: string; user: string; password: string; expiresAt: number }> {
+    const r = await this.api('/v1/feed', {});
+    return { url: this.config.serviceUrl.replace(/\/$/, '') + r.path, user: r.user, password: r.token, expiresAt: r.expiresAt };
+  }
+
+  /** Whether an e-reader password is active, and until when (the password itself is shown only once). */
+  async feedStatus(): Promise<{ active: boolean; expiresAt: number | null }> {
+    return this.api('/v1/feed');
+  }
+
+  /** Stops the current e-reader password working. */
+  async revokeFeedLink(): Promise<void> {
+    await this.api('/v1/feed/revoke', {});
+  }
+
   /** Hand remote items to the app and record them as agreed. Synchronous, so the app's
       in-memory copies are refreshed before any other code runs. */
   private apply(s: State, present: Set<string>, items: Item[]): void {

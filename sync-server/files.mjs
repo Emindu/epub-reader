@@ -6,7 +6,10 @@
 //   downloadUrl(uid, key)         -> signed GET URL, or null when there is no file
 //   remove(uid, key)              -> deletes the file (no error if missing)
 //   usage(uid)                    -> total bytes stored for the user
+//   names(uid)                    -> Set of object names stored for the user (to see which books have a file)
+//   read(uid, key)                -> { stream, size } to pass a file through the service, or null
 import { createHash } from 'node:crypto';
+import { Readable } from 'node:stream';
 
 const URL_TTL_MS = 15 * 60 * 1000;
 
@@ -45,6 +48,19 @@ export class GcsFiles {
     const [files] = await this.bucket.getFiles({ prefix: `users/${uid}/books/` });
     return files.reduce((n, f) => n + Number(f.metadata.size || 0), 0);
   }
+
+  async read(uid, key) {
+    const file = this.bucket.file(objectName(uid, key));
+    let meta;
+    try { [meta] = await file.getMetadata(); }
+    catch (err) { if (err?.code === 404) return null; throw err; }
+    return { stream: file.createReadStream(), size: Number(meta.size) };
+  }
+
+  async names(uid) {
+    const [files] = await this.bucket.getFiles({ prefix: `users/${uid}/books/`, autoPaginate: true });
+    return new Set(files.map(f => f.name));
+  }
 }
 
 /** In-memory stand-in for tests and local runs: serves its own "signed" URLs. */
@@ -64,6 +80,11 @@ export class MemoryFiles {
     return this.files.has(name) ? this.token(name, 'read') : null;
   }
   async remove(uid, key) { this.files.delete(objectName(uid, key)); }
+  async read(uid, key) {
+    const f = this.files.get(objectName(uid, key));
+    return f ? { stream: Readable.from([f.body]), size: f.body.length } : null;
+  }
+  async names(uid) { return new Set([...this.files.keys()].filter(n => n.startsWith(`users/${uid}/`))); }
   async usage(uid) {
     let n = 0;
     for (const [name, f] of this.files) if (name.startsWith(`users/${uid}/`)) n += f.body.length;

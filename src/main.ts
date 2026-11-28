@@ -2482,8 +2482,14 @@ async function fetchArticleMarkdown(url: string): Promise<{ title: string; bylin
 
   // Capture code languages / flatten code text before Readability strips classes.
   prepareCodeForImport(doc);
-  const article = new Readability(doc).parse();
-  if (!article || !article.content || (article.textContent || '').trim().length < 200) return null;
+  // A short X post is only a sentence or two, well under Readability's idea of an
+  // article, so keep the converted page itself as the fallback for X links.
+  const xPage = isXUrl(url) ? doc.querySelector('article') : null;
+  const xFallback = xPage ? { content: xPage.innerHTML, textContent: xPage.textContent || '', title: doc.title || '', byline: doc.querySelector('meta[name="author"]')?.getAttribute('content') || '' } : null;
+  let article: { content?: string | null; textContent?: string | null; title?: string | null; byline?: string | null; siteName?: string | null } | null = new Readability(doc).parse();
+  if (xFallback && (!article || !article.content || (article.textContent || '').trim().length < 20)) article = xFallback;
+  else if (!xFallback && (!article || !article.content || (article.textContent || '').trim().length < 200)) return null;
+  if (!article || !article.content) return null;
 
   const cleanHtml = DOMPurify.sanitize(restoreHeadings(article.content), ARTICLE_PURIFY);
   const markdownBody = htmlToMarkdown(cleanHtml);
@@ -13557,9 +13563,31 @@ function syncAgo(ms: number): string {
   return new Date(ms).toLocaleDateString();
 }
 
+let feedStatusFor = '';
+function showFeedStatus(s: { active: boolean; expiresAt: number | null } | null): void {
+  $<HTMLElement>('sync-feed-status').textContent = !s ? ''
+    : s.active && s.expiresAt ? `A password is active until ${new Date(s.expiresAt).toLocaleDateString()}.`
+    : 'No e-reader password yet.';
+  $<HTMLElement>('sync-feed-revoke').hidden = !(s && s.active);
+}
+/** Asks the service once per signed-in account whether an e-reader password exists. */
+function refreshFeedStatus(email: string): void {
+  if (feedStatusFor === email || !sync) return;
+  feedStatusFor = email;
+  sync.feedStatus().then(showFeedStatus).catch(() => showFeedStatus(null));
+}
+
 function renderSyncSettings(): void {
   if (!sync) return;
   const email = sync.email;
+  if (!email) {
+    feedStatusFor = '';
+    $<HTMLElement>('sync-feed-result').hidden = true;
+    for (const id of ['sync-feed-url', 'sync-feed-user', 'sync-feed-pass']) $<HTMLInputElement>(id).value = '';
+    showFeedStatus(null);
+  } else {
+    refreshFeedStatus(email);
+  }
   $<HTMLElement>('sync-signed-out').hidden = !!email;
   $<HTMLElement>('sync-signed-in').hidden = !email;
   if (!email) return;
@@ -13610,6 +13638,45 @@ function wireSync(): void {
     }
   });
   $('sync-now').addEventListener('click', () => { void sync.syncNow(); });
+  const feedFields = ['sync-feed-url', 'sync-feed-user', 'sync-feed-pass'];
+  const clearFeedFields = () => {
+    $<HTMLElement>('sync-feed-result').hidden = true;
+    for (const id of feedFields) $<HTMLInputElement>(id).value = '';
+  };
+  const copyFeedField = async (id: string, what: string) => {
+    const field = $<HTMLInputElement>(id);
+    try { await navigator.clipboard.writeText(field.value); toast(what + ' copied'); }
+    catch { field.select(); toast('Press Ctrl+C to copy'); }
+  };
+  $('sync-feed-create').addEventListener('click', async () => {
+    const btn = $<HTMLButtonElement>('sync-feed-create');
+    btn.disabled = true;
+    try {
+      const r = await sync.createFeedLink();
+      $<HTMLInputElement>('sync-feed-url').value = r.url;
+      $<HTMLInputElement>('sync-feed-user').value = r.user;
+      $<HTMLInputElement>('sync-feed-pass').value = r.password;
+      $<HTMLElement>('sync-feed-result').hidden = false;
+      showFeedStatus({ active: true, expiresAt: r.expiresAt });
+      toast('E-reader password created. Any earlier one no longer works.');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $('sync-feed-revoke').addEventListener('click', async () => {
+    try {
+      await sync.revokeFeedLink();
+      clearFeedFields();
+      showFeedStatus({ active: false, expiresAt: null });
+      toast('E-reader password revoked');
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err));
+    }
+  });
+  $('sync-feed-copy-url').addEventListener('click', () => { void copyFeedField('sync-feed-url', 'URL'); });
+  $('sync-feed-copy-pass').addEventListener('click', () => { void copyFeedField('sync-feed-pass', 'Password'); });
   $('sync-signout').addEventListener('click', () => {
     sync.signOut();
     toast('Signed out — your notes stay on this device');

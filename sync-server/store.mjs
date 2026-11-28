@@ -3,6 +3,11 @@
 //   pull(uid, since, limit) -> { items, cursor, more }
 //   push(uid, items)        -> { cursor, results: [{ id, status, item? }] }
 //   forBook(uid, book)      -> live (not deleted) items for one book, for a device that just imported it
+//   listBooks(uid, limit)   -> live library entries (kind "book"), newest first, for the e-reader feed
+//   setFeedToken(uid, hash, expiresAt) -> makes sha256(token) the user's e-reader feed link, replacing any earlier one
+//   clearFeedToken(uid)     -> revokes the user's feed link
+//   feedForToken(hash)      -> { uid, expiresAt } for a feed link, or null
+//   feedForUser(uid)        -> { hash, expiresAt } for the user's current link, or null
 //
 // Every accepted write gets the user's next sequence number, so a client that
 // pulls `since` its last cursor sees each change exactly once, in order.
@@ -37,7 +42,7 @@ function toStored(item, seq) {
 }
 
 export class MemoryStore {
-  constructor({ maxItems = Infinity } = {}) { this.users = new Map(); this.maxItems = maxItems; }
+  constructor({ maxItems = Infinity } = {}) { this.users = new Map(); this.feeds = new Map(); this.maxItems = maxItems; }
 
   user(uid) {
     let u = this.users.get(uid);
@@ -55,6 +60,27 @@ export class MemoryStore {
   async forBook(uid, book, limit) {
     return [...this.user(uid).items.values()].filter(i => i.book === book && !i.deleted).slice(0, limit);
   }
+
+  async listBooks(uid, limit) {
+    return [...this.user(uid).items.values()].filter(i => i.kind === 'book' && !i.deleted)
+      .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+  }
+
+  async setFeedToken(uid, hash, expiresAt) {
+    const u = this.user(uid);
+    if (u.feed) this.feeds.delete(u.feed.hash);
+    u.feed = { hash, expiresAt };
+    this.feeds.set(hash, { uid, expiresAt });
+  }
+
+  async clearFeedToken(uid) {
+    const u = this.user(uid);
+    if (u.feed) this.feeds.delete(u.feed.hash);
+    u.feed = null;
+  }
+
+  async feedForToken(hash) { return this.feeds.get(hash) ?? null; }
+  async feedForUser(uid) { return this.user(uid).feed ?? null; }
 
   async push(uid, items) {
     const u = this.user(uid);
@@ -93,6 +119,44 @@ export class FirestoreStore {
     // Equality on one field uses Firestore's automatic index; deleted markers are dropped here.
     const snap = await this.userRef(uid).collection('items').where('book', '==', book).limit(limit).get();
     return snap.docs.map(d => d.data()).filter(i => !i.deleted);
+  }
+
+  async listBooks(uid, limit) {
+    // One equality filter (automatic index); deleted markers and the order are handled here.
+    const snap = await this.userRef(uid).collection('items').where('kind', '==', 'book').get();
+    return snap.docs.map(d => d.data()).filter(i => !i.deleted)
+      .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+  }
+
+  /** Feed links: feedTokens/{sha256(token)} -> { uid, expiresAt }; the user doc remembers the current one. */
+  async setFeedToken(uid, hash, expiresAt) {
+    const userRef = this.userRef(uid);
+    const old = (await userRef.get()).get('feedHash');
+    const batch = this.db.batch();
+    if (old) batch.delete(this.db.collection('feedTokens').doc(old));
+    batch.set(this.db.collection('feedTokens').doc(hash), { uid, expiresAt, createdAt: Date.now() });
+    batch.set(userRef, { feedHash: hash, feedExpiresAt: expiresAt }, { merge: true });
+    await batch.commit();
+  }
+
+  async clearFeedToken(uid) {
+    const userRef = this.userRef(uid);
+    const old = (await userRef.get()).get('feedHash');
+    const batch = this.db.batch();
+    if (old) batch.delete(this.db.collection('feedTokens').doc(old));
+    batch.set(userRef, { feedHash: null, feedExpiresAt: null }, { merge: true });
+    await batch.commit();
+  }
+
+  async feedForToken(hash) {
+    const snap = await this.db.collection('feedTokens').doc(hash).get();
+    return snap.exists && snap.get('uid') ? { uid: snap.get('uid'), expiresAt: snap.get('expiresAt') || 0 } : null;
+  }
+
+  async feedForUser(uid) {
+    const snap = await this.userRef(uid).get();
+    const hash = snap.get('feedHash');
+    return hash ? { hash, expiresAt: snap.get('feedExpiresAt') || 0 } : null;
   }
 
   async push(uid, items) {

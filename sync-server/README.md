@@ -11,6 +11,10 @@ GET  /health                      liveness probe
 GET  /v1/sync?since=<cursor>       changes after the cursor  -> { items, cursor, more }
 POST /v1/sync   { items: [...] }   upload changes            -> { cursor, results }
 GET  /v1/items?book=<contentKey>   every live item for one book -> { items }
+POST /v1/feed                      new e-reader password       -> { token, user, path, expiresAt }
+GET  /v1/feed                      is one active?              -> { active, expiresAt }
+POST /v1/feed/revoke               stop the current one        -> { active: false }
+GET  /opds/                        the library as an OPDS catalogue (KOReader), HTTP Basic auth
 ```
 
 Every `/v1` request needs `Authorization: Bearer <Firebase ID token>`.
@@ -34,6 +38,26 @@ Data layout: `users/{uid}` holds `{ seq }`, and `users/{uid}/items/{id}` holds t
 Book files: `gs://<project>-books/users/{uid}/books/{sha256(contentKey)}` (env `BOOKS_BUCKET`).
 A `book` item (`book: '*'`, `key: contentKey`) is a library entry; pushing its delete
 removes the book on every device and deletes the stored file.
+
+## E-reader (OPDS) feed
+
+KOReader and other e-readers can browse the synced library over Wi-Fi. They cannot sign in to
+Firebase, so they use HTTP Basic auth with an **e-reader password**: Settings → Sync → "Create
+e-reader password" calls `POST /v1/feed`, which returns it once.
+
+- 32 random bytes; only the SHA-256 is stored (`feedTokens/{hash}` in Firestore) with an expiry
+  (`OPDS_LINK_DAYS`, default 90). Creating a new one replaces the old; `POST /v1/feed/revoke` removes it.
+- It travels in the `Authorization` header, not the URL, so it stays out of request logs. The user
+  name is ignored. (`OPDS_ALLOW_URL_TOKEN=1` also accepts `/opds/<token>/` for a reader that can't
+  send Basic auth; off by default because the secret would then be in URLs and logs.)
+- Every bad credential gets the same 401. After 10 failures in 10 minutes an address gets 429, and
+  300 failures a minute across all addresses pauses the feed for a minute (the address is the last
+  `X-Forwarded-For` entry, which Cloud Run sets).
+- The catalogue (`opds.mjs`) lists `book` items whose file is in the bucket. A download is streamed
+  through the service with a real file name (`Content-Disposition`), never redirected, so the
+  e-reader's credentials are not forwarded to another host.
+- A password gives read access to book files and covers only: no notes, journal or progress, no writes.
+- In KOReader: search icon → OPDS catalog → + → name, URL, user name, password.
 
 ## Run locally
 

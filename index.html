@@ -1185,6 +1185,31 @@
                   <button id="sync-now" class="pill-btn" type="button">Sync now</button>
                   <button id="sync-signout" class="pill-btn ghost" type="button">Sign out</button>
                 </div>
+                <div class="sync-feed">
+                  <h4>Read on a Kindle or other e-reader</h4>
+                  <small class="byok-hint">Browse your synced books in KOReader over Wi-Fi. Only books whose file has finished uploading are listed. The password lets anyone who has it download your books (and nothing else) until it expires or you revoke it. Creating a new one replaces the old.</small>
+                  <small id="sync-feed-status" class="byok-hint"></small>
+                  <div class="piper-actions">
+                    <button id="sync-feed-create" class="pill-btn ghost" type="button">Create e-reader password</button>
+                    <button id="sync-feed-revoke" class="pill-btn ghost" type="button" hidden>Revoke</button>
+                  </div>
+                  <div id="sync-feed-result" hidden>
+                    <label class="byok-field"><span>Catalogue URL</span>
+                      <input type="text" id="sync-feed-url" readonly spellcheck="false">
+                    </label>
+                    <label class="byok-field"><span>Username</span>
+                      <input type="text" id="sync-feed-user" readonly spellcheck="false">
+                    </label>
+                    <label class="byok-field"><span>Password (shown once)</span>
+                      <input type="text" id="sync-feed-pass" readonly spellcheck="false">
+                    </label>
+                    <div class="piper-actions">
+                      <button id="sync-feed-copy-url" class="pill-btn" type="button">Copy URL</button>
+                      <button id="sync-feed-copy-pass" class="pill-btn" type="button">Copy password</button>
+                    </div>
+                    <small class="byok-hint">In KOReader: tap the search icon at the top, choose OPDS catalog, tap +, then enter any name, this URL, this username and this password. Tap a book to download it.</small>
+                  </div>
+                </div>
               </div>
             </section>
           </div>
