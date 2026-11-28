@@ -42,7 +42,7 @@ type Theme = 'default' | 'parchment' | 'almond' | 'sage' | 'mist' | 'blush'
   | 'eink' | 'einkwarm'
   | 'flexoki' | 'ayu' | 'catppuccin' | 'everforest' | 'gruvbox' | 'nord' | 'rosepine' | 'solarized';
 type Appearance = 'light' | 'dark';
-type FontKind = 'serif' | 'sans' | 'mono' | 'literata' | 'lora' | 'bitter' | 'atkinson';
+type FontKind = 'serif' | 'sans' | 'mono' | 'helix' | 'literata' | 'lora' | 'bitter' | 'atkinson';
 type LineKind = 'compact' | 'normal' | 'relaxed';
 type MarginKind = 'narrow' | 'medium' | 'wide';
 type MeasureKind = 'full' | 'ch60' | 'ch70' | 'ch80';
@@ -1011,6 +1011,7 @@ const FONT_MAP: Record<FontKind, string> = {
   serif:    "'Newsreader', 'Georgia', serif",
   sans:     "'Inter', -apple-system, sans-serif",
   mono:     "'JetBrains Mono', monospace",
+  helix:    "'Helix Mono', 'JetBrains Mono', monospace",
   // Reading-optimized additions (loaded via the Google Fonts link in index.html)
   literata: "'Literata', 'Georgia', serif",
   lora:     "'Lora', 'Georgia', serif",
@@ -1032,6 +1033,45 @@ const READER_FONTS_HREF =
   '&family=Lora:ital,wght@0,400;0,500;0,600;1,400' +
   '&family=Bitter:ital,wght@0,400;0,500;0,600;1,400' +
   '&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&display=swap';
+
+/* Helix Mono ships with the app (public/fonts/helix-mono). EPUB sections are separate
+   documents that can't see the page's @font-face rules, so, only while Helix Mono is the
+   chosen font, its files are fetched once and handed to each section as FontFace objects. */
+const HELIX_FACES: { file: string; weight: string; style: string }[] = [
+  { file: 'HelixMono-Regular', weight: '400', style: 'normal' },
+  { file: 'HelixMono-Italic', weight: '400', style: 'italic' },
+  { file: 'HelixMono-Bold', weight: '700', style: 'normal' },
+  { file: 'HelixMono-BoldItalic', weight: '700', style: 'italic' },
+];
+let helixBytes: Promise<ArrayBuffer[]> | null = null;
+function helixFontBytes(): Promise<ArrayBuffer[]> {
+  helixBytes ??= Promise.all(HELIX_FACES.map(async f => {
+    const res = await fetch(`${import.meta.env.BASE_URL}fonts/helix-mono/${f.file}.woff2`);
+    if (!res.ok) throw new Error(`Helix Mono: HTTP ${res.status}`);
+    return res.arrayBuffer();
+  })).catch(err => { helixBytes = null; throw err; });
+  return helixBytes;
+}
+function injectHelixFont(doc: Document): void {
+  if (settings.font !== 'helix') return;
+  const view = doc.defaultView as (Window & { FontFace?: typeof FontFace }) | null;
+  if (!view?.FontFace || (doc.documentElement as HTMLElement).dataset.helixFont) return;
+  (doc.documentElement as HTMLElement).dataset.helixFont = '1';
+  helixFontBytes().then(bytes => {
+    bytes.forEach((buf, i) => {
+      const face = new view.FontFace!('Helix Mono', buf.slice(0), { weight: HELIX_FACES[i].weight, style: HELIX_FACES[i].style });
+      void face.load().then(() => doc.fonts.add(face)).catch(() => { /* section went away */ });
+    });
+  }).catch(err => {
+    delete (doc.documentElement as HTMLElement).dataset.helixFont;
+    console.warn('Helix Mono could not be loaded', err);
+  });
+}
+/** Re-run for sections already on screen after the reader picks Helix Mono. */
+function injectHelixFontEverywhere(): void {
+  if (settings.font !== 'helix') return;
+  try { for (const c of (currentRendition as any)?.getContents?.() ?? []) injectHelixFont(c.document); } catch { /* no book open */ }
+}
 
 function injectReaderFonts(doc: Document) {
   try {
@@ -1107,6 +1147,7 @@ function applyReaderSettings() {
   applyComfortSettings();
   el.html.style.setProperty('--reader-line', String(LINE_MAP[settings.line]));
   el.html.style.setProperty('--reader-margin', MARGIN_MAP[settings.margin]);
+  schedulePlacePageOutline();
   el.html.style.setProperty('--reader-size', `${(1.0625 * settings.sizePct / 100).toFixed(3)}rem`);
   el.html.dataset.paragraph = settings.paragraph;
   el.html.dataset.justify = settings.justify ? 'on' : 'off';
@@ -3794,7 +3835,32 @@ async function openTextReader(record: BookRecord, buffer: ArrayBuffer) {
 }
 
 // "On this page": a small outline beside the text of Markdown / text / saved
-// articles, shown only when there is room beside the column.
+// articles, shown only when there is room beside the column. It is placed from the
+// text column's real left edge (not the window centre) so it follows the text when a
+// docked Typography / Contents panel moves it, and it steps aside when there is no room.
+const OUTLINE_WIDTH = 208;
+const OUTLINE_GAP = 24;
+let outlineObserver: ResizeObserver | null = null;
+function placePageOutline(): void {
+  const nav = el.pageOutline;
+  if (nav.hidden) return;
+  const container = currentTextElement;
+  const block = container?.querySelector<HTMLElement>('p, h1, h2, h3, li, blockquote, pre');
+  const col = block?.getBoundingClientRect();
+  if (!col || !col.width) return;
+  // The stage is what the docked panels shrink; stay clear of its edge as well as the window's.
+  const stageLeft = document.querySelector('.reader-stage')?.getBoundingClientRect().left ?? 0;
+  const left = col.left - OUTLINE_GAP - OUTLINE_WIDTH;
+  const room = left >= stageLeft + 16;
+  nav.classList.toggle('no-room', !room);
+  if (room) nav.style.left = `${Math.round(left)}px`;
+}
+function schedulePlacePageOutline(): void { requestAnimationFrame(placePageOutline); }
+window.addEventListener('resize', schedulePlacePageOutline);
+// A panel opening or closing (and its slide) re-places the outline once it has settled.
+new MutationObserver(() => { schedulePlacePageOutline(); window.setTimeout(placePageOutline, 320); })
+  .observe(document.documentElement, { attributes: true, attributeFilter: ['data-drawer', 'data-layout'] });
+
 function renderPageOutline(tree: TocTreeNode[], container: HTMLElement): void {
   el.pageOutline.innerHTML = '';
   const entries: { node: TocTreeNode; depth: number }[] = [];
@@ -3822,6 +3888,14 @@ function renderPageOutline(tree: TocTreeNode[], container: HTMLElement): void {
     el.pageOutline.appendChild(a);
   }
   el.pageOutline.hidden = false;
+  outlineObserver?.disconnect();
+  // The text column is capped and centred, so a docked panel moves it without resizing
+  // it: watch the stage (which the panel does shrink) as well as the container.
+  outlineObserver = new ResizeObserver(schedulePlacePageOutline);
+  outlineObserver.observe(container);
+  const stage = document.querySelector('.reader-stage');
+  if (stage) outlineObserver.observe(stage);
+  schedulePlacePageOutline();
 }
 
 let textSpyQueued = false;
@@ -4078,6 +4152,7 @@ async function openEpubReader(record: BookRecord, buffer: ArrayBuffer) {
   currentRendition.hooks.content.register((contents: any) => {
     const doc: Document = contents.document;
     injectReaderFonts(doc);
+    injectHelixFont(doc);
     doc.addEventListener('selectionchange', () => {
       const sel = doc.getSelection();
       if (!sel || sel.isCollapsed || sel.toString().trim() === '') {
@@ -12877,7 +12952,7 @@ function wire() {
     group.querySelectorAll<HTMLButtonElement>('button').forEach(btn => {
       btn.addEventListener('click', () => {
         const v = btn.dataset.value;
-        if (control === 'font' && v)    settings.font = v as FontKind;
+        if (control === 'font' && v)    { settings.font = v as FontKind; injectHelixFontEverywhere(); }
         if (control === 'line' && v)    settings.line = v as LineKind;
         if (control === 'margin' && v)  settings.margin = v as MarginKind;
         if (control === 'measure' && v) settings.measure = v as MeasureKind;
